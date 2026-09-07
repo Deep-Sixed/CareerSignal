@@ -1,5 +1,6 @@
 """Normalize supplied messages without fetching mail, links, or attachments."""
 
+import re
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
@@ -8,6 +9,11 @@ from html.parser import HTMLParser
 from recruiting.models import fingerprint
 
 MAX_MESSAGE_BYTES = 2_000_000
+
+# Bulk email hides preheaders with an inline style far more often than with the hidden
+# attribute. Only declared inline styles are read: no stylesheet is fetched, no CSS is
+# evaluated, and cascade/specificity is deliberately not modelled.
+HIDDEN_STYLE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b", re.I)
 
 
 def normalize_text(value: str) -> str:
@@ -41,6 +47,14 @@ class _VisibleHTML(HTMLParser):
     }
     JOB_LINK_TEXT = {"apply", "apply now", "view job"}
 
+    @classmethod
+    def _conceals(cls, attrs) -> bool:
+        return (
+            "hidden" in attrs
+            or attrs.get("aria-hidden") == "true"
+            or bool(HIDDEN_STYLE.search(attrs.get("style") or ""))
+        )
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts = []
@@ -53,7 +67,7 @@ class _VisibleHTML(HTMLParser):
             if tag not in self.VOID:
                 self.hidden.append(tag)
             return
-        if tag in self.SKIP or "hidden" in attrs or attrs.get("aria-hidden") == "true":
+        if tag in self.SKIP or self._conceals(attrs):
             if tag not in self.VOID:
                 self.hidden.append(tag)
             return
@@ -85,6 +99,13 @@ class _VisibleHTML(HTMLParser):
     def handle_data(self, data):
         if not self.hidden:
             self.parts.append(data)
+
+    def close(self):
+        super().close()
+        if self.hidden:
+            # Refuse to guess where the author meant to close it: silently treating the
+            # remainder as hidden would drop real jobs and report an empty message.
+            raise ValueError(f"Malformed HTML: unterminated <{self.hidden[0]}> conceals the rest")
 
 
 def html_text(value: str) -> str:

@@ -144,3 +144,46 @@ def test_empty_and_oversized_messages_rejected():
         Message("", text="body")
     with pytest.raises(ValueError):
         Message("local", text="a" * 2_000_001)
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        "display:none",
+        "DISPLAY: NONE",
+        "display:none !important",
+        "max-height:0;display:none;overflow:hidden",
+        "visibility:hidden",
+        "visibility: hidden;",
+    ],
+)
+def test_inline_hidden_preheader_cannot_contaminate_a_visible_job(style):
+    """Bulk email hides preheaders with inline styles, not the hidden attribute."""
+    text = html_text(
+        f'<div style="{style}">Title: Preheader Junk</div>'
+        "<h2>Engineer</h2><p>Company: Example Company</p>"
+        '<a href="https://jobs.example.com/1">Apply</a>'
+    )
+    assert "Preheader Junk" not in text
+    items = extract(text)
+    assert len(items) == 1 and items[0].opportunity
+    assert items[0].opportunity.title == "Engineer"
+    assert items[0].opportunity.url == "https://jobs.example.com/1"
+
+
+def test_inline_style_that_does_not_hide_is_left_visible():
+    assert "Shown" in html_text('<div style="color:red;margin:0">Shown</div>')
+
+
+def test_visible_content_after_an_inline_hidden_block_survives():
+    assert html_text('<div style="display:none">Secret</div><p>Visible</p>') == "Visible"
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["<div hidden>", '<span aria-hidden="true">', '<div style="display:none">', "<script>"],
+)
+def test_unterminated_hidden_container_is_explicit_malformed_input(opening):
+    """Silently hiding the remainder would drop real jobs and report an empty message."""
+    with pytest.raises(ValueError, match="Malformed HTML"):
+        html_text(opening + "Swallowed<h2>Engineer</h2><p>Company: Example Company</p>")

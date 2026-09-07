@@ -66,3 +66,15 @@ def test_existing_baseline_database_upgrades_without_losing_reviews(tmp_path, mo
     store.verify_contract(path)
     with store.connection(path) as conn:
         assert conn.execute("SELECT id FROM messages").fetchall() == [("existing",)]
+
+
+def test_malformed_hidden_container_fails_before_any_intake(tmp_path):
+    """A message that cannot be interpreted must not leave partial evidence behind."""
+    flow = workflow(tmp_path / "db")
+    message = Message("synthetic-mailbox", "unterminated", html="<div hidden>lost<h2>Engineer</h2>")
+    with pytest.raises(ValueError, match="Malformed HTML"):
+        flow.intake_message(message)
+    with store.connection(flow.repository.path) as conn:
+        for table in ("messages", "message_sources", "extraction_items", "reviews"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    assert flow.provider.calls == 0
