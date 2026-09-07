@@ -10,6 +10,13 @@ from pathlib import Path
 
 import libsql
 
+# Writers keep a short reservation so transaction() owns the retry policy. Journal-mode
+# negotiation is a startup step and needs its own budget: changing it takes an exclusive
+# lock that concurrent first starts genuinely contend for.
+BUSY_TIMEOUT_MS = 20
+STARTUP_BUSY_TIMEOUT_MS = 250
+STARTUP_TIMEOUT = 5.0
+
 
 def database_path(path=None) -> Path:
     return (
@@ -19,19 +26,42 @@ def database_path(path=None) -> Path:
     )
 
 
+def _contended(exc) -> bool:
+    return any(s in str(exc).lower() for s in ("locked", "busy"))
+
+
+def _negotiate_wal(conn, timeout):
+    """Wait out other initializers instead of failing the first start of a fresh database."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if mode == "wal":
+                return
+            detail = f"journal mode is {mode}"
+        except Exception as exc:
+            if not _contended(exc):
+                raise
+            detail = str(exc)
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"WAL unavailable: {detail}")
+        time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+
 @contextmanager
 def connection(path=None):
     target = database_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = libsql.connect(str(target), isolation_level=None)
     try:
-        conn.execute("PRAGMA busy_timeout=20")
+        conn.execute(f"PRAGMA busy_timeout={STARTUP_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")
         if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise RuntimeError("Foreign keys unavailable")
-        if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
-            raise RuntimeError("WAL unavailable")
+        _negotiate_wal(conn, STARTUP_TIMEOUT)
+        # Restore the short reservation before the caller can open a transaction.
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         yield conn
     finally:
         conn.close()
@@ -49,7 +79,7 @@ def transaction(conn, timeout=1.0):
             conn.execute("BEGIN IMMEDIATE")
             break
         except Exception as exc:
-            if not any(s in str(exc).lower() for s in ("locked", "busy")):
+            if not _contended(exc):
                 raise
             if time.monotonic() >= deadline:
                 raise TimeoutError("Write reservation exhausted") from exc
