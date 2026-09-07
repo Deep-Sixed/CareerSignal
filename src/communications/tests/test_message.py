@@ -3,6 +3,68 @@ from email.message import EmailMessage
 import pytest
 
 from communications.message import Message, html_text
+from recruiting.extraction import extract
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    ],
+)
+@pytest.mark.parametrize("attribute", ['aria-hidden="true"', "hidden"])
+def test_hidden_void_element_does_not_hide_following_job(tag, attribute):
+    html = (
+        f"<{tag} {attribute}>"
+        "<h2>Engineer</h2><p>Company: Example Company</p>"
+        '<a href="https://jobs.example.com/123">Apply</a>'
+    )
+    items = extract(html_text(html))
+    assert len(items) == 1 and items[0].opportunity
+    assert items[0].opportunity.url == "https://jobs.example.com/123"
+
+
+@pytest.mark.parametrize("link_text", ["Apply", "Apply now", "View job", "<span>Apply</span> now"])
+def test_navigation_links_do_not_conflict_with_job_link(link_text):
+    html = (
+        '<nav><a href="https://example.com/home">Home</a></nav>'
+        "<h2>Engineer</h2><p>Company: Example Company</p>"
+        '<a href="https://example.com/company">Company website</a>'
+        f'<a href="https://jobs.example.com/123">{link_text}</a>'
+        '<footer><a href="https://example.com/preferences">Preferences</a></footer>'
+    )
+    items = extract(html_text(html))
+    assert len(items) == 1 and items[0].opportunity
+    assert items[0].opportunity.url == "https://jobs.example.com/123"
+
+
+def test_unrecognized_link_cannot_supply_missing_job_url():
+    items = extract(
+        html_text(
+            "<h2>Engineer</h2><p>Company: Example Company</p>"
+            '<a href="https://example.com/home">Home</a>'
+        )
+    )
+    assert items[0].opportunity is None
+    assert items[0].reason == "Missing required fields: url"
+
+
+def test_nested_hidden_container_still_hides_content_and_then_resumes():
+    text = html_text("<div hidden><img hidden><span>Secret</span></div><p>Visible</p>")
+    assert text == "Visible"
 
 
 def test_normalization_and_stable_namespace_identity():

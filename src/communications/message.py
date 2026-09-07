@@ -23,6 +23,23 @@ class _VisibleHTML(HTMLParser):
 
     BLOCKS = {"p", "div", "li", "article", "section", "br", "tr", "h1", "h2", "h3", "h4"}
     SKIP = {"script", "style", "head", "template"}
+    VOID = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+    JOB_LINK_TEXT = {"apply", "apply now", "view job"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -33,11 +50,12 @@ class _VisibleHTML(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if self.hidden:
-            if tag not in {"br", "img", "meta", "link", "input", "hr"}:
+            if tag not in self.VOID:
                 self.hidden.append(tag)
             return
         if tag in self.SKIP or "hidden" in attrs or attrs.get("aria-hidden") == "true":
-            self.hidden.append(tag)
+            if tag not in self.VOID:
+                self.hidden.append(tag)
             return
         if tag in self.BLOCKS:
             self.parts.append("\n")
@@ -59,7 +77,7 @@ class _VisibleHTML(HTMLParser):
                 prefix = "".join(self.parts[:start]).rsplit("\n", 1)[-1].strip().lower()
                 if prefix in {"url:", "apply:", "job url:"}:
                     self.parts[start:] = [url]
-                else:
+                elif " ".join("".join(self.parts[start:]).split()).casefold() in self.JOB_LINK_TEXT:
                     self.parts.extend(["\nURL: ", url, "\n"])
         if tag in self.BLOCKS:
             self.parts.append("\n")

@@ -25,6 +25,8 @@ Apply: https://jobs.example.com/roles/2
 
 HTML preserves visible labels and anchor targets, decodes entities, and turns h2–h4 headings into titles. Script/style/head/template contents and explicitly hidden elements are ignored. Labeled Apply/URL anchors use their href. No HTML is executed and no URLs, tracking redirects, external stylesheets or attachments are fetched. This is a limited structural extractor, not a browser renderer or a universal job-board parser. Unlabeled prose, unfamiliar layouts, and conflicting fields produce reviewable diagnostics rather than guessed opportunities. Headers/navigation may produce additional rejected items; provider-specific templates need independent fixtures before support is claimed.
 
+Only anchors following an explicit `Apply:`, `URL:`, or `Job URL:` label, or whose normalized visible text is exactly `Apply`, `Apply now`, or `View job`, supply job URLs. Other hyperlinks retain their visible text without promoting their targets into URL fields. Hidden void elements are skipped without opening hidden nesting state; subsequent visible content remains available.
+
 Each job block is independent. A malformed block does not discard valid siblings. Conflicting versions of the same canonical URL in one message are rejected together; identical duplicates share the existing opportunity and retain separate extraction-item evidence.
 
 ## Identity and MIME
