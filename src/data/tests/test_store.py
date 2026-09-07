@@ -40,7 +40,7 @@ except Exception as exc:
 
 def test_migration_repeat_contract_and_rollback(tmp_path):
     path = tmp_path / "db"
-    assert store.migrate(path) == ["0001_baseline.sql"]
+    assert store.migrate(path) == [p.name for p in store.migration_files()]
     assert store.migrate(path) == []
     store.verify_contract(path)
     with store.connection(path) as conn:
@@ -59,7 +59,7 @@ def test_failed_migration_is_atomic_and_upgrade_works(tmp_path, monkeypatch):
     path = tmp_path / "db"
     store.migrate(path)
     original = store.migration_files()
-    upgrade = tmp_path / "0002_upgrade.sql"
+    upgrade = tmp_path / "0003_upgrade.sql"
     upgrade.write_text("CREATE TABLE upgrade_marker(id INTEGER);\n-- statement\nINVALID SQL")
     monkeypatch.setattr(store, "migration_files", lambda: original + [upgrade])
     with pytest.raises(Exception):
@@ -68,7 +68,7 @@ def test_failed_migration_is_atomic_and_upgrade_works(tmp_path, monkeypatch):
         assert not conn.execute(
             "SELECT name FROM sqlite_master WHERE name='upgrade_marker'"
         ).fetchall()
-        assert len(conn.execute("SELECT * FROM schema_migrations").fetchall()) == 1
+        assert len(conn.execute("SELECT * FROM schema_migrations").fetchall()) == len(original)
     upgrade.write_text("CREATE TABLE upgrade_marker(id INTEGER)")
     assert store.migrate(path) == [upgrade.name]
     store.verify_contract(path)

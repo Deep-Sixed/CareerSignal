@@ -12,7 +12,9 @@ class Repository:
         self.path = path
         migrate(path)
 
-    def ingest(self, message_id: str, digest: str, reviews: list[Review]) -> list[str]:
+    def ingest(
+        self, message_id: str, digest: str, reviews: list[Review], *, source=None, items=()
+    ) -> list[str]:
         if not message_id.strip():
             raise ValueError("Message ID is required")
         with connection(self.path) as conn, transaction(conn):
@@ -72,7 +74,42 @@ class Repository:
                     (message_id, job.key, review_id),
                 )
                 result.add(review_id)
+            if source is not None:
+                conn.execute(
+                    "INSERT INTO message_sources VALUES (?,?,?,?,?,?,?)",
+                    (
+                        message_id,
+                        source["namespace"],
+                        source["external_id"],
+                        source["sender"],
+                        source["subject"],
+                        source["format"],
+                        source["parser_version"],
+                    ),
+                )
+                for item in items:
+                    job_key = item.opportunity.key if item.opportunity else None
+                    review_key = (
+                        conn.execute(
+                            "SELECT current_review FROM opportunities WHERE id=?", (job_key,)
+                        ).fetchone()[0]
+                        if job_key
+                        else None
+                    )
+                    conn.execute(
+                        "INSERT INTO extraction_items VALUES (?,?,?,?,?,?)",
+                        (message_id, item.index, item.excerpt, item.reason, job_key, review_key),
+                    )
             return sorted(result)
+
+    def extraction_evidence(self, message_id):
+        """Return persisted diagnostics and exact per-item review links, including replay."""
+        with connection(self.path) as conn:
+            return conn.execute(
+                "SELECT item_index,excerpt,reason,opportunity_id,review_id "
+                "FROM extraction_items WHERE message_id=? ORDER BY item_index",
+                (message_id,),
+            ).fetchall()
 
     def review(self, review_id):
         with connection(self.path) as conn:

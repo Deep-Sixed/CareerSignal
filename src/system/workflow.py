@@ -1,7 +1,9 @@
 """Compose pure recruiting rules, real storage and controlled draft actions."""
 
 from communications.controlled import parse_message
+from communications.message import Message
 from data.repository import Repository
+from recruiting.extraction import PARSER_VERSION, extract
 from recruiting.models import Profile, evaluate, fingerprint
 from recruiting.ports import DraftProvider
 
@@ -9,6 +11,24 @@ from recruiting.ports import DraftProvider
 class Workflow:
     def __init__(self, repository: Repository, provider: DraftProvider, profile: Profile):
         self.repository, self.provider, self.profile = repository, provider, profile
+
+    def intake_message(self, message: Message) -> list[str]:
+        items = extract(message.content)
+        unique = {item.opportunity.key: item.opportunity for item in items if item.opportunity}
+        return self.repository.ingest(
+            message.key,
+            message.digest,
+            [evaluate(job, self.profile) for job in unique.values()],
+            source={
+                "namespace": message.namespace,
+                "external_id": message.external_id,
+                "sender": message.sender,
+                "subject": message.subject,
+                "format": message.format,
+                "parser_version": PARSER_VERSION,
+            },
+            items=items,
+        )
 
     def intake(self, message_id: str, body: str) -> list[str]:
         jobs = parse_message(body)

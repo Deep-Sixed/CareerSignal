@@ -1,6 +1,6 @@
 # Baseline verification
 
-Local environment: Windows, CPython 3.13.13. Status before initial publication: local checks passed; hosted CI pending.
+Local environment: Windows, CPython 3.13.13. The initial root commit d5ef123fc69cff36269be3b4b822d376c8766432 passed all 11 hosted jobs in run 34112538861. PR #1 extends that baseline; its own hosted checks must pass independently before merge.
 
 | Gate | Evidence |
 |---|---|
@@ -14,6 +14,10 @@ Local environment: Windows, CPython 3.13.13. Status before initial publication: 
 Reproduce checks using README commands. Hosted CI repeats the gates across 11 OS/Python combinations: Linux/macOS 3.11–3.14 and Windows 3.11–3.13. Windows/Python 3.14 remains the explicit libSQL exception. Local success does not establish results on other operating systems; consult the actual GitHub run after publication.
 
 ## Limits
+
+After independent review 5134142759, the HTML parser was corrected to avoid hidden-state nesting for void elements and to promote only explicitly job-related links. Local regression coverage now totals 86 passing tests, including all supported void elements with hidden/aria-hidden attributes, nested hidden containers, navigation/footer links around valid jobs, supported apply-link text, and missing-URL rejection for unrelated links. A later pass addressed inline hidden styles: `display:none` and `visibility:hidden` on an element's own `style` attribute now conceal it, and a hidden container left unterminated at end of input is rejected as malformed rather than swallowing the remaining jobs. Regressions cover both, including that a non-hiding inline style stays visible and that malformed HTML leaves no partial intake.
+
+PR #1 local validation: 36 tests pass, including text/HTML extraction, MIME alternatives and malformed input, namespace identity, per-job diagnostics/provenance, replay, no implicit drafts, and upgrade from the original schema. Ruff, tree/privacy checks and secret detection pass. Installed-wheel verification additionally ingests a synthetic two-job RFC email twice and confirms two opportunities, two evidence records and zero draft intents. No historical source was inspected or copied for this feature.
 
 This is a controlled application foundation, not completed live Gmail functionality. Inputs are structured synthetic jobs; scoring is a transparent configured skill ratio with a location eligibility gate. The caller records an explicit decision against an immutable review version. There is no web authentication layer or sending operation. The demo simulates the human decision step and labels its output accordingly.
 
