@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "careersignal"
+version = "0.1.0"
+description = "Local, human-approved recruiting workflow"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = ["libsql==0.1.11"]
+
+[project.scripts]
+careersignal = "system.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "ruff>=0.11,<1", "build>=1.2,<2", "detect-secrets==1.5.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recruiting", "src/communications", "src/data", "src/system"]
+exclude = ["**/tests/**", "**/__pycache__/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["src"]
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

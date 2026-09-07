@@ -1,0 +1,29 @@
+name: CareerSignal baseline
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.11', '3.12', '3.13', '3.14']
+        exclude:
+          # libsql 0.1.11 does not support Windows/Python 3.14.
+          - os: windows-latest
+            python: '3.14'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run python ops/tools/verify_tree.py
+      - run: uv run python ops/tools/verify_secrets.py
+      - run: uv run pytest -q
+      - run: uv run python ops/tools/verify_wheel.py
