@@ -46,6 +46,37 @@ def main():
         run("-m", "system.cli", "verify", "--db", str(folder / "blank.db"))
         run("-m", "system.cli", "demo", "--db", str(folder / "golden.db"))
         run("-m", "system.cli", "demo", "--db", str(folder / "golden.db"))
+        raw = (
+            "Message-ID: <wheel-synthetic@example.com>\nContent-Type: text/plain; charset=utf-8\n\n"
+            "Role: Engineer\nCompany: Example Company\nLocation: remote\nSkills: python\n"
+            "URL: https://jobs.example.com/1\nRole: Analyst\nCompany: Example Company\n"
+            "URL: https://jobs.example.com/2\n"
+        )
+        message = folder / "synthetic.eml"
+        message.write_text(raw, encoding="utf-8")
+        for _ in range(2):
+            run(
+                "-m",
+                "system.cli",
+                "ingest",
+                "--db",
+                str(folder / "extraction.db"),
+                "--message",
+                str(message),
+                "--namespace",
+                "wheel-synthetic",
+                "--skill",
+                "python",
+            )
+        run(
+            "-c",
+            "from data.store import connection; "
+            "c=connection('extraction.db'); db=c.__enter__(); "
+            "assert db.execute('SELECT count(*) FROM opportunities').fetchone()[0]==2; "
+            "assert db.execute('SELECT count(*) FROM extraction_items').fetchone()[0]==2; "
+            "assert db.execute('SELECT count(*) FROM draft_intents').fetchone()[0]==0; "
+            "c.__exit__(None,None,None)",
+        )
     print(
         "PASS: installed wheel, dependency consistency, resource discovery, golden workflow and replay"
     )

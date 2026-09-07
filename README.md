@@ -2,7 +2,7 @@
 
 CareerSignal is a local recruiting application foundation: deduplicate opportunities, explain eligibility and fit, require explicit approval, and record controlled drafts and their audit trail in libSQL.
 
-The baseline uses structured synthetic job-alert messages and an in-memory draft provider. It does not read Gmail, send email, parse arbitrary alert HTML, or submit applications. Live Gmail and broader recruiting coverage are later work.
+The application accepts structured opportunities and supplied text/HTML recruiting messages with explicit job fields. It uses an in-memory draft provider and does not read Gmail, send email, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations.
 
 ## Run locally
 
