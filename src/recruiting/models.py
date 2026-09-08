@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from recruiting.location import AMBIGUOUS, Location
+
 
 def fingerprint(value: object) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -110,6 +112,28 @@ class Profile:
         object.__setattr__(
             self, "locations", tuple(sorted({clean(s).casefold() for s in self.locations}))
         )
+        if not self.locations:
+            raise ValueError("At least one accepted location is required")
+        # A configured location whose work mode is unstated could never match anything, which
+        # would silently reject every opportunity. Say so at configuration time instead.
+        unusable = [s for s in self.locations if not Location.parse(s).usable]
+        if unusable:
+            raise ValueError(
+                "Accepted locations must state a work mode (remote, hybrid or onsite): "
+                + ", ".join(unusable)
+            )
+        # Eligibility reads exclusions from the posting, not from the configuration, so an
+        # excluded region here would be silently ignored.
+        negative = [s for s in self.locations if Location.parse(s).excluded]
+        if negative:
+            raise ValueError(
+                "Accepted locations cannot exclude a region; state the region to accept: "
+                + ", ".join(negative)
+            )
+
+    @property
+    def accepted_locations(self) -> tuple[Location, ...]:
+        return tuple(Location.parse(s) for s in self.locations)
 
 
 @dataclass(frozen=True)
@@ -129,17 +153,23 @@ class Review:
 def evaluate(job: Opportunity, profile: Profile) -> Review:
     matched = set(job.skills) & set(profile.skills)
     score = int(100 * len(matched) / len(profile.skills))
-    eligible = bool(job.location) and job.location in profile.locations
+    stated = Location.parse(job.location)
+    eligible = any(accepted.accepts(stated) for accepted in profile.accepted_locations)
     reasons = [
         f"Matched {len(matched)}/{len(profile.skills)} configured skills",
         "Matched: " + (", ".join(sorted(matched)) or "none"),
         "Missing: " + (", ".join(sorted(set(profile.skills) - matched)) or "none"),
     ]
+    reasons.append(f"Location read as {stated.describe()}")
     reasons.append(
         "Location eligible"
         if eligible
         else "Location missing"
-        if not job.location
+        if not stated.stated
+        else "Location states more than one work mode; not resolved automatically"
+        if stated.work_mode == AMBIGUOUS
+        else "Location work mode not stated; eligibility needs an explicit remote, hybrid or onsite"
+        if not stated.usable
         else "Location outside configured eligibility"
     )
     advances = eligible and score > profile.threshold
