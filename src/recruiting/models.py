@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from recruiting.location import UNKNOWN, Location
+from recruiting.location import AMBIGUOUS, Location
 
 
 def fingerprint(value: object) -> str:
@@ -116,7 +116,7 @@ class Profile:
             raise ValueError("At least one accepted location is required")
         # A configured location whose work mode is unstated could never match anything, which
         # would silently reject every opportunity. Say so at configuration time instead.
-        unusable = [s for s in self.locations if Location.parse(s).work_mode == UNKNOWN]
+        unusable = [s for s in self.locations if not Location.parse(s).usable]
         if unusable:
             raise ValueError(
                 "Accepted locations must state a work mode (remote, hybrid or onsite): "
@@ -158,8 +158,10 @@ def evaluate(job: Opportunity, profile: Profile) -> Review:
         if eligible
         else "Location missing"
         if not stated.stated
+        else "Location states more than one work mode; not resolved automatically"
+        if stated.work_mode == AMBIGUOUS
         else "Location work mode not stated; eligibility needs an explicit remote, hybrid or onsite"
-        if stated.work_mode == UNKNOWN
+        if not stated.usable
         else "Location outside configured eligibility"
     )
     advances = eligible and score > profile.threshold

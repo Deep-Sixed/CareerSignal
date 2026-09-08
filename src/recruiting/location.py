@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 
 UNKNOWN = "unknown"
+# More than one work mode stated and not negated. Never eligible: resolving it by
+# the search order would silently pick one meaning over another.
+AMBIGUOUS = "ambiguous"
 
 # Phrases naming a work mode, longest first so "on site" wins before "on" could match anything.
 # Deliberately small: an unrecognized phrase leaves the mode unstated and therefore ineligible,
@@ -35,8 +38,14 @@ MODE_QUALIFIERS = frozenset(
         "in",
         "from",
         "within",
+        "or",
+        "and",
+        "option",
+        "options",
     }
 )
+# A work mode immediately preceded by one of these is being excluded, not offered.
+NEGATIONS = frozenset({"not", "no", "non", "never", "excluding", "without", "zero"})
 # Region synonyms are an allowlist for the same reason the tracking parameters are: anything
 # unlisted stays as the literal place, so two different places never merge.
 REGION_ALIASES = {
@@ -75,26 +84,38 @@ class Location:
     @classmethod
     def parse(cls, text: str) -> "Location":
         words = _tokens(" ".join(str(text).split()).casefold())
-        mode = UNKNOWN
+        offered, consumed = set(), set()
         for name, phrases in WORK_MODE_PHRASES:
             for phrase in phrases:
                 needle = phrase.split()
-                index = _find(words, needle)
-                if index is not None:
-                    mode, words = name, words[:index] + words[index + len(needle) :]
-                    break
-            if mode != UNKNOWN:
-                break
-        remainder = " ".join(w for w in words if w not in MODE_QUALIFIERS)
+                for start in _find_all(words, needle):
+                    consumed.update(range(start, start + len(needle)))
+                    negated = start and words[start - 1] in NEGATIONS
+                    if negated:
+                        consumed.add(start - 1)
+                    else:
+                        offered.add(name)
+        # Every stated mode was negated, none was stated, or several were offered at once.
+        mode = offered.pop() if len(offered) == 1 else AMBIGUOUS if offered else UNKNOWN
+        remainder = " ".join(
+            word
+            for index, word in enumerate(words)
+            if index not in consumed and word not in MODE_QUALIFIERS and word not in NEGATIONS
+        )
         return cls(mode, REGION_ALIASES.get(remainder, remainder))
 
     @property
     def stated(self) -> bool:
         return self.work_mode != UNKNOWN or bool(self.region)
 
+    @property
+    def usable(self) -> bool:
+        """Whether this names exactly one work mode, which eligibility requires."""
+        return self.work_mode not in (UNKNOWN, AMBIGUOUS)
+
     def accepts(self, job: "Location") -> bool:
         """Whether this configured location covers a job's stated location."""
-        if job.work_mode == UNKNOWN or job.work_mode != self.work_mode:
+        if not job.usable or not self.usable or job.work_mode != self.work_mode:
             return False
         # A configured location without a region does not constrain one. A configured region
         # excludes a different region, but still admits a posting that states none; the review
@@ -102,6 +123,9 @@ class Location:
         return not self.region or job.region in ("", self.region)
 
     def describe(self) -> str:
+        if self.work_mode == AMBIGUOUS:
+            suffix = f" / {self.region}" if self.region else ""
+            return f"more than one work mode stated{suffix}"
         if not self.stated:
             return "not stated"
         mode = self.work_mode if self.work_mode != UNKNOWN else "work mode not stated"
@@ -110,8 +134,7 @@ class Location:
         return f"{mode} / {self.region}"
 
 
-def _find(words: list[str], needle: list[str]) -> int | None:
+def _find_all(words: list[str], needle: list[str]):
     for start in range(len(words) - len(needle) + 1):
         if words[start : start + len(needle)] == needle:
-            return start
-    return None
+            yield start

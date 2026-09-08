@@ -183,3 +183,31 @@ def test_unusable_location_configuration_fails_loudly():
     assert Profile(("python",), ("onsite Philadelphia",)).accepted_locations[0].region == (
         "philadelphia"
     )
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "not remote",
+        "no remote",
+        "hybrid - not remote",
+        "onsite only - no remote",
+        "onsite (no remote option)",
+        "remote or hybrid",
+    ],
+)
+def test_negated_or_ambiguous_postings_are_not_eligible_end_to_end(location):
+    review = evaluate(job(location=location), REMOTE_PROFILE)
+    assert review.eligible is False and review.advances is False
+
+
+def test_reasons_separate_ambiguity_from_a_missing_location():
+    ambiguous = evaluate(job(location="remote or hybrid"), REMOTE_PROFILE).reasons
+    assert "Location read as more than one work mode stated" in ambiguous
+    assert "Location states more than one work mode; not resolved automatically" in ambiguous
+    assert "Location missing" not in ambiguous
+
+
+def test_a_profile_cannot_be_configured_with_an_ambiguous_location():
+    with pytest.raises(ValueError, match="must state a work mode"):
+        Profile(("python",), ("remote or hybrid",))

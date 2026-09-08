@@ -2,7 +2,7 @@
 
 import pytest
 
-from recruiting.location import UNKNOWN, Location
+from recruiting.location import AMBIGUOUS, UNKNOWN, Location
 
 DISTINCT = [
     ("remote US", "remote Canada"),
@@ -17,6 +17,9 @@ DISTINCT = [
     ("Philadelphia", "remote"),
     ("hybrid Philadelphia", "hybrid New York"),
     ("remote US", "onsite US"),
+    ("remote", "not remote"),
+    ("remote", "no remote"),
+    ("remote", "remote or hybrid"),
 ]
 
 
@@ -59,7 +62,7 @@ EQUIVALENT = [
     ],
     ["remote Canada", "Remote - Canada", "remote (canada)"],
     ["remote Europe", "remote - EU", "Remote (Europe)"],
-    ["hybrid", "Hybrid", "HYBRID"],
+    ["hybrid", "Hybrid", "HYBRID", "hybrid - not remote", "hybrid, no remote"],
     ["onsite", "on-site", "on site", "Onsite", "in office", "in-office"],
     ["", "   "],
 ]
@@ -128,3 +131,49 @@ def test_a_trailing_period_is_trimmed_without_breaking_initialisms():
     assert Location.parse("Remote.") == Location.parse("remote")
     assert Location.parse("Remote - U.S.") == Location.parse("remote US")
     assert Location.parse("onsite Philadelphia.") == Location.parse("onsite Philadelphia")
+
+
+NEGATED = [
+    "not remote",
+    "no remote",
+    "non-remote",
+    "never remote",
+    "hybrid - not remote",
+    "onsite only, no remote",
+    "onsite only - no remote",
+    "onsite (no remote option)",
+    "excluding remote",
+    "without remote",
+]
+
+
+@pytest.mark.parametrize("posting", NEGATED)
+def test_a_negated_work_mode_is_never_offered(posting):
+    """Positive token matching read 'not remote' as remote, an eligible false positive."""
+    assert not Location.parse("remote").accepts(Location.parse(posting))
+    assert Location.parse(posting).work_mode != "remote"
+
+
+def test_negation_leaves_any_other_stated_mode_intact():
+    assert Location.parse("hybrid - not remote") == Location("hybrid", "")
+    assert Location.parse("onsite only, no remote") == Location("onsite", "")
+    assert Location.parse("onsite (no remote option)") == Location("onsite", "")
+    # Negating the only stated mode leaves nothing stated rather than its opposite.
+    assert Location.parse("not remote") == Location(UNKNOWN, "")
+
+
+@pytest.mark.parametrize(
+    "posting", ["remote or hybrid", "hybrid or onsite", "remote / onsite", "remote and hybrid"]
+)
+def test_several_offered_modes_fail_closed_rather_than_picking_one(posting):
+    """Search order must not silently decide which of two stated meanings wins."""
+    parsed = Location.parse(posting)
+    assert parsed.work_mode == AMBIGUOUS and not parsed.usable
+    for configured in ("remote", "hybrid", "onsite"):
+        assert not Location.parse(configured).accepts(parsed)
+
+
+def test_ambiguity_is_described_distinctly_from_an_absent_location():
+    assert Location.parse("remote or hybrid").describe() == "more than one work mode stated"
+    assert Location.parse("").describe() == "not stated"
+    assert Location.parse("remote or hybrid").stated
