@@ -144,6 +144,18 @@ NEGATED = [
     "onsite (no remote option)",
     "excluding remote",
     "without remote",
+    # Denial after the mode, or separated from it by filler. Prefix-only matching offered
+    # remote for every one of these.
+    "remote not available",
+    "remote is not available",
+    "remote is currently not available",
+    "remote not an option",
+    "remote not offered",
+    "remote not possible",
+    "remote unavailable",
+    "remote unsupported",
+    "no option for remote",
+    "no remote option",
 ]
 
 
@@ -177,3 +189,26 @@ def test_ambiguity_is_described_distinctly_from_an_absent_location():
     assert Location.parse("remote or hybrid").describe() == "more than one work mode stated"
     assert Location.parse("").describe() == "not stated"
     assert Location.parse("remote or hybrid").stated
+
+
+NOT_A_MODE_DENIAL = [
+    # The negation denies a region, not the work mode; the mode stays offered.
+    ("remote, not Canada", "remote"),
+    ("remote but not Canada", "remote"),
+    ("remote US, no travel", "remote"),
+    # The denial belongs to the other stated mode and must not reach across it.
+    ("onsite only, no remote", "onsite"),
+    ("onsite (no remote option)", "onsite"),
+    ("hybrid, remote not available", "hybrid"),
+]
+
+
+@pytest.mark.parametrize(("posting", "configured"), NOT_A_MODE_DENIAL)
+def test_a_denial_does_not_reach_past_what_it_denies(posting, configured):
+    """Over-negating would trade a false positive for a false negative."""
+    assert Location.parse(configured).accepts(Location.parse(posting))
+
+
+def test_a_denial_never_infers_the_opposite_mode():
+    for posting in ("remote not available", "remote unavailable", "no option for remote"):
+        assert Location.parse(posting) == Location(UNKNOWN, "")

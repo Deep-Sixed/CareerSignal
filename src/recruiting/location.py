@@ -42,10 +42,26 @@ MODE_QUALIFIERS = frozenset(
         "and",
         "option",
         "options",
+        "for",
+        "is",
+        "are",
+        "be",
+        "currently",
     }
 )
-# A work mode immediately preceded by one of these is being excluded, not offered.
+# A work mode denied by one of these is being excluded, not offered.
 NEGATIONS = frozenset({"not", "no", "non", "never", "excluding", "without", "zero"})
+# A negation only denies the mode when it is about the mode's availability. "remote, not
+# Canada" denies a region and must leave the mode offered, so a following negation counts
+# only when one of these words is near it.
+AVAILABILITY = frozenset(
+    {"available", "option", "options", "offered", "possible", "supported", "eligible", "allowed"}
+)
+# Denials that need no separate negation token.
+DENIALS = frozenset({"unavailable", "unsupported"})
+# Skipped when looking either side of a mode for a denial; never treated as a place.
+CONNECTIVES = frozenset({"was", "were", "been", "the", "a", "an", "this", "that", "but"})
+SKIPPABLE = MODE_QUALIFIERS | CONNECTIVES
 # Region synonyms are an allowlist for the same reason the tracking parameters are: anything
 # unlisted stays as the literal place, so two different places never merge.
 REGION_ALIASES = {
@@ -84,23 +100,32 @@ class Location:
     @classmethod
     def parse(cls, text: str) -> "Location":
         words = _tokens(" ".join(str(text).split()).casefold())
-        offered, consumed = set(), set()
-        for name, phrases in WORK_MODE_PHRASES:
-            for phrase in phrases:
-                needle = phrase.split()
-                for start in _find_all(words, needle):
-                    consumed.update(range(start, start + len(needle)))
-                    negated = start and words[start - 1] in NEGATIONS
-                    if negated:
-                        consumed.add(start - 1)
-                    else:
-                        offered.add(name)
+        occurrences = [
+            (name, start, start + len(phrase.split()))
+            for name, phrases in WORK_MODE_PHRASES
+            for phrase in phrases
+            for start in _find_all(words, phrase.split())
+        ]
+        spoken = {index for _, start, end in occurrences for index in range(start, end)}
+        offered, consumed = set(), set(spoken)
+        for name, start, end in occurrences:
+            # A denial never reaches across another stated mode: in "onsite (no remote
+            # option)" the denial belongs to remote, and onsite is still offered.
+            others = spoken - set(range(start, end))
+            denial = _denied_before(words, start, others) or _denied_after(words, end, others)
+            if denial:
+                consumed.update(denial)
+            else:
+                offered.add(name)
         # Every stated mode was negated, none was stated, or several were offered at once.
         mode = offered.pop() if len(offered) == 1 else AMBIGUOUS if offered else UNKNOWN
         remainder = " ".join(
             word
             for index, word in enumerate(words)
-            if index not in consumed and word not in MODE_QUALIFIERS and word not in NEGATIONS
+            if index not in consumed
+            and word not in MODE_QUALIFIERS
+            and word not in NEGATIONS
+            and word not in CONNECTIVES
         )
         return cls(mode, REGION_ALIASES.get(remainder, remainder))
 
@@ -132,6 +157,36 @@ class Location:
         if not self.region:
             return f"{mode}, region not stated"
         return f"{mode} / {self.region}"
+
+
+def _denied_before(words: list[str], start: int, others: set[int]) -> set[int] | None:
+    """A negation ahead of the mode, reachable across filler: "no option for remote"."""
+    index = start - 1
+    while index >= 0 and index not in others and words[index] in SKIPPABLE:
+        index -= 1
+    if index < 0 or index in others:
+        return None
+    return {index} if words[index] in NEGATIONS else None
+
+
+def _denied_after(words: list[str], end: int, others: set[int]) -> set[int] | None:
+    """A denial following the mode: "remote not available", "remote unavailable"."""
+    index = end
+    while index < len(words) and index not in others and words[index] in SKIPPABLE:
+        index += 1
+    if index >= len(words) or index in others:
+        return None
+    if words[index] in DENIALS:
+        return {index}
+    if words[index] in NEGATIONS:
+        # Only an availability word makes this a denial of the mode; otherwise the negation
+        # is about something else, such as an excluded region.
+        for look in range(index + 1, min(index + 4, len(words))):
+            if look in others:
+                break
+            if words[look] in AVAILABILITY:
+                return {index, look}
+    return None
 
 
 def _find_all(words: list[str], needle: list[str]):

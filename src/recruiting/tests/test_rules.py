@@ -211,3 +211,16 @@ def test_reasons_separate_ambiguity_from_a_missing_location():
 def test_a_profile_cannot_be_configured_with_an_ambiguous_location():
     with pytest.raises(ValueError, match="must state a work mode"):
         Profile(("python",), ("remote or hybrid",))
+
+
+@pytest.mark.parametrize(
+    ("location", "configured"),
+    [
+        ("remote, not Canada", "remote"),
+        ("onsite (no remote option)", "onsite"),
+        ("hybrid, remote not available", "hybrid"),
+    ],
+)
+def test_a_denial_elsewhere_still_leaves_the_job_eligible(location, configured):
+    profile = Profile(("python", "sql"), (configured,))
+    assert evaluate(job(location=location), profile).eligible is True
