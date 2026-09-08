@@ -96,6 +96,9 @@ class Location:
 
     work_mode: str
     region: str
+    # Regions the posting explicitly rules out. Kept apart from `region` so an exclusion can
+    # never read as a positive claim: "remote, not Canada" is not "remote in Canada".
+    excluded: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, text: str) -> "Location":
@@ -119,19 +122,25 @@ class Location:
                 offered.add(name)
         # Every stated mode was negated, none was stated, or several were offered at once.
         mode = offered.pop() if len(offered) == 1 else AMBIGUOUS if offered else UNKNOWN
-        remainder = " ".join(
-            word
-            for index, word in enumerate(words)
-            if index not in consumed
-            and word not in MODE_QUALIFIERS
-            and word not in NEGATIONS
-            and word not in CONNECTIVES
+        # Words following a surviving negation describe what is ruled out, not where the job is.
+        positive, exclusions, current = [], [], None
+        for index, word in enumerate(words):
+            if index in consumed or word in MODE_QUALIFIERS or word in CONNECTIVES:
+                continue
+            if word in NEGATIONS:
+                current = []
+                exclusions.append(current)
+                continue
+            (positive if current is None else current).append(word)
+        return cls(
+            mode,
+            _region(" ".join(positive)),
+            tuple(sorted({_region(" ".join(group)) for group in exclusions if group})),
         )
-        return cls(mode, REGION_ALIASES.get(remainder, remainder))
 
     @property
     def stated(self) -> bool:
-        return self.work_mode != UNKNOWN or bool(self.region)
+        return self.work_mode != UNKNOWN or bool(self.region) or bool(self.excluded)
 
     @property
     def usable(self) -> bool:
@@ -141,6 +150,10 @@ class Location:
     def accepts(self, job: "Location") -> bool:
         """Whether this configured location covers a job's stated location."""
         if not job.usable or not self.usable or job.work_mode != self.work_mode:
+            return False
+        # A posting that rules out the configured region cannot satisfy it, whatever else
+        # it states.
+        if self.region and self.region in job.excluded:
             return False
         # A configured location without a region does not constrain one. A configured region
         # excludes a different region, but still admits a posting that states none; the review
@@ -154,9 +167,14 @@ class Location:
         if not self.stated:
             return "not stated"
         mode = self.work_mode if self.work_mode != UNKNOWN else "work mode not stated"
-        if not self.region:
-            return f"{mode}, region not stated"
-        return f"{mode} / {self.region}"
+        stated_region = f"{mode} / {self.region}" if self.region else f"{mode}, region not stated"
+        if self.excluded:
+            return f"{stated_region}, excluding {', '.join(self.excluded)}"
+        return stated_region
+
+
+def _region(value: str) -> str:
+    return REGION_ALIASES.get(value, value)
 
 
 def _denied_before(words: list[str], start: int, others: set[int]) -> set[int] | None:

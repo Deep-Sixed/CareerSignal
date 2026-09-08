@@ -122,6 +122,14 @@ class Profile:
                 "Accepted locations must state a work mode (remote, hybrid or onsite): "
                 + ", ".join(unusable)
             )
+        # Eligibility reads exclusions from the posting, not from the configuration, so an
+        # excluded region here would be silently ignored.
+        negative = [s for s in self.locations if Location.parse(s).excluded]
+        if negative:
+            raise ValueError(
+                "Accepted locations cannot exclude a region; state the region to accept: "
+                + ", ".join(negative)
+            )
 
     @property
     def accepted_locations(self) -> tuple[Location, ...]:

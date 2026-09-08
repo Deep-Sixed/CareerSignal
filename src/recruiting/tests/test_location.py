@@ -20,6 +20,8 @@ DISTINCT = [
     ("remote", "not remote"),
     ("remote", "no remote"),
     ("remote", "remote or hybrid"),
+    ("remote Canada", "remote, not Canada"),
+    ("remote US", "remote, not US"),
 ]
 
 
@@ -212,3 +214,35 @@ def test_a_denial_does_not_reach_past_what_it_denies(posting, configured):
 def test_a_denial_never_infers_the_opposite_mode():
     for posting in ("remote not available", "remote unavailable", "no option for remote"):
         assert Location.parse(posting) == Location(UNKNOWN, "")
+
+
+def test_an_excluded_region_is_never_read_as_a_positive_one():
+    """Dropping the negation turned "not Canada" into "Canada", inverting its meaning."""
+    excluded = Location.parse("remote, not Canada")
+    assert excluded == Location("remote", "", ("canada",))
+    assert excluded != Location.parse("remote Canada")
+    assert Location.parse("remote but not Canada") == excluded
+    # No other region is invented in its place.
+    assert excluded.region == ""
+
+
+@pytest.mark.parametrize("posting", ["remote, not Canada", "remote but not Canada"])
+def test_a_configured_region_rejects_a_posting_that_excludes_it(posting):
+    assert not Location.parse("remote Canada").accepts(Location.parse(posting))
+    # An unconstrained profile is unaffected: the posting still offers remote.
+    assert Location.parse("remote").accepts(Location.parse(posting))
+    # A different configured region is unaffected too.
+    assert Location.parse("remote US").accepts(Location.parse(posting))
+
+
+def test_several_exclusions_are_kept_separately():
+    parsed = Location.parse("remote, not Canada, not Europe")
+    assert parsed.excluded == ("canada", "europe") and parsed.region == ""
+    assert not Location.parse("remote Europe").accepts(parsed)
+    assert Location.parse("remote US").accepts(parsed)
+
+
+def test_exclusions_appear_in_the_description():
+    assert Location.parse("remote, not Canada").describe() == (
+        "remote, region not stated, excluding canada"
+    )

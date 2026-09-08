@@ -224,3 +224,18 @@ def test_a_profile_cannot_be_configured_with_an_ambiguous_location():
 def test_a_denial_elsewhere_still_leaves_the_job_eligible(location, configured):
     profile = Profile(("python", "sql"), (configured,))
     assert evaluate(job(location=location), profile).eligible is True
+
+
+def test_a_posting_excluding_the_configured_region_is_not_eligible():
+    canada = Profile(("python", "sql"), ("remote Canada",))
+    assert evaluate(job(location="remote, not Canada"), canada).eligible is False
+    assert evaluate(job(location="remote Canada"), canada).eligible is True
+    # The same posting still satisfies an unconstrained remote profile.
+    assert evaluate(job(location="remote, not Canada"), REMOTE_PROFILE).eligible is True
+    reasons = evaluate(job(location="remote, not Canada"), canada).reasons
+    assert "Location read as remote, region not stated, excluding canada" in reasons
+
+
+def test_a_profile_cannot_be_configured_with_an_excluded_region():
+    with pytest.raises(ValueError, match="cannot exclude a region"):
+        Profile(("python",), ("remote not Canada",))
