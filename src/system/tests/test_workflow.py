@@ -60,7 +60,8 @@ def test_approval_rejection_and_ineligible_boundaries(flow):
     flow.repository.decide(review, approved=False, actor="operator")
     with pytest.raises(ValueError):
         flow.draft(review)
-    for i, fields in enumerate((dict(location="onsite"), dict(skills=["python"]))):
+    below = dict(skills=["python", "java", "kubernetes", "aws", "go"])  # covers 1 of 5
+    for i, fields in enumerate((dict(location="onsite"), below)):
         rejected = flow.intake(f"reject{i}", body(**fields))[0]
         with pytest.raises(ValueError):
             flow.repository.decide(rejected, approved=True, actor="operator")

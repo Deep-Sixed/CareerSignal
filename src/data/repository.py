@@ -49,15 +49,20 @@ class Repository:
                     review_id = fingerprint([review.id, current[0] if current else None])
                     packet = replace(review, id=review_id)
                     conn.execute(
-                        "INSERT INTO reviews VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO reviews(id,opportunity_id,content_digest,score,advances,"
+                        "payload,draft,stated_skills,matched_skills,coverage) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             review_id,
                             job.key,
                             review.id,
-                            review.score,
+                            review.score or 0,
                             int(review.advances),
                             json.dumps(packet.payload()),
                             review.draft,
+                            review.coverage[1],
+                            review.coverage[0],
+                            review.score,
                         ),
                     )
                     conn.execute(
@@ -121,12 +126,22 @@ class Repository:
     @staticmethod
     def _current(conn, review_id):
         row = conn.execute(
-            "SELECT r.advances FROM reviews r JOIN opportunities o "
+            "SELECT r.advances,r.stated_skills FROM reviews r JOIN opportunities o "
             "ON o.current_review=r.id WHERE r.id=?",
             (review_id,),
         ).fetchone()
         if row is None:
             raise ValueError("Review is missing or stale")
+        # A review written before stated skill coverage carries an advances flag decided by a
+        # formula this version does not use, and migration cannot recompute it without the
+        # profile of the day. stated_skills is NULL only for those rows; a scoring-v2 review
+        # of a job that stated no skills records 0. Refuse to act on the old decision rather
+        # than honour it or rewrite the recorded reasoning.
+        if row[1] is None:
+            raise ValueError(
+                "Review predates stated skill coverage and is not actionable; re-ingest the "
+                "opportunity under a new message ID to score it again"
+            )
         return bool(row[0])
 
     def decide(self, review_id, *, approved: bool, actor: str):

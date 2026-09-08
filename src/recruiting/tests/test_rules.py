@@ -24,19 +24,26 @@ def test_normalization_and_tracking_deduplication():
     )
 
 
-def test_threshold_is_strict_and_eligibility_overrides_score():
-    skills = tuple(f"skill{i}" for i in range(10))
-    profile = Profile(skills)
-    assert not evaluate(job(skills=list(skills[:7])), profile).advances
-    assert evaluate(job(skills=list(skills[:8])), profile).advances
+def test_threshold_is_strict_and_eligibility_overrides_coverage():
+    profile = Profile(tuple(f"skill{i}" for i in range(10)))
+    # Coverage is over what the job states, so the denominator is the job's list.
+    stated = [f"skill{i}" for i in range(10)]
+    assert evaluate(job(skills=stated[:7] + ["java", "go", "rust"]), profile).score == 70
+    assert not evaluate(job(skills=stated[:7] + ["java", "go", "rust"]), profile).advances
+    assert evaluate(job(skills=stated[:8] + ["java", "go"]), profile).score == 80
+    assert evaluate(job(skills=stated[:8] + ["java", "go"]), profile).advances
+    # A perfectly covered job that is not location eligible still does not advance.
     assert not evaluate(job(location="onsite"), Profile(("python", "sql"))).advances
     assert not evaluate(job(location=""), Profile(("python",))).eligible
 
 
-def test_missing_skills_and_changed_configuration_are_visible():
-    result = evaluate(job(skills=["python"]), Profile(("python", "sql")))
-    assert result.score == 50 and "Missing: sql" in result.reasons
-    assert result.id != evaluate(job(skills=["python"]), Profile(("python",))).id
+def test_unmatched_stated_skills_and_changed_configuration_are_visible():
+    result = evaluate(job(skills=["python", "java"]), Profile(("python", "sql")))
+    assert result.score == 50
+    assert "Stated skill coverage: 1/2 (50%)" in result.reasons
+    assert "Unmatched stated skills: java" in result.reasons
+    assert "Profile relevance: 1/2 (50%)" in result.reasons
+    assert result.id != evaluate(job(skills=["python", "java"]), Profile(("python",))).id
 
 
 @pytest.mark.parametrize(
@@ -169,7 +176,10 @@ def test_reasons_name_the_structure_eligibility_used():
     assert "Location eligible" in reasons
     unstated = evaluate(job(location="Philadelphia"), REMOTE_PROFILE).reasons
     assert "Location read as work mode not stated / philadelphia" in unstated
-    assert any("work mode not stated" in r for r in unstated[-2:])
+    assert (
+        "Location work mode not stated; eligibility needs an explicit remote, hybrid "
+        "or onsite" in unstated
+    )
     assert "Location missing" in evaluate(job(location=""), REMOTE_PROFILE).reasons
 
 
@@ -239,3 +249,67 @@ def test_a_posting_excluding_the_configured_region_is_not_eligible():
 def test_a_profile_cannot_be_configured_with_an_excluded_region():
     with pytest.raises(ValueError, match="cannot exclude a region"):
         Profile(("python",), ("remote not Canada",))
+
+
+PROFILE_5 = Profile(("python", "sql", "sailpoint", "azure", "powershell"))
+
+
+def test_coverage_is_job_relative_not_profile_relative():
+    """The old formula answered how much of the profile a job mentioned, which is not fit."""
+    # 32 stated skills, 2 matched: a job the profile barely covers must not read as perfect.
+    wide = job(skills=["python", "sql"] + [f"req{i}" for i in range(30)])
+    assert evaluate(wide, Profile(("python", "sql"))).score == 6
+    # Every stated skill matched: a large profile must not dilute a complete cover.
+    narrow = job(skills=["python", "sql"])
+    broad = Profile(tuple(["python", "sql"] + [f"other{i}" for i in range(18)]))
+    assert evaluate(narrow, broad).score == 100
+    assert evaluate(narrow, Profile(("python", "sql"))).score == 100
+
+
+def test_extra_profile_skills_never_change_coverage():
+    stated = job(skills=["python", "sql", "java", "kubernetes", "aws"])
+    small = evaluate(stated, Profile(("python", "sql")))
+    large = evaluate(stated, Profile(("python", "sql") + tuple(f"x{i}" for i in range(30))))
+    assert small.score == large.score == 40
+    # Relevance is where the profile size shows up, and it is diagnostic only.
+    assert small.relevance == (2, 2) and large.relevance == (2, 32)
+    assert small.coverage == large.coverage == (2, 5)
+
+
+def test_a_small_profile_no_longer_collapses_the_threshold():
+    """With two configured skills the old formula could only produce 0, 50 or 100."""
+    profile = Profile(("python", "sql"))
+    ten = ["python", "sql"] + [f"req{i}" for i in range(8)]
+    assert evaluate(job(skills=ten), profile).score == 20
+    reachable = {
+        evaluate(job(skills=["python", "sql"][:n] + [f"r{i}" for i in range(5 - n)]), profile).score
+        for n in range(3)
+    }
+    assert reachable == {0, 20, 40}
+
+
+def test_a_job_stating_no_skills_is_unscored_not_a_perfect_fit():
+    result = evaluate(job(skills=[]), PROFILE_5)
+    assert result.score is None
+    assert result.coverage == (0, 0)
+    assert result.advances is False
+    assert result.eligible is True
+    assert "Stated skill coverage: not scored; the job states no skills" in result.reasons
+    assert not any("100" in reason for reason in result.reasons[:1])
+
+
+def test_duplicate_and_case_varied_stated_skills_are_normalized_before_counting():
+    result = evaluate(job(skills=["Python", "python", " PYTHON ", "SQL", "java"]), PROFILE_5)
+    assert result.coverage == (2, 3)
+    assert result.score == 66
+
+
+def test_coverage_never_overrides_location_eligibility():
+    perfect = job(skills=["python", "sql"], location="onsite")
+    result = evaluate(perfect, Profile(("python", "sql")))
+    assert result.score == 100 and result.eligible is False and result.advances is False
+
+
+def test_the_worked_example_from_the_scoring_contract():
+    result = evaluate(job(skills=["python", "sql", "java", "kubernetes", "aws"]), PROFILE_5)
+    assert result.score == 40 and result.coverage == (2, 5) and result.relevance == (2, 5)
