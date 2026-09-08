@@ -16,6 +16,50 @@ def clean(value: str) -> str:
     return " ".join(value.split())
 
 
+# These allowlists decide what counts as the same job, so every entry must be a value no job
+# board uses to identify one. Anything unlisted is treated as meaningful and preserved.
+TRACKING_PREFIXES = ("utm_",)
+TRACKING_PARAMETERS = frozenset({"gclid", "fbclid", "msclkid"})
+# Fragments naming a position on the page rather than a job. Hash-routed boards put the job
+# identity in the fragment, so every other fragment is kept.
+DECORATIVE_FRAGMENTS = frozenset({"top", "content", "main", "header", "footer", "apply"})
+URL_REQUIRED = "Title, company and HTTPS job URL are required"
+
+
+def _is_tracking(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in TRACKING_PARAMETERS or lowered.startswith(TRACKING_PREFIXES)
+
+
+def canonical_url(value: str) -> str:
+    """Collapse equivalent spellings of one job URL without merging distinct jobs."""
+    url = urlsplit(clean(value))
+    if url.scheme != "https" or not url.hostname:
+        raise ValueError(URL_REQUIRED)
+    if url.username or url.password:
+        raise ValueError("Job URLs cannot contain credentials")
+    try:
+        port = url.port
+    except ValueError as exc:
+        raise ValueError(URL_REQUIRED) from exc
+    # hostname is already lowercased; only a leading www. label is dropped, never a deeper
+    # subdomain, which would merge genuinely different hosts.
+    host = url.hostname.removeprefix("www.")
+    if not host:
+        raise ValueError(URL_REQUIRED)
+    if ":" in host:
+        host = f"[{host}]"
+    if port and port != 443:
+        host = f"{host}:{port}"
+    # Path case is significant to the server; only the trailing separator is not.
+    path = url.path.rstrip("/") or "/"
+    query = sorted(
+        (k, v) for k, v in parse_qsl(url.query, keep_blank_values=True) if not _is_tracking(k)
+    )
+    fragment = "" if url.fragment.casefold() in DECORATIVE_FRAGMENTS else url.fragment
+    return urlunsplit(("https", host, path, urlencode(query), fragment))
+
+
 @dataclass(frozen=True)
 class Opportunity:
     title: str
@@ -27,17 +71,9 @@ class Opportunity:
     @classmethod
     def normalize(cls, item: dict) -> "Opportunity":
         title, company = clean(item["title"]), clean(item["company"])
-        url = urlsplit(clean(item["url"]))
-        if not title or not company or url.scheme != "https" or not url.hostname:
-            raise ValueError("Title, company and HTTPS job URL are required")
-        if url.username or url.password:
-            raise ValueError("Job URLs cannot contain credentials")
-        query = sorted(
-            (k, v)
-            for k, v in parse_qsl(url.query, keep_blank_values=True)
-            if not k.lower().startswith("utm_")
-        )
-        canonical = urlunsplit(("https", url.netloc.lower(), url.path or "/", urlencode(query), ""))
+        if not title or not company:
+            raise ValueError(URL_REQUIRED)
+        canonical = canonical_url(item["url"])
         skills = item.get("skills", [])
         if not isinstance(skills, list):
             raise ValueError("Skills must be a list")
