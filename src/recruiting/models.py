@@ -51,8 +51,11 @@ def canonical_url(value: str) -> str:
         host = f"[{host}]"
     if port and port != 443:
         host = f"{host}:{port}"
-    # Path case is significant to the server; only the trailing separator is not.
-    path = url.path.rstrip("/") or "/"
+    # Path case is significant to the server, and so are repeated separators: only a single
+    # trailing separator is dropped. Collapsing "//" would merge paths a server may distinguish.
+    path = url.path or "/"
+    if path != "/" and path.endswith("/") and not path.endswith("//"):
+        path = path[:-1]
     query = sorted(
         (k, v) for k, v in parse_qsl(url.query, keep_blank_values=True) if not _is_tracking(k)
     )

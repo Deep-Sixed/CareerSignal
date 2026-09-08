@@ -58,8 +58,7 @@ BASE = "https://jobs.example.com/roles/1"
 @pytest.mark.parametrize(
     "equivalent",
     [
-        "https://jobs.example.com/roles/1/",  # trailing separator
-        "https://jobs.example.com/roles/1//",
+        "https://jobs.example.com/roles/1/",  # single trailing separator
         "https://jobs.example.com:443/roles/1",  # default port for https
         "https://JOBS.Example.COM/roles/1",  # host case
         "https://www.jobs.example.com/roles/1",  # leading www. label only
@@ -85,6 +84,8 @@ def test_equivalent_job_urls_collapse_to_one_key(equivalent):
         "https://jobs.example.com/roles/1?id=1",  # unknown parameter is meaningful
         "https://jobs.example.com/roles/1?ref=email",
         "https://jobs.example.com/roles/1#/job/123",  # hash-routed job identity
+        "https://jobs.example.com/roles/1//",  # repeated separators can be meaningful
+        "https://jobs.example.com/roles/1///",
     ],
 )
 def test_distinct_job_urls_keep_distinct_keys(distinct):
@@ -112,3 +113,15 @@ def test_canonicalization_reaches_the_deduplication_key():
     for equivalent in ("https://www.jobs.example.com/roles/1/?utm_source=alert#top",):
         assert job(url=equivalent).key == job(url=BASE).key
     assert job(url="https://jobs.example.com/Roles/1").key != job(url=BASE).key
+
+
+def test_only_a_single_trailing_separator_is_normalized():
+    """Dropping every trailing separator would be the false collapse this PR argues against."""
+    assert canonical_url(BASE + "/") == canonical_url(BASE)
+    assert canonical_url(BASE + "//") != canonical_url(BASE)
+    assert canonical_url(BASE + "//") != canonical_url(BASE + "/")
+    # A repeated separator survives canonicalization rather than being quietly trimmed.
+    assert canonical_url(BASE + "//").endswith("/roles/1//")
+    # The root path keeps its only separator.
+    assert canonical_url("https://jobs.example.com/") == "https://jobs.example.com/"
+    assert canonical_url("https://jobs.example.com") == "https://jobs.example.com/"
