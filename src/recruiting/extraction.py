@@ -1,11 +1,14 @@
 """Deterministic extraction from explicitly labeled recruiting messages."""
 
+import json
 import re
 from dataclasses import dataclass, replace
 
 from recruiting.models import Opportunity
 
 PARSER_VERSION = "labeled-v1"
+# Diagnostics are kept for the operator, not for storage of whole payloads.
+EXCERPT_LIMIT = 500
 FIELD = re.compile(
     r"^\s*(title|role|job title|company|employer|location|skills|url|apply|job url)\s*:\s*(.*)$",
     re.I,
@@ -74,9 +77,13 @@ def extract(text: str) -> tuple[ExtractedItem, ...]:
     finish()
     if not blocks:
         return (ExtractedItem(0, text, None, "No supported labeled opportunities found"),)
-    by_key = {}
-    ambiguous = set()
-    for item in blocks:
+    return reject_conflicts(tuple(blocks))
+
+
+def reject_conflicts(items: tuple[ExtractedItem, ...]) -> tuple[ExtractedItem, ...]:
+    """Two different versions of one job URL in one message are ambiguous; reject both."""
+    by_key, ambiguous = {}, set()
+    for item in items:
         if item.opportunity:
             key = item.opportunity.key
             if key in by_key and by_key[key] != item.opportunity:
@@ -86,5 +93,17 @@ def extract(text: str) -> tuple[ExtractedItem, ...]:
         replace(item, opportunity=None, reason="Conflicting versions of the same job URL")
         if item.opportunity and item.opportunity.key in ambiguous
         else item
-        for item in blocks
+        for item in items
     )
+
+
+def extract_records(records) -> tuple[ExtractedItem, ...]:
+    """Normalize each supplied record independently: one bad entry never discards the rest."""
+    items = []
+    for index, record in enumerate(records):
+        excerpt = json.dumps(record, sort_keys=True, default=str)[:EXCERPT_LIMIT]
+        try:
+            items.append(ExtractedItem(index, excerpt, Opportunity.normalize(record), ""))
+        except (ValueError, TypeError) as exc:
+            items.append(ExtractedItem(index, excerpt, None, str(exc)))
+    return reject_conflicts(tuple(items))

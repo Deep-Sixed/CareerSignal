@@ -75,10 +75,12 @@ class Opportunity:
 
     @classmethod
     def normalize(cls, item: dict) -> "Opportunity":
-        title, company = clean(item["title"]), clean(item["company"])
+        if not isinstance(item, dict):
+            raise ValueError("Job entry must be an object")
+        title, company = clean(item.get("title", "")), clean(item.get("company", ""))
         if not title or not company:
             raise ValueError(URL_REQUIRED)
-        canonical = canonical_url(item["url"])
+        canonical = canonical_url(item.get("url", ""))
         skills = item.get("skills", [])
         if not isinstance(skills, list):
             raise ValueError("Skills must be a list")

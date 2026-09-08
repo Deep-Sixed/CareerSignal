@@ -3,7 +3,7 @@
 from communications.controlled import parse_message
 from communications.message import Message
 from data.repository import Repository
-from recruiting.extraction import PARSER_VERSION, extract
+from recruiting.extraction import PARSER_VERSION, extract, extract_records
 from recruiting.models import Profile, evaluate, fingerprint
 from recruiting.ports import DraftProvider
 
@@ -31,15 +31,13 @@ class Workflow:
         )
 
     def intake(self, message_id: str, body: str) -> list[str]:
-        jobs = parse_message(body)
-        # Conflicting versions of the same opportunity inside one alert are ambiguous.
-        unique = {}
-        for job in jobs:
-            if job.key in unique and unique[job.key] != job:
-                raise ValueError("Conflicting opportunity versions within one message")
-            unique[job.key] = job
+        items = extract_records(parse_message(body))
+        unique = {item.opportunity.key: item.opportunity for item in items if item.opportunity}
         return self.repository.ingest(
-            message_id, fingerprint(body), [evaluate(job, self.profile) for job in unique.values()]
+            message_id,
+            fingerprint(body),
+            [evaluate(job, self.profile) for job in unique.values()],
+            items=items,
         )
 
     def draft(self, review_id: str) -> str | None:

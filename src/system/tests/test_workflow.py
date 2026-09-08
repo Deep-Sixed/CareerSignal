@@ -124,3 +124,61 @@ def test_failure_to_persist_receipt_can_be_reconciled(flow, monkeypatch):
     assert flow.draft(review) is None
     assert flow.reconcile(review)
     assert flow.provider.calls == 1
+
+
+def mixed_body():
+    def good(index):
+        return dict(
+            title=f"Engineer {index}",
+            company="Example Company",
+            url=f"https://jobs.example.com/{index}",
+            location="remote",
+            skills=["python", "sql"],
+        )
+
+    return json.dumps(
+        {
+            "jobs": [
+                good(1),
+                dict(good(2), url="http://insecure.example.com/2"),
+                good(3),
+                {"company": "Example Company", "url": "https://jobs.example.com/4"},
+            ]
+        }
+    )
+
+
+def test_structured_intake_keeps_valid_jobs_when_a_sibling_is_malformed(flow):
+    reviews = flow.intake("mixed", mixed_body())
+    assert len(reviews) == 2
+    evidence = flow.repository.extraction_evidence("mixed")
+    assert [row[0] for row in evidence] == [0, 1, 2, 3]
+    assert [bool(row[4]) for row in evidence] == [True, False, True, False]
+    assert sorted(row[4] for row in evidence if row[4]) == reviews
+    # A rejected entry records why, and creates no opportunity or review.
+    assert all(row[2] and row[3] is None for row in evidence if not row[4])
+
+
+def test_structured_intake_replays_without_duplicating_evidence(flow):
+    first = flow.intake("mixed", mixed_body())
+    evidence = flow.repository.extraction_evidence("mixed")
+    assert flow.intake("mixed", mixed_body()) == first
+    assert flow.repository.extraction_evidence("mixed") == evidence
+
+
+def test_a_malformed_envelope_still_fails_the_whole_message(flow):
+    """A job we cannot read is one item; an envelope we cannot read is the message."""
+    for body in ('{"jobs": []}', '{"jobs": {}}', "[]", "not json at all"):
+        with pytest.raises(ValueError):
+            flow.intake("bad", body)
+    with connection(flow.repository.path) as conn:
+        assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM extraction_items").fetchone()[0] == 0
+
+
+def test_structured_intake_creates_no_drafts(flow):
+    reviews = flow.intake("mixed", mixed_body())
+    for review in reviews:
+        with pytest.raises(ValueError, match="approval"):
+            flow.draft(review)
+    assert flow.provider.calls == 0
