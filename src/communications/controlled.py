@@ -3,14 +3,15 @@
 import json
 from threading import Lock
 
-from recruiting.models import Opportunity, fingerprint
+from recruiting.models import fingerprint
 
 
-def parse_message(body: str) -> list[Opportunity]:
+def parse_message(body: str) -> list:
+    """Decode the envelope. A malformed envelope is unreadable; a malformed job is not."""
     value = json.loads(body)
     if not isinstance(value, dict) or not isinstance(value.get("jobs"), list) or not value["jobs"]:
         raise ValueError("Expected a nonempty jobs array")
-    return [Opportunity.normalize(item) for item in value["jobs"]]
+    return value["jobs"]
 
 
 class ControlledDrafts:
