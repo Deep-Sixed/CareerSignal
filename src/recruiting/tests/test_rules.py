@@ -125,3 +125,61 @@ def test_only_a_single_trailing_separator_is_normalized():
     # The root path keeps its only separator.
     assert canonical_url("https://jobs.example.com/") == "https://jobs.example.com/"
     assert canonical_url("https://jobs.example.com") == "https://jobs.example.com/"
+
+
+REMOTE_PROFILE = Profile(("python", "sql"), ("remote",))
+US_REMOTE_PROFILE = Profile(("python", "sql"), ("remote US",))
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("remote", True),
+        ("Remote", True),
+        ("REMOTE", True),
+        ("remote - US", True),
+        ("remote (US)", True),
+        ("US remote", True),
+        ("fully remote", True),
+        ("100% remote", True),
+        ("remote work", True),
+        ("remote Canada", True),  # the profile states no region, so it does not exclude one
+        ("hybrid", False),
+        ("onsite", False),
+        ("Philadelphia", False),
+        ("New York", False),
+        ("", False),
+    ],
+)
+def test_eligibility_reads_structure_not_spelling(location, expected):
+    assert evaluate(job(location=location), REMOTE_PROFILE).eligible is expected
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [("remote US", True), ("remote", True), ("remote Canada", False), ("remote Europe", False)],
+)
+def test_a_configured_region_excludes_other_regions(location, expected):
+    assert evaluate(job(location=location), US_REMOTE_PROFILE).eligible is expected
+
+
+def test_reasons_name_the_structure_eligibility_used():
+    reasons = evaluate(job(location="Remote (US)"), REMOTE_PROFILE).reasons
+    assert "Location read as remote / us" in reasons
+    assert "Location eligible" in reasons
+    unstated = evaluate(job(location="Philadelphia"), REMOTE_PROFILE).reasons
+    assert "Location read as work mode not stated / philadelphia" in unstated
+    assert any("work mode not stated" in r for r in unstated[-2:])
+    assert "Location missing" in evaluate(job(location=""), REMOTE_PROFILE).reasons
+
+
+def test_unusable_location_configuration_fails_loudly():
+    """A profile that could never match anything is a configuration error, not a silent zero."""
+    with pytest.raises(ValueError, match="must state a work mode"):
+        Profile(("python",), ("Philadelphia",))
+    with pytest.raises(ValueError, match="At least one accepted location"):
+        Profile(("python",), ())
+    # Stating the mode makes the same place usable.
+    assert Profile(("python",), ("onsite Philadelphia",)).accepted_locations[0].region == (
+        "philadelphia"
+    )
