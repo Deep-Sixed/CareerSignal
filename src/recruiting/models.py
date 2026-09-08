@@ -142,7 +142,11 @@ class Profile:
 class Review:
     id: str
     opportunity: Opportunity
-    score: int
+    # Stated skill coverage, or None when the job states no skills to cover. Absent
+    # requirements are unscored, never a perfect fit.
+    score: int | None
+    coverage: tuple[int, int]
+    relevance: tuple[int, int]
     eligible: bool
     advances: bool
     reasons: tuple[str, ...]
@@ -153,15 +157,24 @@ class Review:
 
 
 def evaluate(job: Opportunity, profile: Profile) -> Review:
-    matched = set(job.skills) & set(profile.skills)
-    score = int(100 * len(matched) / len(profile.skills))
+    # How much of what this job states does the profile cover? Extra profile skills are
+    # relevance, not fit, and must not move this number in either direction.
+    stated_skills = set(job.skills)
+    matched = stated_skills & set(profile.skills)
+    score = int(100 * len(matched) / len(stated_skills)) if stated_skills else None
+    relevance = int(100 * len(matched) / len(profile.skills))
     stated = Location.parse(job.location)
     eligible = any(accepted.accepts(stated) for accepted in profile.accepted_locations)
-    reasons = [
-        f"Matched {len(matched)}/{len(profile.skills)} configured skills",
-        "Matched: " + (", ".join(sorted(matched)) or "none"),
-        "Missing: " + (", ".join(sorted(set(profile.skills) - matched)) or "none"),
-    ]
+    reasons = (
+        [
+            f"Stated skill coverage: {len(matched)}/{len(stated_skills)} ({score}%)",
+            "Matched: " + (", ".join(sorted(matched)) or "none"),
+            "Unmatched stated skills: " + (", ".join(sorted(stated_skills - matched)) or "none"),
+        ]
+        if stated_skills
+        else ["Stated skill coverage: not scored; the job states no skills"]
+    )
+    reasons.append(f"Profile relevance: {len(matched)}/{len(profile.skills)} ({relevance}%)")
     reasons.append(f"Location read as {stated.describe()}")
     reasons.append(
         "Location eligible"
@@ -174,10 +187,21 @@ def evaluate(job: Opportunity, profile: Profile) -> Review:
         if not stated.usable
         else "Location outside configured eligibility"
     )
-    advances = eligible and score > profile.threshold
-    reasons.append(f"Score must be strictly above {profile.threshold}")
+    advances = eligible and score is not None and score > profile.threshold
+    reasons.append(f"Coverage must be strictly above {profile.threshold}")
+    reasons.append("Advances" if advances else "Does not advance")
     draft = f"I would like to learn more about {job.title} at {job.company}. Reference: {job.url}"
     version = fingerprint(
-        {"job": asdict(job), "profile": asdict(profile), "draft": draft, "rule_version": 1}
+        {"job": asdict(job), "profile": asdict(profile), "draft": draft, "rule_version": 2}
     )
-    return Review(version, job, score, eligible, advances, tuple(reasons), draft)
+    return Review(
+        version,
+        job,
+        score,
+        (len(matched), len(stated_skills)),
+        (len(matched), len(profile.skills)),
+        eligible,
+        advances,
+        tuple(reasons),
+        draft,
+    )

@@ -49,15 +49,20 @@ class Repository:
                     review_id = fingerprint([review.id, current[0] if current else None])
                     packet = replace(review, id=review_id)
                     conn.execute(
-                        "INSERT INTO reviews VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO reviews(id,opportunity_id,content_digest,score,advances,"
+                        "payload,draft,stated_skills,matched_skills,coverage) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             review_id,
                             job.key,
                             review.id,
-                            review.score,
+                            review.score or 0,
                             int(review.advances),
                             json.dumps(packet.payload()),
                             review.draft,
+                            review.coverage[1],
+                            review.coverage[0],
+                            review.score,
                         ),
                     )
                     conn.execute(

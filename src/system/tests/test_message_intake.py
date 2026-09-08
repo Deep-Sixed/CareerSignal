@@ -62,7 +62,7 @@ def test_existing_baseline_database_upgrades_without_losing_reviews(tmp_path, mo
         store.migrate(path)
         with store.connection(path) as conn:
             conn.execute("INSERT INTO messages VALUES ('existing','digest')")
-    assert store.migrate(path) == ["0002_message_extraction.sql"]
+    assert store.migrate(path) == [p.name for p in files[1:]]
     store.verify_contract(path)
     with store.connection(path) as conn:
         assert conn.execute("SELECT id FROM messages").fetchall() == [("existing",)]
