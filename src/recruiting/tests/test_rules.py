@@ -1,6 +1,6 @@
 import pytest
 
-from recruiting.models import Opportunity, Profile, evaluate
+from recruiting.models import Opportunity, Profile, canonical_url, evaluate
 
 
 def job(**changes):
@@ -50,3 +50,78 @@ def test_missing_skills_and_changed_configuration_are_visible():
 def test_reject_unsafe_urls(url):
     with pytest.raises(ValueError):
         job(url=url)
+
+
+BASE = "https://jobs.example.com/roles/1"
+
+
+@pytest.mark.parametrize(
+    "equivalent",
+    [
+        "https://jobs.example.com/roles/1/",  # single trailing separator
+        "https://jobs.example.com:443/roles/1",  # default port for https
+        "https://JOBS.Example.COM/roles/1",  # host case
+        "https://www.jobs.example.com/roles/1",  # leading www. label only
+        "https://jobs.example.com/roles/1?utm_source=alert&utm_campaign=x",
+        "https://jobs.example.com/roles/1?gclid=abc",
+        "https://jobs.example.com/roles/1?fbclid=abc",
+        "https://jobs.example.com/roles/1?msclkid=abc",
+        "https://jobs.example.com/roles/1#top",  # decorative in-page anchor
+        "https://jobs.example.com/roles/1#Apply",
+    ],
+)
+def test_equivalent_job_urls_collapse_to_one_key(equivalent):
+    assert canonical_url(equivalent) == canonical_url(BASE)
+
+
+@pytest.mark.parametrize(
+    "distinct",
+    [
+        "https://jobs.example.com/Roles/1",  # path case is the server's to decide
+        "https://jobs.example.com/roles/2",
+        "https://jobs.example.com:8443/roles/1",  # non-default port
+        "https://careers.example.com/roles/1",  # different non-www subdomain
+        "https://jobs.example.com/roles/1?id=1",  # unknown parameter is meaningful
+        "https://jobs.example.com/roles/1?ref=email",
+        "https://jobs.example.com/roles/1#/job/123",  # hash-routed job identity
+        "https://jobs.example.com/roles/1//",  # repeated separators can be meaningful
+        "https://jobs.example.com/roles/1///",
+    ],
+)
+def test_distinct_job_urls_keep_distinct_keys(distinct):
+    assert canonical_url(distinct) != canonical_url(BASE)
+
+
+def test_hash_routed_jobs_are_not_merged_with_each_other():
+    """Discarding fragments outright would silently collapse different jobs into one."""
+    first = "https://jobs.example.com/careers#/job/123"
+    second = "https://jobs.example.com/careers#/job/456"
+    assert canonical_url(first) != canonical_url(second)
+    # A tracking parameter is still stripped around a preserved fragment.
+    tracked = "https://jobs.example.com/careers?utm_source=alert#/job/123"
+    assert canonical_url(tracked) == canonical_url(first)
+
+
+def test_semantic_query_values_and_ordering():
+    assert canonical_url(BASE + "?id=1") != canonical_url(BASE + "?id=2")
+    assert canonical_url(BASE + "?a=1&b=2") == canonical_url(BASE + "?b=2&a=1")
+    # A stripped tracking parameter must not take a meaningful one with it.
+    assert canonical_url(BASE + "?id=1&utm_source=alert") == canonical_url(BASE + "?id=1")
+
+
+def test_canonicalization_reaches_the_deduplication_key():
+    for equivalent in ("https://www.jobs.example.com/roles/1/?utm_source=alert#top",):
+        assert job(url=equivalent).key == job(url=BASE).key
+    assert job(url="https://jobs.example.com/Roles/1").key != job(url=BASE).key
+
+
+def test_only_a_single_trailing_separator_is_normalized():
+    """Dropping every trailing separator would be the false collapse this PR argues against."""
+    assert canonical_url(BASE + "/") == canonical_url(BASE)
+    assert canonical_url(BASE + "//") != canonical_url(BASE)
+    assert canonical_url(BASE + "//") != canonical_url(BASE + "/")
+    # A repeated separator survives canonicalization rather than being quietly trimmed.
+    assert canonical_url(BASE + "//").endswith("/roles/1//")
+    # The root path keeps its only separator.
+    assert canonical_url("https://jobs.example.com/") == "https://jobs.example.com/"
+    assert canonical_url("https://jobs.example.com") == "https://jobs.example.com/"
