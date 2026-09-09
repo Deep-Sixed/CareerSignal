@@ -46,7 +46,7 @@ Migration 0004 backfills a `new` event for every opportunity recorded before sta
 
 ```python
 repository.record_status(opportunity_id, "applied", actor="operator", reason="Sent CV")
-repository.status(opportunity_id)          # 'applied'
+repository.status(opportunity_id)  # 'applied'
 repository.status_history(opportunity_id)  # [(status, actor, reason, created_at), ...]
 ```
 
