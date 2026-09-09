@@ -248,6 +248,48 @@ def test_a_merely_malformed_address_gets_the_other_reason():
         recipient("not-an-address")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "jane@example.com, attacker@example.com",
+        "<jane@example.com>, <attacker@example.com>",
+        "jane@example.com, attacker@example.com, third@example.com",
+    ],
+)
+def test_a_list_of_mailboxes_is_refused_rather_than_reduced_to_the_first(value):
+    """The refusal must not depend on the standard library failing closed, because it does
+    not fail closed on every supported interpreter.
+
+    On CPython 3.11.9 -- what hosted CI runs, and inside the supported range -- parseaddr
+    returns the FIRST address of a list rather than refusing it, so this value parsed as
+    jane@example.com and was accepted. That is sanitizing a hostile value into an accepted
+    one: addressing a message to somebody the operator never read. Counting mailboxes
+    behaves the same on every supported version, so this holds regardless of interpreter.
+    """
+    with pytest.raises(DraftRefused, match="more than one mailbox"):
+        recipient(value)
+
+
+def test_a_semicolon_separated_list_is_refused_on_every_supported_interpreter():
+    """Refused everywhere, but not for the same reason everywhere, so the reason is not
+    asserted here.
+
+    A semicolon is not the RFC's separator, and the interpreters disagree about what the
+    value even is: 3.11.9 reads three mailboxes, 3.13 reads one unusable address. Pinning
+    either message would make this test pass on one interpreter and fail on the other,
+    which is how a guard ends up asserted only where it happens to be true. What has to
+    hold everywhere is that no draft is addressed.
+    """
+    with pytest.raises(DraftRefused):
+        recipient("jane@example.com; attacker@example.com")
+
+
+def test_a_comma_inside_a_quoted_display_name_is_still_one_mailbox():
+    """The guard above must not refuse a legitimate address to achieve its refusals."""
+    assert recipient('"Recruiter, Jane" <jane@example.com>') == "jane@example.com"
+    assert recipient('"Doe, J. (Talent)" <jane@example.com>') == "jane@example.com"
+
+
 # --- the last line of defense, exercised directly ---------------------------------------
 
 # compose() validates its inputs, so these can no longer be reached through it. They are

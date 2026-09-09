@@ -114,9 +114,28 @@ Such a value is **refused, never repaired**. Sanitizing it would address the mes
 somebody the operator never read. The refusal does not echo the offending value, because a
 log line quoting the attempt carries the attempt.
 
-Two findings from building this are worth recording. `email.utils.parseaddr` fails closed
-on CR and LF — it returns an empty address — but passes a NUL straight through into the
-address it returns, so parsing is not the check; the raw value is scanned first.
+Three findings from building this are worth recording, because each is a place where the
+standard library's behaviour was nearly mistaken for a guarantee.
+
+`email.utils.parseaddr` passes a NUL straight through into the address it returns, so
+parsing is not the check; the raw value is scanned for control characters first.
+
+**`parseaddr` does not fail closed on every supported interpreter.** On CPython 3.11.9 —
+what hosted CI runs, and inside this project's supported range — it returns the *first*
+address of a list rather than refusing it:
+
+```
+                                              3.11.9              3.13
+'jane@example.com, attacker@example.com'  ->  'jane@example.com'  ('', '')
+```
+
+So a recruiter `From` naming two mailboxes was accepted and quietly reduced to one. That is
+sanitizing a hostile value into an accepted one — the exact behaviour this boundary exists
+to prevent — and it was invisible locally, because the local interpreter was newer than
+CI's. Mailboxes are now *counted* with `getaddresses`, which behaves the same on every
+supported version and still reads a quoted comma inside a display name as one address. The
+control scan is what refused the CRLF case on 3.11.9, which is worth noting: mutation
+testing had called that scan redundant on a newer interpreter.
 And `compose` validates its own recipient and subject rather than trusting its caller: a
 boundary that is safe only because its one current caller sanitizes first is not a
 boundary. The composed message is then parsed back and checked to address exactly the

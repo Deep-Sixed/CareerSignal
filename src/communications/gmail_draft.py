@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.policy import default as DEFAULT_POLICY
-from email.utils import parseaddr
+from email.utils import getaddresses
 from urllib import error, request
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -195,17 +195,30 @@ def recipient(value) -> str:
     The value reaches here from a recruiter's From header, so it is hostile input. It is
     refused rather than repaired, and the refusal never echoes it: a message quoting
     "jane@example.com\\r\\nBcc: ..." puts the attempted injection into a log line.
+
+    None of the checks below rely on the standard library failing closed, because it does
+    not fail closed everywhere this program is supported. On CPython 3.11.9 --
+    the interpreter hosted CI runs, and inside the supported range -- parseaddr returns the
+    *first* address for a list rather than refusing it, so "a@example.com, b@example.com"
+    parses as "a@example.com". Taking that would be sanitizing a hostile value into an
+    accepted one, silently addressing a message the operator never read. The hardening that
+    makes newer interpreters refuse it arrived after 3.11.9, so it cannot be depended on.
     """
     if not isinstance(value, str) or not value.strip():
         raise DraftRefused("Draft recipient is missing")
-    # Scanned before parsing. email.utils.parseaddr fails closed on CR and LF but passes a
-    # NUL straight through into the address it returns, so parsing is not the check.
+    # Scanned before parsing. parseaddr and getaddresses both pass a NUL straight through
+    # into the address they return, on every supported version, so parsing is not the check.
     if CONTROL.search(value):
         raise DraftRefused(
             "Recipient contains prohibited control characters and was refused; "
             "the supplied value is not repeated here"
         )
-    _, address = parseaddr(value)
+    # getaddresses counts mailboxes rather than returning the first one, on every supported
+    # version, and it still reads a quoted comma inside a display name as one address.
+    parsed = getaddresses([value])
+    if len(parsed) != 1:
+        raise DraftRefused("Recipient names more than one mailbox and was refused")
+    address = parsed[0][1]
     if not address or not ADDRESS.fullmatch(address):
         raise DraftRefused("Recipient is not a single usable email address and was refused")
     # The display name is dropped. It is recruiter-controlled text with no bearing on where
