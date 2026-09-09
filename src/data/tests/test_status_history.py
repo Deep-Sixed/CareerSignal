@@ -44,20 +44,37 @@ def test_history_cannot_be_edited_or_erased(tmp_path):
                 conn.execute(sql)
 
 
-def test_the_current_status_is_the_latest_event_not_the_latest_timestamp(tmp_path):
-    """Two events can share a second, so ordering must not depend on the clock."""
+def test_events_sharing_a_timestamp_still_have_one_unambiguous_latest(tmp_path):
+    """Two events can share a second, so ordering must not depend on the clock.
+
+    The tie is written rather than raced for. An earlier version recorded three statuses in
+    quick succession and asserted the clock had not ticked between them, which is true on a
+    fast machine and false on a slow one; it failed on a Windows runner mid-second. Racing
+    for a precondition is not the same as establishing it.
+    """
     path = tmp_path / "db"
     instance = repository(path)
-    for status in ("reviewing", "interested", "applied"):
-        instance.record_status("job-key", status, actor="operator")
-    stamps = {row[3] for row in instance.status_history("job-key")}
-    assert len(stamps) == 1, "the events did not share a timestamp; the test proves nothing"
+    walked = ("reviewing", "interested", "applied")
+    with store.connection(path) as conn, store.transaction(conn):
+        for status in walked:
+            conn.execute(
+                "INSERT INTO opportunity_status_history"
+                "(opportunity_id,status,actor,created_at) VALUES ('job-key',?,'operator',1000)",
+                (status,),
+            )
+    assert {row[3] for row in instance.status_history("job-key")} == {1000}
     assert instance.status("job-key") == "applied"
-    assert [row[0] for row in instance.status_history("job-key")] == [
-        "reviewing",
-        "interested",
-        "applied",
-    ]
+    assert [row[0] for row in instance.status_history("job-key")] == list(walked)
+
+
+def test_recording_statuses_in_order_reads_back_in_that_order(tmp_path):
+    """The same property through the public API, without any assumption about the clock."""
+    instance = repository(tmp_path / "db")
+    walked = ("reviewing", "interested", "applied")
+    for status in walked:
+        instance.record_status("job-key", status, actor="operator")
+    assert [row[0] for row in instance.status_history("job-key")] == list(walked)
+    assert instance.status("job-key") == "applied"
 
 
 def test_a_correction_is_a_new_event_and_the_earlier_one_survives(tmp_path):
