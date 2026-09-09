@@ -271,6 +271,32 @@ def test_the_most_recent_source_addresses_the_draft(flow):
     assert flow.repository.addressing(first)["to"] == "third@example.com"
 
 
+def test_an_unconfirmed_intent_can_never_carry_a_receipt(flow, approved):
+    """Pins the invariant the replay branch leans on.
+
+    Workflow.draft returns a receipt only for a confirmed intent. That test would pass
+    even without the condition, because the schema already forbids a receipt on any other
+    state -- so the condition looks redundant to a mutation run. It is kept because
+    application correctness should not rest silently on a database CHECK, and this test
+    makes the dependency explicit: relax the constraint and this fails rather than the
+    workflow quietly starting to hand back receipts for unfinished attempts.
+    """
+    flow.repository.claim(approved)
+    with store.connection(flow.repository.path) as conn:
+        for state in ("attempting", "uncertain"):
+            with pytest.raises(Exception):
+                conn.execute(
+                    "UPDATE draft_intents SET state=?,receipt='forged' WHERE review_id=?",
+                    (state, approved),
+                )
+        assert (
+            conn.execute(
+                "SELECT receipt FROM draft_intents WHERE review_id=?", (approved,)
+            ).fetchone()[0]
+            is None
+        )
+
+
 # --- what the intent records ------------------------------------------------------------
 
 

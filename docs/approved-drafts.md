@@ -129,6 +129,26 @@ refuses the draft; recording an active status again makes the same approval usab
 re-approval needed. Eligibility to act is a **separate dimension** from CRM status, so the
 nine-value status vocabulary is unchanged and no `quarantined` state was added.
 
+**A settled intent decides the outcome before anything else is considered.** Once an
+external attempt has been made, its result is a fact about that attempt, and data arriving
+afterwards cannot revise it. A later message carrying a hostile address must not turn a
+confirmed receipt, or an uncertain result awaiting reconciliation, into a refusal about a
+draft that was never proposed. So the durable intent is read first:
+
+```
+draft()
+  ↓
+existing intent?
+  ├─ confirmed → return the receipt
+  └─ uncertain → return None; reconciliation only
+  ↓ none
+load current material → preflight → claim/verify/bind → create the claimed material
+```
+
+The claim transaction keeps its own check on the same thing. The read above is for replay;
+the one inside the transaction is the atomic guard against an intent appearing in between.
+Removing either would leave a hole the other does not cover.
+
 **A refusal is not an uncertain external write, and must not be recorded as one.** The
 provider is asked whether the draft can be composed *before* any durable intent is
 reserved, so a refused draft leaves nothing to unwind:

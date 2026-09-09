@@ -238,6 +238,80 @@ def test_a_source_arriving_after_the_claim_cannot_move_the_target(tmp_path, monk
     assert "bob@example.com" not in raw
 
 
+# --- a durable intent settles the outcome before anything else is considered ------------
+
+
+def later_hostile_source(workflow):
+    """A later alert for the same opportunity, carrying an address that would be refused."""
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender=HOSTILE_SENDER,
+            subject="A role for you",
+            text=JOB_TEXT,
+        )
+    )
+
+
+def refuse_to_preflight(workflow, monkeypatch):
+    """Prove the preflight is not merely harmless here, but never reached at all."""
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("a settled intent was re-preflighted against a later source")
+
+    monkeypatch.setattr(workflow.provider, "refusal", unreachable)
+
+
+def test_a_confirmed_draft_still_replays_after_a_later_hostile_source(tmp_path, monkeypatch):
+    """The receipt is a fact about an attempt already made. Later data cannot revise it."""
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    receipt = workflow.draft(review)
+    assert workflow.repository.intent(review) == ("confirmed", receipt)
+
+    later_hostile_source(workflow)
+    refuse_to_preflight(workflow, monkeypatch)
+
+    assert workflow.draft(review) == receipt
+    assert len(recorder.creates) == 1, "replay wrote a second draft"
+    assert workflow.repository.intent(review) == ("confirmed", receipt)
+
+
+def test_an_uncertain_draft_stays_reconcilable_after_a_later_hostile_source(tmp_path, monkeypatch):
+    """Uncertain means an external write may have happened. That does not become a refusal."""
+    path = tmp_path / "db"
+    workflow, review = ingest(path)
+    reader = Recorder().read
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=reader
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+    later_hostile_source(workflow)
+    refuse_to_preflight(workflow, monkeypatch)
+
+    # Still not retried, and still not reclassified as a refusal.
+    assert workflow.draft(review) is None
+    assert workflow.repository.intent(review)[0] == "uncertain"
+    assert "draft_refused" not in workflow.repository.audit(review)
+    # Reconciliation remains the only route, and it is unaffected by the later source.
+    assert workflow.reconcile(review) is None
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+
 def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):
     """The opposite case, unchanged: past the request the outcome genuinely is unknown."""
     path = tmp_path / "db"

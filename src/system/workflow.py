@@ -41,6 +41,14 @@ class Workflow:
         )
 
     def draft(self, review_id: str) -> str | None:
+        # A durable intent settles this before anything else is considered. Once an
+        # external attempt has been made, its outcome is a fact about that attempt, and
+        # data arriving afterwards cannot change what it was: a later message carrying a
+        # hostile address must not turn a confirmed receipt, or an uncertain result waiting
+        # to be reconciled, into a refusal about a draft that was never proposed.
+        prior = self.repository.intent(review_id)
+        if prior:
+            return prior[1] if prior[0] == "confirmed" else None
         # Ask whether this draft can be composed at all before reserving anything. A
         # refusal is certain -- nothing was sent -- and recording it as an uncertain
         # external result would strand the review: the decision locks for reconciliation,
@@ -56,6 +64,9 @@ class Workflow:
             raise DraftRefused(reason)
         claim = self.repository.claim(review_id)
         if not claim["claimed"]:
+            # Reachable only if an intent appeared between the read above and this
+            # transaction. The read is for replay; this is the atomic guard, and removing
+            # either would leave a hole the other does not cover.
             return claim["receipt"] if claim["state"] == "confirmed" else None
         # Use exactly the material the claim transaction verified. Re-reading the address
         # here would reopen the window that check closes: a newer source arriving in the
