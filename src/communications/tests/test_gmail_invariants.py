@@ -33,7 +33,12 @@ from communications.gmail import (
     GmailReader,
 )
 
-TOKEN = "synthetic-access-token-value"
+# Every generated token carries this contiguously, so a rendered traceback can be checked
+# for one stable string whatever the surrounding placement is. An earlier version compared
+# against the fixed TOKEN, which a third of the family did not contain, so those cases
+# asserted nothing.
+CANARY = "canary-must-not-appear-in-any-traceback"
+TOKEN = f"{CANARY}-0001"
 MAILBOX = "operator@example.com"
 BODY = (
     "From: alerts@example.com\r\nTo: operator@example.com\r\nSubject: Job alert\r\n"
@@ -126,6 +131,22 @@ def opener(monkeypatch):
     return installed
 
 
+def leaked(exc, token) -> list:
+    """Every form the supplied value could take in a rendered exception chain.
+
+    The raw text is not enough: a traceback that formats the header with !r shows the
+    escaped spelling, so a leak could read as "a\\r\\nb" and pass a raw substring check.
+    """
+    rendered = "".join(traceback.format_exception(exc))
+    forms = {
+        CANARY,
+        token,
+        repr(token)[1:-1],
+        token.encode("unicode_escape").decode("ascii", "replace"),
+    }
+    return sorted(form for form in forms if form and form in rendered)
+
+
 def report(failures, total):
     return f"{len(failures)} of {total} generated cases, first: {failures[:4]}"
 
@@ -140,9 +161,15 @@ UNSAFE_CHARACTERS = (
     + [" ", " ", " ", "﻿", "é", "…"]
 )
 UNSAFE_TOKENS = [
-    placement.format(char=char, token=TOKEN)
+    placement.format(char=char, canary=CANARY)
     for char in UNSAFE_CHARACTERS
-    for placement in ("{char}{token}", "{token}{char}", "syn{char}thetic", "{token}{char}evil")
+    for placement in (
+        "{char}{canary}",
+        "{canary}{char}",
+        "{canary}{char}evil",
+        "pre{char}{canary}",
+        "{canary}-mid{char}post",
+    )
 ]
 # Reserved segments in every casing the identifier pattern would accept.
 RESERVED_SPELLINGS = [
@@ -336,9 +363,9 @@ def test_no_token_substring_appears_in_any_rendered_exception_chain():
             credentials(access_token=token)
         except ValueError as exc:
             refusals += 1
-            rendered = "".join(traceback.format_exception(exc))
-            if TOKEN in rendered or token in rendered:
-                failures.append(token)
+            found = leaked(exc, token)
+            if found:
+                failures.append((token, found))
     assert not failures, report(failures, len(UNSAFE_TOKENS))
     assert refusals == len(UNSAFE_TOKENS), f"only {refusals} of {len(UNSAFE_TOKENS)} refused"
 
@@ -353,14 +380,51 @@ def test_the_network_helper_never_renders_a_header_value_it_was_handed(opener):
             gmail.https_get(LIST_URL, {"Authorization": f"Bearer {token}"})
         except GmailError as exc:
             refusals += 1
-            if TOKEN in "".join(traceback.format_exception(exc)):
-                failures.append(token)
+            found = leaked(exc, token)
+            if found:
+                failures.append((token, found))
         except Exception as exc:  # noqa: BLE001 - any other escape is itself the failure
             failures.append((token, type(exc).__name__, str(exc)[:60]))
     assert not failures, report(failures, len(UNSAFE_TOKENS))
     # Without this the test would pass if every token were somehow accepted and no request
     # ever refused, which is the vacuous outcome it exists to rule out.
     assert refusals > 0, "no header was rejected; the family exercised nothing"
+
+
+def test_the_leak_detector_catches_a_leaking_helper_for_every_generated_token():
+    """Without this the invariants above would pass by never raising, not by never leaking.
+
+    Each case simulates the failure they exist to rule out: the standard library's own
+    rejection, which quotes the whole header value, escaping outward through the helper.
+    """
+    missed = []
+    for token in UNSAFE_TOKENS:
+        try:
+            raise ValueError(f"Invalid header value {('Bearer ' + token).encode()!r}")
+        except ValueError as exc:
+            if not leaked(exc, token):
+                missed.append(token)
+    assert not missed, report(missed, len(UNSAFE_TOKENS))
+
+
+def test_the_leak_detector_sees_a_chained_cause_and_not_a_dropped_one():
+    """`from None` is the whole reason the helper is safe; the detector must depend on it."""
+    token = UNSAFE_TOKENS[0]
+    original = ValueError(f"Invalid header value {('Bearer ' + token)!r}")
+    try:
+        try:
+            raise original
+        except ValueError as exc:
+            raise GmailError("headers rejected") from exc
+    except GmailError as chained:
+        assert leaked(chained, token), "a chained cause is printed and must be seen"
+    try:
+        try:
+            raise original
+        except ValueError:
+            raise GmailError("headers rejected") from None
+    except GmailError as dropped:
+        assert not leaked(dropped, token), "a dropped cause must not be rendered"
 
 
 # --- Invariant 9: a hostile identifier is never turned into a writable endpoint -----------
@@ -560,3 +624,8 @@ def test_the_generated_families_are_large_enough_to_be_worth_running():
     # The character family must actually span the control range, not a chosen few.
     assert set(string.whitespace) <= set(UNSAFE_CHARACTERS) | {" "}
     assert all(segment in RESERVED_SPELLINGS for segment in RESERVED_SEGMENTS)
+    # The leak check compares against one stable string, so every generated token must
+    # actually carry it. Without this, a placement that dropped the canary would make its
+    # cases assert nothing -- which is exactly how the earlier TOKEN comparison went wrong.
+    without = [token for token in UNSAFE_TOKENS if CANARY not in token]
+    assert not without, f"{len(without)} generated tokens do not carry the canary"
