@@ -22,6 +22,10 @@ class ControlledDrafts:
         self._lock = Lock()
         self.calls = 0
 
+    def refusal(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str | None:
+        """Nothing to refuse: this provider composes no headers and contacts nothing."""
+        return None
+
     def create(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str:
         with self._lock:
             self.calls += 1

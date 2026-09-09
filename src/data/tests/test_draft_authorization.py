@@ -132,6 +132,39 @@ def test_approving_an_already_ended_opportunity_is_refused_at_the_decision(flow)
     flow.repository.decide(review, approved=False, actor="operator")
 
 
+def test_the_most_recent_source_addresses_the_draft(flow):
+    """One opportunity can arrive in several messages, and the newest one is the address.
+
+    Ordering by message_id would pick by hash: the recipient of an outward draft would be
+    chosen arbitrarily, and re-ingesting a corrected message might or might not take
+    effect. Row order is the arrival sequence, the same reason status history orders by id.
+    """
+    from communications.message import Message
+
+    def deliver(external_id, sender):
+        return flow.intake_message(
+            Message(
+                namespace="gmail:operator@example.com",
+                external_id=external_id,
+                sender=sender,
+                subject="A role",
+                text=(
+                    "Title: Engineer\r\nCompany: Example Company\r\nLocation: remote\r\n"
+                    "Skills: python, sql\r\nURL: https://jobs.example.com/1\r\n"
+                ),
+            )
+        )[0]
+
+    first = deliver("m1", "first@example.com")
+    assert flow.repository.addressing(first)["to"] == "first@example.com"
+    again = deliver("m2", "second@example.com")
+    assert again == first, "the job did not change, so the review is reused"
+    assert flow.repository.addressing(again)["to"] == "second@example.com"
+    # And a third, to show it is ordering rather than a two-row coincidence.
+    deliver("m3", "third@example.com")
+    assert flow.repository.addressing(first)["to"] == "third@example.com"
+
+
 # --- what the intent records ------------------------------------------------------------
 
 

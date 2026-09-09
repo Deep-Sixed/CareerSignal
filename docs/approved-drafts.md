@@ -100,6 +100,47 @@ refuses the draft; recording an active status again makes the same approval usab
 re-approval needed. Eligibility to act is a **separate dimension** from CRM status, so the
 nine-value status vocabulary is unchanged and no `quarantined` state was added.
 
+**A refusal is not an uncertain external write, and must not be recorded as one.** The
+provider is asked whether the draft can be composed *before* any durable intent is
+reserved, so a refused draft leaves nothing to unwind:
+
+```
+draft_material  →  provider.refusal()  →  refused  →  audit 'draft_refused'
+                                                      no intent row
+                                                      approval intact
+                        │
+                        └─ allowed →  claim (reserves the intent)
+                                   →  provider.create()   ← the network starts here
+                                   →  finish(receipt) or, on any failure past this
+                                      point, finish(None) = uncertain
+```
+
+The distinction is load-bearing rather than tidy. An intent means an external write was
+attempted and its outcome may be unknown; it locks the decision for reconciliation, and
+reconciliation cannot find a draft that was never created. Recording a refusal that way
+would strand the review: the operator would hold an approval they cannot use, with no route
+back except editing the database. Everything past `create()` keeps the uncertain behaviour
+exactly as before, because past that point the outcome genuinely is unknown.
+
+`refusal()` runs the real composition and reports what it raised, rather than checking the
+same rules a second time. Two implementations of one rule are two sources of truth, and
+they drift the first time only one is corrected.
+
+## Correcting a source
+
+An opportunity can arrive in more than one message, and replay reuses the review when the
+job has not changed — so a review can have several sources. The **most recently ingested**
+one addresses the draft.
+
+That is a rule, not an accident. Ordering by message id would pick by hash: the recipient
+of an outward draft would be chosen arbitrarily, and re-ingesting a corrected message might
+or might not take effect. Row order is the arrival sequence, for the same reason status
+history orders by id rather than by a timestamp.
+
+So the recovery path is: the hostile message is refused and retained; the operator
+re-ingests the opportunity from a clean message; the newest source addresses the draft; the
+existing approval still stands. Proven end to end rather than described.
+
 ## Header injection
 
 The recipient comes from the recruiter's `From` header and the subject from theirs. Both

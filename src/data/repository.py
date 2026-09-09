@@ -446,14 +446,51 @@ class Repository:
         here: the record of what arrived must not be quietly rewritten to make it sendable.
         """
         with connection(self.path) as conn:
+            # One opportunity can arrive in more than one message, and the review is
+            # reused when the job has not changed, so a review can have several sources.
+            # The most recently ingested one wins: ordering by message_id would pick by
+            # hash, which means the recipient of an outward draft would be chosen
+            # arbitrarily and re-ingesting a corrected message might or might not take
+            # effect. Order by the row the insert assigned, for the same reason status
+            # history orders by id rather than by a timestamp: it is the arrival sequence.
             row = conn.execute(
                 "SELECT s.sender,s.subject FROM reviews r "
                 "JOIN provenance p ON p.review_id=r.id "
                 "JOIN message_sources s ON s.message_id=p.message_id "
-                "WHERE r.id=? ORDER BY s.message_id LIMIT 1",
+                "WHERE r.id=? ORDER BY p.rowid DESC LIMIT 1",
                 (review_id,),
             ).fetchone()
             return {"to": row[0], "subject": row[1]} if row else {"to": "", "subject": ""}
+
+    def draft_material(self, review_id):
+        """Everything a draft would be composed from, read without reserving anything.
+
+        Deliberately separate from claim(): the provider has to be able to refuse a draft
+        before any durable intent exists, because a refusal must not consume the
+        operator's approval. The draft body is re-checked against the approval inside
+        claim(), so reading it here cannot authorize a stale one.
+        """
+        addressing = self.addressing(review_id)
+        with connection(self.path) as conn:
+            binding = self._binding(conn, review_id)
+        return {"body": binding["draft"], **addressing}
+
+    def refuse(self, review_id):
+        """Record that a draft was refused before anything left this machine.
+
+        No intent row is written. That is the whole point: an intent means an external
+        write was attempted and its outcome may be unknown, and here it is known that
+        nothing was sent. Writing one would strand the review -- the decision locks for
+        reconciliation, and reconciliation cannot find a draft that was never created.
+        """
+        with connection(self.path) as conn, transaction(conn):
+            if conn.execute(
+                "SELECT 1 FROM draft_intents WHERE review_id=?", (review_id,)
+            ).fetchone():
+                raise ValueError("Draft already attempted; a refusal cannot follow an attempt")
+            conn.execute(
+                "INSERT INTO audit(review_id,event) VALUES (?, 'draft_refused')", (review_id,)
+            )
 
     def authorization(self, review_id):
         """What an approval for this review is bound to, and what is true now."""

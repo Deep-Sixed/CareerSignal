@@ -5,7 +5,7 @@ from communications.message import Message
 from data.repository import Repository
 from recruiting.extraction import PARSER_VERSION, extract, extract_records
 from recruiting.models import Profile, evaluate, fingerprint
-from recruiting.ports import DraftProvider
+from recruiting.ports import DraftProvider, DraftRefused
 
 
 class Workflow:
@@ -41,6 +41,19 @@ class Workflow:
         )
 
     def draft(self, review_id: str) -> str | None:
+        # Ask whether this draft can be composed at all before reserving anything. A
+        # refusal is certain -- nothing was sent -- and recording it as an uncertain
+        # external result would strand the review: the decision locks for reconciliation,
+        # and reconciliation cannot find a draft that was never created. With nothing
+        # reserved there is also nothing to unwind, which is a stronger guarantee than
+        # releasing a claim afterwards would be.
+        material = self.repository.draft_material(review_id)
+        reason = self.provider.refusal(
+            review_id, material["body"], to=material["to"], subject_line=material["subject"]
+        )
+        if reason:
+            self.repository.refuse(review_id)
+            raise DraftRefused(reason)
         claimed, state, value = self.repository.claim(review_id)
         if not claimed:
             return value if state == "confirmed" else None
@@ -52,7 +65,8 @@ class Workflow:
             self.repository.finish(review_id, receipt)
             return receipt
         except BaseException:
-            # The provider might have succeeded. Never automatically repeat this write.
+            # Past this point the provider might have succeeded, so the outcome genuinely
+            # is unknown. Never automatically repeat this write.
             self.repository.finish(review_id, None)
             raise
 

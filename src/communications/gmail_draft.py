@@ -29,6 +29,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from communications.gmail import GMAIL_HOST, HEADER_SAFE, GmailError
 from communications.message import MAX_MESSAGE_BYTES
+from recruiting.ports import DraftRefused as PortDraftRefused
 
 API_ROOT = f"https://{GMAIL_HOST}/gmail/v1/"
 COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
@@ -86,11 +87,13 @@ MAX_DRAFTS = 100
 MAX_DRAFT_PAGES = 10
 
 
-class DraftRefused(GmailError):
+class DraftRefused(PortDraftRefused, GmailError):
     """The draft was not created and no request was made. The offending value is retained.
 
     Refusing is not discarding. The evidence that caused the refusal is untouched in
-    storage, so the operator can correct the source and reevaluate.
+    storage, so the operator can correct the source and reevaluate. It also carries the
+    port's refusal type, so a caller can tell a refusal apart from a failure that may have
+    happened after Gmail was contacted -- the two call for opposite handling.
     """
 
 
@@ -361,6 +364,24 @@ class GmailDrafts:
         if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
             raise GmailError("Gmail returned an unusable draft identifier")
         return value
+
+    def refusal(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str | None:
+        """Why this draft cannot be created, or None. Contacts nothing.
+
+        This runs the real composition rather than a parallel set of checks. A second
+        implementation of the same rules is a second source of truth, and the two would
+        drift the first time only one of them was corrected.
+        """
+        try:
+            compose(
+                to=recipient(to),
+                subject_line=subject(subject_line),
+                body=body,
+                intent=intent_key(key),
+            )
+        except DraftRefused as exc:
+            return str(exc)
+        return None
 
     def create(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str:
         """Create one draft and return its provider receipt. Never sends it."""

@@ -14,7 +14,6 @@ from communications import gmail, gmail_draft
 from communications.controlled import ControlledDrafts
 from communications.gmail_draft import (
     COMPOSE_TOKEN_VARIABLE,
-    DraftRefused,
     GmailComposeCredentials,
     GmailDrafts,
 )
@@ -22,6 +21,7 @@ from communications.message import Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
+from recruiting.ports import DraftRefused
 from system import cli
 from system.workflow import Workflow
 
@@ -111,34 +111,104 @@ def test_a_hostile_sender_reaches_storage_unchanged(tmp_path):
 # --- refusing an outward write ------------------------------------------------------------
 
 
-def test_an_injected_recipient_stops_the_draft_before_gmail_is_contacted(tmp_path):
+@pytest.mark.parametrize(
+    "kind,sender,subject",
+    [
+        ("recipient", HOSTILE_SENDER, "A role for you"),
+        ("subject", "recruiter@example.com", "A role\r\nX-Injected: yes"),
+    ],
+)
+def test_a_hostile_header_is_refused_without_stranding_the_review(tmp_path, kind, sender, subject):
+    """A refusal is certain, so it must not be recorded as an unknown external result.
+
+    Recording one would strand the review: an intent locks the decision for
+    reconciliation, and reconciliation cannot find a draft that was never created. The
+    operator would be left with an approval they cannot use and no way back without
+    editing the database by hand.
+    """
     path = tmp_path / "db"
     recorder = Recorder()
-    workflow, review = ingest(path, sender=HOSTILE_SENDER)
+    workflow, review = ingest(path, sender=sender, subject=subject)
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
     workflow.repository.decide(review, approved=True, actor="operator")
     with pytest.raises(DraftRefused):
         workflow.draft(review)
+
     assert recorder.creates == [], "a refused draft still contacted Gmail"
-    # The attempt is recorded as uncertain rather than silently forgotten, and is never
-    # automatically repeated.
-    assert workflow.repository.intent(review)[0] == "uncertain"
-    assert workflow.draft(review) is None
-
-
-def test_an_injected_subject_stops_the_draft_too(tmp_path):
-    path = tmp_path / "db"
-    recorder = Recorder()
-    workflow, review = ingest(path, subject="A role\r\nX-Injected: yes")
-    workflow.provider = GmailDrafts(
-        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
-    )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    # Nothing was reserved, so there is nothing to unwind and nothing to reconcile.
+    assert workflow.repository.intent(review) is None
+    assert "draft_refused" in workflow.repository.audit(review)
+    assert "draft_uncertain" not in workflow.repository.audit(review)
+    # The approval survives the refusal, which is what makes correcting and reevaluating
+    # possible at all.
+    assert workflow.repository.authorization(review)["approved"] is True
+    # Repeating it refuses again rather than degrading into a different state.
     with pytest.raises(DraftRefused):
         workflow.draft(review)
     assert recorder.creates == []
+
+
+def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
+    """Refuse, correct, reevaluate -- proven end to end rather than described."""
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, refused = ingest(path, sender=HOSTILE_SENDER)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(refused, approved=True, actor="operator")
+    with pytest.raises(DraftRefused):
+        workflow.draft(refused)
+
+    # The evidence that caused the refusal is retained exactly as it arrived.
+    with store.connection(path) as conn:
+        stored = conn.execute("SELECT sender FROM message_sources ORDER BY message_id").fetchall()
+    assert any("attacker@example.com" in row[0] for row in stored)
+
+    # The operator corrects the source by re-ingesting it, which is this project's only
+    # route to a new evaluation; the opportunity dedupes and a fresh review is produced.
+    message = Message(
+        namespace="gmail:operator@example.com",
+        external_id="m2",
+        sender="recruiter@example.com",
+        subject="A role for you",
+        text=JOB_TEXT,
+    )
+    corrected = workflow.intake_message(message)[0]
+    # The job did not change, so replay reuses the review rather than inventing a new one.
+    # What changed is where it came from, and the most recent source is the one that
+    # addresses the draft.
+    assert corrected == refused
+    assert workflow.repository.addressing(corrected)["to"] == "recruiter@example.com"
+
+    receipt = workflow.draft(corrected)
+    assert receipt == "gmail-draft:draft123"
+    assert len(recorder.creates) == 1
+    raw = base64.urlsafe_b64decode(json.loads(recorder.creates[0][1])["message"]["raw"]).decode()
+    assert "To: recruiter@example.com" in raw
+    assert "attacker@example.com" not in raw
+
+
+def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):
+    """The opposite case, unchanged: past the request the outcome genuinely is unknown."""
+    path = tmp_path / "db"
+    workflow, review = ingest(path)
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+    assert "draft_uncertain" in workflow.repository.audit(review)
+    # And it is never blindly retried.
+    assert workflow.draft(review) is None
 
 
 def test_an_unapproved_review_never_reaches_the_provider(tmp_path):
