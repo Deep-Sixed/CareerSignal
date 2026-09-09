@@ -1,0 +1,281 @@
+"""End to end: a draft reaches an external mailbox only when the operator authorized it.
+
+This is the first capability where a mistake creates content in somebody's account rather
+than a wrong line on a terminal, so the tests start from a hostile recruiter message and
+prove what does not happen.
+"""
+
+import base64
+import json
+
+import pytest
+
+from communications import gmail, gmail_draft
+from communications.controlled import ControlledDrafts
+from communications.gmail_draft import (
+    COMPOSE_TOKEN_VARIABLE,
+    DraftRefused,
+    GmailComposeCredentials,
+    GmailDrafts,
+)
+from communications.message import Message
+from data import store
+from data.repository import Repository
+from recruiting.models import Profile
+from system import cli
+from system.workflow import Workflow
+
+TOKEN = "synthetic-compose-token-value"
+MAILBOX = "operator@example.com"
+HOSTILE_SENDER = "recruiter@example.com\r\nBcc: attacker@example.com"
+JOB_TEXT = (
+    "Title: IAM Architect\r\n"
+    "Company: Example Corp\r\n"
+    "Location: remote\r\n"
+    "Skills: Python, SQL\r\n"
+    "URL: https://jobs.example.com/roles/1\r\n"
+)
+
+
+def raw_message(sender="recruiter@example.com", subject="A role for you"):
+    return (
+        f"From: {sender}\r\n"
+        f"To: {MAILBOX}\r\n"
+        f"Subject: {subject}\r\n"
+        "MIME-Version: 1.0\r\n"
+        'Content-Type: text/plain; charset="utf-8"\r\n'
+        "\r\n"
+        f"{JOB_TEXT}"
+    ).encode()
+
+
+def ingest(path, *, sender="recruiter@example.com", subject="A role for you"):
+    """Ingest one recruiter message and approve the review it produced."""
+    workflow = Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    message = Message(
+        namespace="gmail:operator@example.com",
+        external_id="m1",
+        sender=sender,
+        subject=subject,
+        text=JOB_TEXT,
+    )
+    review = workflow.intake_message(message)[0]
+    return workflow, review
+
+
+class Recorder:
+    def __init__(self, created=None):
+        self.created = created or {"id": "draft123"}
+        self.creates = []
+        self.reads = []
+
+    def create(self, url, headers, body):
+        self.creates.append((url, body))
+        return 200, json.dumps(self.created).encode()
+
+    def read(self, url, headers):
+        self.reads.append(url)
+        return 200, json.dumps({}).encode()
+
+
+def run(monkeypatch, capsys, *arguments):
+    monkeypatch.setattr("sys.argv", ["careersignal", *arguments])
+    cli.main()
+    return capsys.readouterr().out
+
+
+def refusal(monkeypatch, capsys, *arguments):
+    with pytest.raises(SystemExit) as stopped:
+        run(monkeypatch, capsys, *arguments)
+    assert stopped.value.code == 2, arguments
+    return capsys.readouterr().err
+
+
+# --- the premise the rest of the tests depend on -----------------------------------------
+
+
+def test_a_hostile_sender_reaches_storage_unchanged(tmp_path):
+    """Stated rather than assumed: evidence is never rewritten to make it sendable.
+
+    If normalization silently repaired the From header, every refusal below would be
+    testing nothing.
+    """
+    path = tmp_path / "db"
+    workflow, review = ingest(path, sender=HOSTILE_SENDER)
+    with store.connection(path) as conn:
+        stored = conn.execute("SELECT sender FROM message_sources").fetchone()[0]
+    assert "\n" in stored and "attacker@example.com" in stored
+    assert workflow.repository.addressing(review)["to"] == stored
+
+
+# --- refusing an outward write ------------------------------------------------------------
+
+
+def test_an_injected_recipient_stops_the_draft_before_gmail_is_contacted(tmp_path):
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path, sender=HOSTILE_SENDER)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    with pytest.raises(DraftRefused):
+        workflow.draft(review)
+    assert recorder.creates == [], "a refused draft still contacted Gmail"
+    # The attempt is recorded as uncertain rather than silently forgotten, and is never
+    # automatically repeated.
+    assert workflow.repository.intent(review)[0] == "uncertain"
+    assert workflow.draft(review) is None
+
+
+def test_an_injected_subject_stops_the_draft_too(tmp_path):
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path, subject="A role\r\nX-Injected: yes")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    with pytest.raises(DraftRefused):
+        workflow.draft(review)
+    assert recorder.creates == []
+
+
+def test_an_unapproved_review_never_reaches_the_provider(tmp_path):
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    with pytest.raises(ValueError, match="Explicit approval is required"):
+        workflow.draft(review)
+    assert recorder.creates == []
+
+
+def test_an_ended_opportunity_never_reaches_the_provider(tmp_path):
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    with store.connection(path) as conn:
+        opportunity = conn.execute(
+            "SELECT opportunity_id FROM reviews WHERE id=?", (review,)
+        ).fetchone()[0]
+    workflow.repository.record_status(opportunity, "rejected", actor="operator", reason="passed")
+    with pytest.raises(ValueError, match="status is rejected"):
+        workflow.draft(review)
+    assert recorder.creates == []
+
+
+# --- the authorized path ------------------------------------------------------------------
+
+
+def test_an_approved_draft_is_created_once_and_addressed_to_the_recruiter(tmp_path):
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+    receipt = workflow.draft(review)
+    assert receipt == "gmail-draft:draft123"
+    assert len(recorder.creates) == 1
+    raw = base64.urlsafe_b64decode(json.loads(recorder.creates[0][1])["message"]["raw"]).decode()
+    assert "To: recruiter@example.com" in raw
+    assert "Bcc" not in raw
+    # Replay does not write again: the confirmed receipt is returned from the record.
+    assert workflow.draft(review) == receipt
+    assert len(recorder.creates) == 1
+
+
+# --- the read grant is not a write grant ---------------------------------------------------
+
+
+def test_the_read_adapter_still_refuses_every_scope_but_readonly():
+    """PR #7's guarantee is not weakened by this one; the two credentials stay separate."""
+    with pytest.raises(ValueError):
+        gmail.GmailCredentials(TOKEN, MAILBOX, scopes=(gmail_draft.COMPOSE_SCOPE,))
+    with pytest.raises(ValueError):
+        gmail_draft.GmailComposeCredentials(TOKEN, MAILBOX, scopes=(gmail.READONLY_SCOPE,))
+    assert gmail.TOKEN_VARIABLE != COMPOSE_TOKEN_VARIABLE
+
+
+def test_the_reader_cannot_reach_the_drafts_collection():
+    with pytest.raises(gmail.GmailError):
+        gmail.readable_url(gmail.API_ROOT + "users/me/drafts")
+
+
+# --- the CLI ------------------------------------------------------------------------------
+
+
+def test_the_external_provider_is_never_the_default(tmp_path, monkeypatch, capsys):
+    """Creating content in a mailbox has to be asked for, not fallen into."""
+    path = tmp_path / "db"
+    _, review = ingest(path)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the controlled path constructed a Gmail draft writer")
+
+    monkeypatch.setattr(gmail_draft.GmailDrafts, "__init__", refuse)
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    printed = json.loads(run(monkeypatch, capsys, "draft", review, "--db", str(path)))
+    assert printed["state"] == "confirmed"
+    assert printed["receipt"].startswith("controlled-")
+
+
+def test_the_gmail_provider_requires_its_own_token_and_a_mailbox(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "db"
+    _, review = ingest(path)
+    monkeypatch.delenv(COMPOSE_TOKEN_VARIABLE, raising=False)
+    assert COMPOSE_TOKEN_VARIABLE in refusal(
+        monkeypatch, capsys, "draft", review, "--provider", "gmail", "--db", str(path)
+    )
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+    assert "--mailbox" in refusal(
+        monkeypatch, capsys, "draft", review, "--provider", "gmail", "--db", str(path)
+    )
+    # The read token is not accepted in place of the compose token.
+    monkeypatch.delenv(COMPOSE_TOKEN_VARIABLE, raising=False)
+    monkeypatch.setenv(gmail.TOKEN_VARIABLE, TOKEN)
+    assert COMPOSE_TOKEN_VARIABLE in refusal(
+        monkeypatch,
+        capsys,
+        "draft",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+
+
+def test_approving_requires_an_actor_and_a_review(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "db"
+    _, review = ingest(path)
+    assert "--actor" in refusal(monkeypatch, capsys, "approve", review, "--db", str(path))
+    assert "review id" in refusal(
+        monkeypatch, capsys, "approve", "--actor", "operator", "--db", str(path)
+    )
+    assert "review id" in refusal(monkeypatch, capsys, "draft", "--db", str(path))
+    assert "--actor" in refusal(
+        monkeypatch, capsys, "approve", review, "--actor", "   ", "--db", str(path)
+    )
+
+
+def test_a_changed_review_is_refused_at_the_command_line_with_a_reason(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    _, review = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute("UPDATE reviews SET draft='different wording' WHERE id=?", (review,))
+    assert "approve it again" in refusal(monkeypatch, capsys, "draft", review, "--db", str(path))

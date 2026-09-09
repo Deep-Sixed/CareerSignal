@@ -1,6 +1,8 @@
 # Read-only Gmail intake
 
-CareerSignal can read an authorized Gmail mailbox and turn its messages into review packets. It cannot send, reply, draft, label, delete, or modify anything. That is a property of the code, not a policy: `communications/gmail.py` defines no write operation and the only network helper fixes its method to `GET`.
+CareerSignal can read an authorized Gmail mailbox and turn its messages into review packets. This adapter cannot send, reply, draft, label, delete, or modify anything. That is a property of the code, not a policy: `communications/gmail.py` defines no write operation and the only network helper fixes its method to `GET`.
+
+CareerSignal does create Gmail drafts, from an explicitly approved review only, and it does so through a different module under a different credential — see [approved drafts](approved-drafts.md). The separation is the point: the read grant here accepts no scope but `gmail.readonly`, `drafts` is in the reserved-segment list below, and nothing in this file can reach the drafts collection. Neither credential can be used for the other's work.
 
 ## What the adapter may address
 

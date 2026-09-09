@@ -6,6 +6,11 @@ import os
 
 from communications.controlled import ControlledDrafts
 from communications.gmail import TOKEN_VARIABLE, GmailCredentials, GmailReader
+from communications.gmail_draft import (
+    COMPOSE_TOKEN_VARIABLE,
+    GmailComposeCredentials,
+    GmailDrafts,
+)
 from communications.message import MAX_MESSAGE_BYTES, Message
 from data.repository import Repository
 from data.store import database_path, migrate, verify_contract
@@ -13,6 +18,18 @@ from recruiting.models import Profile
 from system.demo import golden_workflow
 from system.views import detail, table
 from system.workflow import Workflow
+
+
+def _provider(args, parser):
+    """Choose where a draft is created. The external one is never chosen implicitly."""
+    if args.provider != "gmail":
+        return ControlledDrafts()
+    token = os.getenv(COMPOSE_TOKEN_VARIABLE, "")
+    if not token.strip():
+        parser.error(f"--provider gmail requires {COMPOSE_TOKEN_VARIABLE} in the environment")
+    if not args.mailbox:
+        parser.error("--provider gmail requires --mailbox")
+    return GmailDrafts(GmailComposeCredentials(token, args.mailbox))
 
 
 def main():
@@ -27,10 +44,25 @@ def main():
             "gmail-ingest",
             "opportunities",
             "opportunity",
+            "approve",
+            "reject",
+            "draft",
+            "reconcile",
         ),
     )
     parser.add_argument(
-        "identifier", nargs="?", help="Opportunity id, used only by the opportunity command"
+        "identifier",
+        nargs="?",
+        help="Opportunity id for the opportunity command; review id for approve, reject, "
+        "draft and reconcile",
+    )
+    parser.add_argument("--actor", help="Who is recording the decision; required to approve")
+    parser.add_argument(
+        "--provider",
+        choices=("controlled", "gmail"),
+        default="controlled",
+        help="Where a draft is created. 'controlled' stays on this machine. 'gmail' creates "
+        "a real draft in the authorized mailbox and is never the default.",
     )
     parser.add_argument("--message", help="Local RFC email file, used only by ingest")
     parser.add_argument("--namespace", help="Stable mailbox/source identifier for ingest")
@@ -105,6 +137,36 @@ def main():
             parser.error(str(exc))
         print(json.dumps(rows, indent=2) if args.json else table(rows))
         return
+    elif args.command in {"approve", "reject"}:
+        if not args.identifier:
+            parser.error(f"{args.command} requires a review id")
+        if not args.actor or not args.actor.strip():
+            parser.error(f"{args.command} requires --actor")
+        repository = Repository(path)
+        try:
+            repository.decide(args.identifier, approved=args.command == "approve", actor=args.actor)
+        except (ValueError, KeyError) as exc:
+            parser.error(str(exc))
+        result = {"review": args.identifier, "decision": args.command}
+    elif args.command in {"draft", "reconcile"}:
+        if not args.identifier:
+            parser.error(f"{args.command} requires a review id")
+        repository = Repository(path)
+        workflow = Workflow(repository, _provider(args, parser), Profile(("placeholder",)))
+        try:
+            receipt = (
+                workflow.draft(args.identifier)
+                if args.command == "draft"
+                else workflow.reconcile(args.identifier)
+            )
+        except (ValueError, KeyError) as exc:
+            parser.error(str(exc))
+        state = repository.intent(args.identifier)
+        result = {
+            "review": args.identifier,
+            "receipt": receipt,
+            "state": state[0] if state else None,
+        }
     elif args.command == "gmail-ingest":
         # The token is read from the environment only, never from a flag: a command line is
         # visible in shell history and to other users of the machine.

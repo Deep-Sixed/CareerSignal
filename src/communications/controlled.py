@@ -22,13 +22,16 @@ class ControlledDrafts:
         self._lock = Lock()
         self.calls = 0
 
-    def create(self, key: str, body: str) -> str:
+    def create(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str:
         with self._lock:
             self.calls += 1
-            if key in self._drafts and self._drafts[key][0] != body:
+            # Addressing is part of the content: the same words to a different recipient is
+            # a different draft, and replaying one as the other would be a silent misdelivery.
+            content = [body, to, subject_line]
+            if key in self._drafts and self._drafts[key][0] != content:
                 raise ValueError("Idempotency key reused with changed content")
-            receipt = "controlled-" + fingerprint([key, body])
-            self._drafts[key] = (body, receipt)
+            receipt = "controlled-" + fingerprint([key, content])
+            self._drafts[key] = (content, receipt)
             return receipt
 
     def lookup(self, key: str) -> str | None:

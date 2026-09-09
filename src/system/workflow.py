@@ -44,8 +44,11 @@ class Workflow:
         claimed, state, value = self.repository.claim(review_id)
         if not claimed:
             return value if state == "confirmed" else None
+        addressing = self.repository.addressing(review_id)
         try:
-            receipt = self.provider.create(review_id, value)
+            receipt = self.provider.create(
+                review_id, value, to=addressing["to"], subject_line=addressing["subject"]
+            )
             self.repository.finish(review_id, receipt)
             return receipt
         except BaseException:

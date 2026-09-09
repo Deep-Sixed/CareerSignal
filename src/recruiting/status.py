@@ -21,6 +21,11 @@ INITIAL = "new"
 # recording one of these again; there is no separate "reopened" status, because the history
 # already shows what it was reopened from.
 ACTIVE = ("reviewing", "interested", "applied", "interviewing", "offer")
+# Statuses that end the operator's interest in an opportunity. Recording one of these does
+# not close the record -- history is append-only and an active status can follow -- but it
+# does withdraw authority to act outward on the opportunity's behalf while it stands.
+# "new" is deliberately in neither set: nothing has been decided about it yet.
+TERMINAL = ("rejected", "withdrawn", "closed")
 
 
 def validate(status) -> str:
