@@ -151,6 +151,28 @@ def test_the_detail_view_carries_the_packet_and_the_whole_history(tmp_path):
     assert record["company"] == first["company"]
 
 
+def test_the_detail_history_is_ordered_by_event_not_by_clock(tmp_path):
+    """The detail view has its own history query, so it needs its own proof.
+
+    Mutating the list query's ordering was caught; mutating this one was not, because no
+    test made the two orderings disagree here.
+    """
+    path = tmp_path / "db"
+    repository = seeded(path)
+    target = next(r for r in repository.opportunities() if r["title"] == "IAM Architect")
+    written = (("interested", 5000), ("applied", 1000), ("interviewing", 3000))
+    with store.connection(path) as conn, store.transaction(conn):
+        for status, stamp in written:
+            conn.execute(
+                "INSERT INTO opportunity_status_history"
+                "(opportunity_id,status,actor,created_at) VALUES (?,?,'operator',?)",
+                (target["id"], status, stamp),
+            )
+    record = repository.opportunity(target["id"])
+    assert [event["status"] for event in record["history"]][-3:] == [s for s, _ in written]
+    assert record["history"][-1]["status"] == record["status"] == "interviewing"
+
+
 def test_an_unknown_opportunity_is_a_key_error(tmp_path):
     with pytest.raises(KeyError):
         seeded(tmp_path / "db").opportunity("missing")
