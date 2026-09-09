@@ -54,13 +54,19 @@ class Workflow:
         if reason:
             self.repository.refuse(review_id)
             raise DraftRefused(reason)
-        claimed, state, value = self.repository.claim(review_id)
-        if not claimed:
-            return value if state == "confirmed" else None
-        addressing = self.repository.addressing(review_id)
+        claim = self.repository.claim(review_id)
+        if not claim["claimed"]:
+            return claim["receipt"] if claim["state"] == "confirmed" else None
+        # Use exactly the material the claim transaction verified. Re-reading the address
+        # here would reopen the window that check closes: a newer source arriving in the
+        # interval would move the target of an already authorized write.
+        approved = claim["material"]
         try:
             receipt = self.provider.create(
-                review_id, value, to=addressing["to"], subject_line=addressing["subject"]
+                review_id,
+                approved["body"],
+                to=approved["to"],
+                subject_line=approved["subject"],
             )
             self.repository.finish(review_id, receipt)
             return receipt

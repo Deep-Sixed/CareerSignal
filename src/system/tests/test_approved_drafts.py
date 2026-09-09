@@ -178,17 +178,64 @@ def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
     )
     corrected = workflow.intake_message(message)[0]
     # The job did not change, so replay reuses the review rather than inventing a new one.
-    # What changed is where it came from, and the most recent source is the one that
-    # addresses the draft.
+    # What changed is where it came from, and the most recent source addresses the draft.
     assert corrected == refused
     assert workflow.repository.addressing(corrected)["to"] == "recruiter@example.com"
 
+    # The old approval does not carry over onto the new target. It was a decision about
+    # writing to a particular recipient, and that recipient changed.
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        workflow.draft(corrected)
+    assert recorder.creates == []
+    assert workflow.repository.intent(corrected) is None
+
+    workflow.repository.decide(corrected, approved=True, actor="operator")
     receipt = workflow.draft(corrected)
     assert receipt == "gmail-draft:draft123"
     assert len(recorder.creates) == 1
     raw = base64.urlsafe_b64decode(json.loads(recorder.creates[0][1])["message"]["raw"]).decode()
     assert "To: recruiter@example.com" in raw
     assert "attacker@example.com" not in raw
+
+
+def test_a_source_arriving_after_the_claim_cannot_move_the_target(tmp_path, monkeypatch):
+    """The address that was authorized is the address that is written to.
+
+    draft() used to re-read the address after claiming, so a message arriving in that
+    interval could redirect an already authorized write. This drives that exact interval:
+    a competing source lands between the claim committing and the provider being called.
+    """
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path, sender="jane@example.com")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    workflow.repository.decide(review, approved=True, actor="operator")
+
+    original = workflow.repository.claim
+
+    def claim_then_race(review_id):
+        claimed = original(review_id)
+        # A later message about the same job, from somebody else, lands right here.
+        workflow.intake_message(
+            Message(
+                namespace="gmail:operator@example.com",
+                external_id="m2",
+                sender="bob@example.com",
+                subject="A role for you",
+                text=JOB_TEXT,
+            )
+        )
+        return claimed
+
+    monkeypatch.setattr(workflow.repository, "claim", claim_then_race)
+    workflow.draft(review)
+
+    assert workflow.repository.addressing(review)["to"] == "bob@example.com"
+    raw = base64.urlsafe_b64decode(json.loads(recorder.creates[0][1])["message"]["raw"]).decode()
+    assert "To: jane@example.com" in raw, "the write went to a target that was never approved"
+    assert "bob@example.com" not in raw
 
 
 def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):

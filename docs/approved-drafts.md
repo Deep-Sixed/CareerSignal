@@ -45,13 +45,34 @@ authorize a local action and not enough to authorize writing into a mailbox: bet
 operator reading a review and the draft being created, the review can be rescored, its
 wording can change, or the opportunity can be ended.
 
-Migration 0005 binds an approval to what was read:
+Migrations 0005 and 0006 bind an approval to what was read *and to who it was for*:
 
 ```
-content_digest    the review's digest of the opportunity it describes
-draft_digest      the exact draft wording that was approved
-status_event_id   the status history event current at the moment of approval
+content_digest     the review's digest of the opportunity it describes
+draft_digest       the exact draft wording that was approved
+status_event_id    the status history event current at the moment of approval
+addressing_digest  the sender and subject the draft would be addressed with
+source_message_id  which message said so (provenance, not authorization)
 ```
+
+An approval authorizes an outward action, and an outward action has a target. Binding the
+body without binding the recipient leaves the target free to move: an opportunity can
+arrive in more than one message, replay reuses the review when the job has not changed, and
+the newest source addresses the draft. So a second message about the same job, from a
+different sender, moved the target of an already approved draft while every bound value
+stayed identical:
+
+```
+approve while the source is jane@example.com
+a later message about the same job arrives from bob@example.com
+content_digest, draft_digest and status all unchanged
+draft created, addressed to bob@example.com, with no second approval
+```
+
+`source_message_id` is deliberately outside the digest. The same sender and subject arriving
+in a second message is not a materially different outward action, and folding the id in
+would make the guard fire on ordinary duplicate alerts. It is recorded for provenance, so a
+later disagreement can be traced to a specific message.
 
 At draft time, inside the same transaction that reserves the write, all of it is checked
 again. The draft is refused if:
@@ -63,6 +84,8 @@ again. The draft is refused if:
   words about a specific opportunity.
 * the approved draft wording changed. Same reason.
 * the current status is `rejected`, `withdrawn` or `closed`.
+* the addressing changed — a newer source with a different sender or subject. The message
+  is *"Addressing changed since approval; review and approve again."*
 
 An ordinary move through the pipeline — `interested` to `applied`, `reviewing` to
 `interested` — does **not** invalidate an approval. Those transitions do not mean the
@@ -74,7 +97,13 @@ outward on its behalf.
 The authorization check and the row that reserves the write are one `BEGIN IMMEDIATE`
 transaction, so no status event can be appended between deciding that the opportunity is
 still active and claiming the draft intent. The event id observed by that check is recorded
-on the intent.
+on the intent, and so is the source message.
+
+**The claim returns the material it verified, and that is what is sent.** Re-reading the
+address afterwards would reopen the window the check closes: a message arriving between the
+claim committing and the request being made could redirect an already authorized write, or
+introduce a hostile header past the point where a refusal can still be classified
+correctly. There is nothing to re-read, so neither can happen.
 
 This is worth being precise about, because it is not a lock on the external write. The
 Gmail request happens after the transaction commits — it has to, since no write reservation
@@ -138,8 +167,17 @@ or might not take effect. Row order is the arrival sequence, for the same reason
 history orders by id rather than by a timestamp.
 
 So the recovery path is: the hostile message is refused and retained; the operator
-re-ingests the opportunity from a clean message; the newest source addresses the draft; the
-existing approval still stands. Proven end to end rather than described.
+re-ingests the opportunity from a clean message; the newest source addresses the draft —
+and because the target changed, **the approval does not carry over**. The operator approves
+again, having read where the message will now go:
+
+```
+REFUSE  →  correct source  →  REEVALUATE  →  target changed  →  REAPPROVE
+```
+
+That is not discarding an approval because of an error. It is recognizing that the requested
+external action is now materially different. A correction that leaves the sender and subject
+unchanged needs no new decision. Proven end to end rather than described.
 
 ## Header injection
 

@@ -106,8 +106,9 @@ def test_an_ordinary_move_through_the_pipeline_does_not_invalidate_the_approval(
     flow.repository.record_status(
         opportunity_of(flow, approved), status, actor="operator", reason=""
     )
-    claimed, state, value = flow.repository.claim(approved)
-    assert claimed and state == "attempting" and value
+    claim = flow.repository.claim(approved)
+    assert claim["claimed"] and claim["state"] == "attempting"
+    assert claim["material"]["body"]
 
 
 def test_a_terminated_opportunity_can_be_revived_and_then_drafted(flow, approved):
@@ -117,7 +118,7 @@ def test_a_terminated_opportunity_can_be_revived_and_then_drafted(flow, approved
     with pytest.raises(ValueError):
         flow.repository.claim(approved)
     flow.repository.record_status(opportunity, "interested", actor="operator", reason="reopened")
-    assert flow.repository.claim(approved)[0] is True
+    assert flow.repository.claim(approved)["claimed"] is True
 
 
 def test_approving_an_already_ended_opportunity_is_refused_at_the_decision(flow):
@@ -130,6 +131,111 @@ def test_approving_an_already_ended_opportunity_is_refused_at_the_decision(flow)
         flow.repository.decide(review, approved=True, actor="operator")
     # Rejecting one is always allowed: it records agreement with where it already is.
     flow.repository.decide(review, approved=False, actor="operator")
+
+
+def deliver(flow, external_id, sender, subject="A role"):
+    from communications.message import Message
+
+    return flow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id=external_id,
+            sender=sender,
+            subject=subject,
+            text=(
+                "Title: Engineer\r\nCompany: Example Company\r\nLocation: remote\r\n"
+                "Skills: python, sql\r\nURL: https://jobs.example.com/1\r\n"
+            ),
+        )
+    )[0]
+
+
+# --- an approval authorizes a target, not only a body -----------------------------------
+
+
+def test_an_approval_does_not_migrate_onto_a_new_recipient(flow):
+    """The review is reused across messages, so a later sender could move the target.
+
+    Nothing else about the approval changes: same content digest, same wording, same
+    status. Without binding the address, an approval to write to one person would
+    authorize writing to another.
+    """
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    assert deliver(flow, "m2", "bob@example.com") == review
+
+    bound = flow.repository.authorization(review)
+    assert bound["content_digest"] == bound["bound_content"], "the review itself is unchanged"
+    assert bound["bound_addressing"] != bound["addressing_digest"]
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        flow.repository.claim(review)
+    assert flow.repository.intent(review) is None, "a refused claim reserved nothing"
+
+
+def test_a_changed_subject_also_needs_a_new_decision(flow):
+    review = deliver(flow, "m1", "jane@example.com", subject="A role")
+    flow.repository.decide(review, approved=True, actor="operator")
+    deliver(flow, "m2", "jane@example.com", subject="Following up about the role")
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        flow.repository.claim(review)
+
+
+def test_the_same_target_arriving_again_is_not_a_new_outward_action(flow):
+    """The guard must not refuse a repeat of the address the operator already approved.
+
+    The message id is provenance and is deliberately outside the digest: the same sender
+    and subject arriving in a second message is not a materially different action, and
+    refusing it would make the guard fire on ordinary duplicate alerts.
+    """
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    assert deliver(flow, "m2", "jane@example.com") == review
+    claim = flow.repository.claim(review)
+    assert claim["claimed"] is True
+    assert claim["material"]["to"] == "jane@example.com"
+
+
+def test_re_approving_binds_the_new_target(flow):
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    deliver(flow, "m2", "bob@example.com")
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        flow.repository.claim(review)
+    flow.repository.decide(review, approved=True, actor="operator")
+    claim = flow.repository.claim(review)
+    assert claim["material"]["to"] == "bob@example.com"
+
+
+def test_an_approval_bound_to_no_addressing_cannot_authorize_an_outward_draft(flow):
+    """Approvals written before this binding existed are refused, not guessed at."""
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    with store.connection(flow.repository.path) as conn, store.transaction(conn):
+        conn.execute("UPDATE decisions SET addressing_digest='' WHERE review_id=?", (review,))
+    with pytest.raises(ValueError, match="predates draft authorization binding"):
+        flow.repository.claim(review)
+
+
+def test_the_claim_hands_back_the_material_it_verified(flow):
+    """Closes the window between checking an address and using it.
+
+    Re-reading the address after the claim would let a source arriving in that interval
+    move the target of an already authorized write. The claim returns what it checked, so
+    there is nothing to re-read.
+    """
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    claim = flow.repository.claim(review)
+    # A competing source lands after the claim committed.
+    deliver(flow, "m2", "bob@example.com")
+    assert flow.repository.addressing(review)["to"] == "bob@example.com"
+    # What the claim authorized is unchanged, and it is what the caller holds.
+    assert claim["material"]["to"] == "jane@example.com"
+    with store.connection(flow.repository.path) as conn:
+        recorded = conn.execute(
+            "SELECT source_message_id FROM draft_intents WHERE review_id=?", (review,)
+        ).fetchone()[0]
+    assert recorded == flow.repository.authorization(review)["bound_source"]
 
 
 def test_the_most_recent_source_addresses_the_draft(flow):
@@ -203,8 +309,7 @@ def test_the_authorization_check_and_the_claim_are_one_transaction(flow, approve
     # Nothing was reserved, so a later revival is still a clean first attempt rather than
     # a replay of a half-made one.
     flow.repository.record_status(opportunity, "interested", actor="operator", reason="")
-    claimed, _, _ = flow.repository.claim(approved)
-    assert claimed is True
+    assert flow.repository.claim(approved)["claimed"] is True
     assert flow.repository.audit(approved).count("draft_intent") == 1
 
 
@@ -217,4 +322,4 @@ def test_a_refused_draft_leaves_the_approval_usable(flow, approved):
             flow.repository.claim(approved)
     assert flow.repository.authorization(approved)["approved"] is True
     flow.repository.record_status(opportunity, "interested", actor="operator", reason="")
-    assert flow.repository.claim(approved)[0] is True
+    assert flow.repository.claim(approved)["claimed"] is True

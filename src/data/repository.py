@@ -313,6 +313,7 @@ class Repository:
             raise ValueError("Review is missing or stale")
         content_digest, draft, opportunity_id, event_id, status = row
         return {
+            "addressing": cls._addressing(conn, review_id),
             "content_digest": content_digest,
             "draft_digest": fingerprint(draft),
             "opportunity_id": opportunity_id,
@@ -345,10 +346,13 @@ class Repository:
                 raise ValueError("Draft already attempted; decision is locked for reconciliation")
             conn.execute(
                 "INSERT INTO decisions(review_id,approved,actor,content_digest,draft_digest,"
-                "status_event_id) VALUES (?,?,?,?,?,?) ON CONFLICT(review_id) DO UPDATE SET "
+                "status_event_id,addressing_digest,source_message_id) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(review_id) DO UPDATE SET "
                 "approved=excluded.approved,actor=excluded.actor,"
                 "content_digest=excluded.content_digest,draft_digest=excluded.draft_digest,"
-                "status_event_id=excluded.status_event_id",
+                "status_event_id=excluded.status_event_id,"
+                "addressing_digest=excluded.addressing_digest,"
+                "source_message_id=excluded.source_message_id",
                 (
                     review_id,
                     int(approved),
@@ -356,6 +360,8 @@ class Repository:
                     binding["content_digest"],
                     binding["draft_digest"],
                     binding["status_event_id"],
+                    binding["addressing"]["digest"],
+                    binding["addressing"]["source"] or None,
                 ),
             )
             conn.execute(
@@ -367,7 +373,8 @@ class Repository:
         with connection(self.path) as conn, transaction(conn):
             self._current(conn, review_id)
             decision = conn.execute(
-                "SELECT approved,content_digest,draft_digest FROM decisions WHERE review_id=?",
+                "SELECT approved,content_digest,draft_digest,addressing_digest "
+                "FROM decisions WHERE review_id=?",
                 (review_id,),
             ).fetchone()
             if not decision or decision[0] != 1:
@@ -376,13 +383,18 @@ class Repository:
                 "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
             ).fetchone()
             if prior:
-                return False, prior[0], prior[1]
+                return {
+                    "claimed": False,
+                    "state": prior[0],
+                    "receipt": prior[1],
+                    "material": None,
+                }
             # Everything below re-checks, inside this transaction, what the approval was
             # for. The external write happens after the transaction commits, so this is the
             # last moment the authorization can be decided against a state that cannot move
             # underneath it.
             binding = self._binding(conn, review_id)
-            if not decision[1] or not decision[2]:
+            if not decision[1] or not decision[2] or not decision[3]:
                 raise ValueError(
                     "Approval predates draft authorization binding and cannot authorize an "
                     "outward draft; approve this review again"
@@ -400,15 +412,38 @@ class Repository:
                     f"Opportunity status is {binding['status']}; an ended opportunity does "
                     "not authorize an outward draft"
                 )
+            # An approval authorizes an outward action, and an outward action has a target.
+            # A newer source can move that target without changing anything else about the
+            # review, so the address is checked here too -- inside the same transaction, and
+            # from the same query the approval was bound from.
+            if decision[3] != binding["addressing"]["digest"]:
+                raise ValueError("Addressing changed since approval; review and approve again")
             conn.execute(
-                "INSERT INTO draft_intents(review_id,state,status_event_id) "
-                "VALUES (?, 'attempting', ?)",
-                (review_id, binding["status_event_id"]),
+                "INSERT INTO draft_intents(review_id,state,status_event_id,source_message_id) "
+                "VALUES (?, 'attempting', ?, ?)",
+                (
+                    review_id,
+                    binding["status_event_id"],
+                    binding["addressing"]["source"] or None,
+                ),
             )
             conn.execute(
                 "INSERT INTO audit(review_id,event) VALUES (?, 'draft_intent')", (review_id,)
             )
-            return True, "attempting", binding["draft"]
+            # The material is returned rather than re-read afterwards. Re-querying the
+            # address after this transaction would reopen the window this check closes: the
+            # value verified here must be the value that is actually sent.
+            return {
+                "claimed": True,
+                "state": "attempting",
+                "receipt": None,
+                "material": {
+                    "body": binding["draft"],
+                    "to": binding["addressing"]["to"],
+                    "subject": binding["addressing"]["subject"],
+                    "source": binding["addressing"]["source"],
+                },
+            }
 
     def finish(self, review_id, receipt: str | None):
         if receipt is not None and not receipt.strip():
@@ -438,6 +473,39 @@ class Repository:
                 "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
             ).fetchone()
 
+    @staticmethod
+    def _addressing(conn, review_id):
+        """Who a draft would be addressed to, and which message said so.
+
+        One query, used by the reader and by the authorization check alike, so the value an
+        approval is bound to cannot be computed differently from the value that is used.
+
+        One opportunity can arrive in more than one message, and the review is reused when
+        the job has not changed, so a review can have several sources. The most recently
+        ingested one wins: ordering by message_id would pick by hash, which means the
+        recipient of an outward draft would be chosen arbitrarily and re-ingesting a
+        corrected message might or might not take effect. Order by the row the insert
+        assigned, for the same reason status history orders by id rather than by a
+        timestamp: it is the arrival sequence.
+        """
+        row = conn.execute(
+            "SELECT s.message_id,s.sender,s.subject FROM reviews r "
+            "JOIN provenance p ON p.review_id=r.id "
+            "JOIN message_sources s ON s.message_id=p.message_id "
+            "WHERE r.id=? ORDER BY p.rowid DESC LIMIT 1",
+            (review_id,),
+        ).fetchone()
+        source, to, subject = row if row else ("", "", "")
+        # The digest covers the sender and the subject, which are what a draft is addressed
+        # with. The message id is provenance and is deliberately outside it: the same target
+        # arriving in a second message is not a materially different outward action.
+        return {
+            "source": source,
+            "to": to,
+            "subject": subject,
+            "digest": fingerprint([to, subject]),
+        }
+
     def addressing(self, review_id):
         """Who a draft would be addressed to, from the message the opportunity came from.
 
@@ -446,21 +514,7 @@ class Repository:
         here: the record of what arrived must not be quietly rewritten to make it sendable.
         """
         with connection(self.path) as conn:
-            # One opportunity can arrive in more than one message, and the review is
-            # reused when the job has not changed, so a review can have several sources.
-            # The most recently ingested one wins: ordering by message_id would pick by
-            # hash, which means the recipient of an outward draft would be chosen
-            # arbitrarily and re-ingesting a corrected message might or might not take
-            # effect. Order by the row the insert assigned, for the same reason status
-            # history orders by id rather than by a timestamp: it is the arrival sequence.
-            row = conn.execute(
-                "SELECT s.sender,s.subject FROM reviews r "
-                "JOIN provenance p ON p.review_id=r.id "
-                "JOIN message_sources s ON s.message_id=p.message_id "
-                "WHERE r.id=? ORDER BY p.rowid DESC LIMIT 1",
-                (review_id,),
-            ).fetchone()
-            return {"to": row[0], "subject": row[1]} if row else {"to": "", "subject": ""}
+            return self._addressing(conn, review_id)
 
     def draft_material(self, review_id):
         """Everything a draft would be composed from, read without reserving anything.
@@ -470,10 +524,9 @@ class Repository:
         operator's approval. The draft body is re-checked against the approval inside
         claim(), so reading it here cannot authorize a stale one.
         """
-        addressing = self.addressing(review_id)
         with connection(self.path) as conn:
             binding = self._binding(conn, review_id)
-        return {"body": binding["draft"], **addressing}
+        return {"body": binding["draft"], **binding["addressing"]}
 
     def refuse(self, review_id):
         """Record that a draft was refused before anything left this machine.
@@ -496,8 +549,8 @@ class Repository:
         """What an approval for this review is bound to, and what is true now."""
         with connection(self.path) as conn:
             decision = conn.execute(
-                "SELECT approved,actor,content_digest,draft_digest,status_event_id "
-                "FROM decisions WHERE review_id=?",
+                "SELECT approved,actor,content_digest,draft_digest,status_event_id,"
+                "addressing_digest,source_message_id FROM decisions WHERE review_id=?",
                 (review_id,),
             ).fetchone()
             binding = self._binding(conn, review_id)
@@ -507,6 +560,10 @@ class Repository:
                 "bound_content": decision[2] if decision else None,
                 "bound_draft": decision[3] if decision else None,
                 "bound_event": decision[4] if decision else None,
+                "bound_addressing": decision[5] if decision else None,
+                "bound_source": decision[6] if decision else None,
+                "addressing_digest": binding["addressing"]["digest"],
+                "source": binding["addressing"]["source"],
                 "content_digest": binding["content_digest"],
                 "draft_digest": binding["draft_digest"],
                 "status": binding["status"],
