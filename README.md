@@ -2,7 +2,7 @@
 
 CareerSignal is a local recruiting application foundation: deduplicate opportunities, explain eligibility and fit, require explicit approval, and record controlled drafts and their audit trail in libSQL.
 
-The application accepts structured opportunities and supplied text/HTML recruiting messages with explicit job fields. It uses an in-memory draft provider and does not read Gmail, send email, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations.
+The application accepts structured opportunities, supplied text/HTML recruiting messages with explicit job fields, and messages read from an authorized Gmail mailbox. It uses an in-memory draft provider and does not send email, create Gmail drafts, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations, and [Gmail intake](docs/gmail-intake.md) for the read-only mailbox adapter.
 
 ## Run locally
 
@@ -14,6 +14,16 @@ uv run careersignal init --db var/careersignal.db
 uv run careersignal verify --db var/careersignal.db
 uv run careersignal demo --db var/synthetic.db
 ```
+
+Reading a mailbox is a separate, explicitly authorized command:
+
+```sh
+export CAREERSIGNAL_GMAIL_TOKEN=...
+uv run careersignal gmail-ingest --mailbox operator@example.com --label Label_JobAlerts \
+  --skill python --skill sql --db var/private.db
+```
+
+The Gmail adapter is read-only by construction: it defines no send, draft or modify operation, addresses one fixed host and two read URLs, refuses redirects, and takes its token from the environment rather than a flag. It creates no drafts and approves nothing. The token's scope is configured, not verified, and the tests drive recorded synthetic payloads rather than a live mailbox — see [Gmail intake](docs/gmail-intake.md) for exactly what is and is not established.
 
 `demo` is an explicitly synthetic certification scenario, including a simulated operator approval. Use a separate demo database. Repeating it proves persisted receipt replay without creating another controlled draft. The provider is in-memory: a process restart loses its unrecorded drafts; unresolved attempts stay uncertain rather than being retried blindly.
 
