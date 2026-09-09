@@ -76,6 +76,8 @@ Two things this deliberately does **not** do:
 
 A newline inside an operator's reason stays structural: the detail view prints each line on its own row, so a multi-line note remains readable while no single row can carry anything executable.
 
+Only a line feed is structural, with `CRLF` folded into it. Python's `str.splitlines()` also breaks on bare `CR`, `VT`, `FF`, `FS`, `GS`, `RS`, `NEL` and the Unicode line separators, which would let a hostile control character disappear into structure rather than be escaped — the opposite of what this boundary promises. `U+2028` and `U+2029` stay in the line but are not escaped, because they are not terminal control sequences; they are outside the C0/C1 range this guards.
+
 The `--json` form needs none of this — `json.dumps` escapes control characters already — and it retains the underlying value, so automation still sees exactly what was stored.
 
 ## What these commands are not

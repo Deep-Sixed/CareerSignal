@@ -134,6 +134,61 @@ def test_a_newline_stays_structure_while_everything_else_escapes():
     assert safe_lines("line one\nline two\x1b[31m") == ["line one", "line two\\x1b[31m"]
     assert safe_lines("") == [""]
     assert safe_lines("only") == ["only"]
+    assert safe_lines("one\r\ntwo") == ["one", "two"]
+    assert safe_lines("one\n") == ["one", ""]
+
+
+# Everything str.splitlines() treats as a line boundary. Only LF, and CRLF folded into it,
+# is structural here; the rest must stay in the line so safe() can render them visibly.
+SPLITLINES_BOUNDARIES = [
+    chr(code) for code in (0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029)
+]
+
+
+@pytest.mark.parametrize("character", SPLITLINES_BOUNDARIES)
+def test_only_a_line_feed_is_structural(character):
+    """splitlines() would swallow these, turning a hostile control into invisible structure."""
+    rendered = safe_lines(f"one{character}two")
+    assert len(rendered) == 1, (hex(ord(character)), rendered)
+    assert "one" in rendered[0] and "two" in rendered[0]
+
+
+@pytest.mark.parametrize("character", [c for c in SPLITLINES_BOUNDARIES if CONTROL.match(c)])
+def test_a_swallowed_control_character_is_escaped_visibly(character):
+    assert safe_lines(f"one{character}two") == [f"one\\x{ord(character):02x}two"]
+
+
+@pytest.mark.parametrize("attack", ATTACKS)
+def test_no_attack_sequence_survives_a_multiline_path(attack):
+    """The detail view's draft and history reasons go through safe_lines, not safe."""
+    for line in safe_lines(attack):
+        assert not CONTROL.search(line), (attack, repr(line))
+    record = {
+        **row(),
+        "packet": {"reasons": ["ok"], "draft": f"first\n{attack}\nlast"},
+        "history": [
+            {"status": "new", "actor": "operator", "reason": f"one\n{attack}", "created_at": 1}
+        ],
+    }
+    rendered = detail(record)
+    for line in rendered.splitlines():
+        assert not CONTROL.search(line), (attack, repr(line))
+    assert "first" in rendered and "last" in rendered
+
+
+def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
+    """\\r would return the cursor and let later text overwrite what was already printed."""
+    assert safe_lines("visible\rhidden") == ["visible\\x0dhidden"]
+    record = {
+        **row(),
+        "packet": {"reasons": ["ok"], "draft": "visible\rhidden"},
+        "history": [
+            {"status": "new", "actor": "operator", "reason": "visible\rhidden", "created_at": 1}
+        ],
+    }
+    rendered = detail(record)
+    assert "visible" in rendered and "hidden" in rendered
+    assert "\r" not in rendered
 
 
 def test_a_multi_line_operator_reason_is_still_readable():

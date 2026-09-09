@@ -35,8 +35,14 @@ def safe(value) -> str:
 
 
 def safe_lines(value) -> list:
-    """Multi-line text as safe lines: a newline stays structure, everything else escapes."""
-    return [safe(line) for line in str(value).splitlines()] or [""]
+    """Multi-line text as safe lines: a newline stays structure, everything else escapes.
+
+    Split on LF alone, after folding CRLF into it. str.splitlines() also breaks on bare CR,
+    VT, FF, FS, GS, RS, NEL and the Unicode line separators, which would let those vanish
+    into structure instead of being escaped -- the opposite of what this module promises.
+    A trailing newline therefore yields a trailing empty line, which is what it is.
+    """
+    return [safe(line) for line in str(value).replace("\r\n", "\n").split("\n")]
 
 
 def coverage(row) -> str:
