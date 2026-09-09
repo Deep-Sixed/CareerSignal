@@ -120,7 +120,7 @@ class Location:
             for _, start, end in occurrences
         ]
         claimed = {index for denial in prefix if denial for index in denial}
-        offered, consumed = set(), set(spoken)
+        offered, denied, consumed = set(), set(), set(spoken)
         for (name, start, end), denial in zip(occurrences, prefix):
             if denial is None:
                 # A denial never reaches across another stated mode either: in "onsite (no
@@ -129,8 +129,14 @@ class Location:
                 denial = suffix if suffix and not suffix & claimed else None
             if denial:
                 consumed.update(denial)
+                denied.add(name)
             else:
                 offered.add(name)
+        # A denial is about the mode, not the wording. "no remote/WFH option" states one mode
+        # twice and denies it once; reading the second spelling as an offer would hand a
+        # remote profile a job that says it is not remote. Two names for one thing are not
+        # two things, so this cannot make a posting ambiguous either.
+        offered -= denied
         # Every stated mode was negated, none was stated, or several were offered at once.
         mode = offered.pop() if len(offered) == 1 else AMBIGUOUS if offered else UNKNOWN
         # Words following a surviving negation describe what is ruled out, not where the job is.

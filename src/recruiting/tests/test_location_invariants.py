@@ -218,6 +218,73 @@ def test_two_offered_modes_are_never_eligible_for_a_single_mode_profile():
     assert not failures, report(failures, len(AMBIGUOUS_CASES))
 
 
+# --- Invariant 6: one denial covers every spelling of the mode it denies ----------------
+#
+# Added after the generated families above missed a defect of their own: they never put two
+# spellings of one canonical mode in a single posting, so "no remote/WFH option" -- one mode,
+# stated twice, denied once -- read as remote and was offered to a remote profile. A
+# generator only contains what its author imagined, exactly like a hand-written list.
+
+SAME_MODE_PAIRS = [
+    (mode, first, second)
+    for mode, spellings in MODE_SPELLINGS.items()
+    for first, second in itertools.permutations(spellings, 2)
+]
+PAIR_JOINERS = ("/", " / ", ", ", " or ", " (")
+SAME_MODE_DENIALS = (
+    "no {pair} option",
+    "no option for {pair}",
+    "not {pair}",
+    "no {pair}",
+    "{pair} not available",
+    "{pair} unavailable",
+)
+
+SAME_MODE_DENIAL_CASES = [
+    (mode, template.format(pair=joined(first, second, joiner)))
+    for mode, first, second in SAME_MODE_PAIRS
+    for joiner in PAIR_JOINERS
+    for template in SAME_MODE_DENIALS
+]
+
+
+def test_a_denial_covers_every_spelling_of_the_mode_it_denies():
+    """One mode stated twice and denied once is denied, not offered by its other spelling."""
+    failures = [
+        posting
+        for mode, posting in SAME_MODE_DENIAL_CASES
+        if Location(mode, "").accepts(Location.parse(posting))
+    ]
+    assert not failures, report(failures, len(SAME_MODE_DENIAL_CASES))
+
+
+def test_a_denied_mode_stated_twice_is_never_eligible_for_any_profile():
+    profiles = tuple(every_profile())
+    failures = [
+        posting
+        for _, posting in SAME_MODE_DENIAL_CASES
+        if any(profile.accepts(Location.parse(posting)) for profile in profiles)
+    ]
+    assert not failures, report(failures, len(SAME_MODE_DENIAL_CASES))
+
+
+SAME_MODE_OFFERED_CASES = [
+    (mode, joined(first, second, joiner))
+    for mode, first, second in SAME_MODE_PAIRS
+    for joiner in PAIR_JOINERS
+]
+
+
+def test_two_spellings_of_one_mode_are_that_mode_and_not_ambiguous():
+    """Two names for one thing are not two things; only genuinely different modes are."""
+    failures = [
+        (posting, Location.parse(posting).work_mode)
+        for mode, posting in SAME_MODE_OFFERED_CASES
+        if Location.parse(posting).work_mode != mode
+    ]
+    assert not failures, report(failures, len(SAME_MODE_OFFERED_CASES))
+
+
 def test_the_generated_families_are_large_enough_to_be_worth_running():
     """A silently empty family would make every invariant above pass without testing."""
     sizes = {
@@ -226,6 +293,8 @@ def test_the_generated_families_are_large_enough_to_be_worth_running():
         "widening": len(WIDENING_CASES),
         "cross denial": len(CROSS_DENIAL_CASES),
         "ambiguous": len(AMBIGUOUS_CASES),
+        "same mode denial": len(SAME_MODE_DENIAL_CASES),
+        "same mode offered": len(SAME_MODE_OFFERED_CASES),
     }
     assert all(count > 30 for count in sizes.values()), sizes
     assert sum(sizes.values()) > 2000, sizes
