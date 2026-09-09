@@ -127,7 +127,20 @@ LEGACY_JOB = dict(
 
 def test_a_review_scored_before_coverage_cannot_be_approved_or_drafted(tmp_path, monkeypatch):
     path = tmp_path / "db"
-    assert legacy_database(path, monkeypatch) == ["0003_stated_skill_coverage.sql"]
+    assert legacy_database(path, monkeypatch) == [
+        "0003_stated_skill_coverage.sql",
+        "0004_status_history.sql",
+    ]
+    # The backfill in 0004 reaches an opportunity that predates status history, and says in
+    # the row that it was backfilled rather than claiming an operator recorded it.
+    repository = Repository(path)
+    opportunity = Opportunity.normalize(LEGACY_JOB).key
+    assert repository.status(opportunity) == "new"
+    assert repository.status_history(opportunity)[0][:3] == (
+        "new",
+        "migration",
+        "Backfilled when status history was introduced",
+    )
     repository = Repository(path)
     for act in (
         lambda: repository.decide("legacy-review", approved=True, actor="operator"),

@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from data.store import connection, migrate, transaction
 from recruiting.models import Review, fingerprint
+from recruiting.status import INITIAL, validate
 
 
 class Repository:
@@ -37,6 +38,15 @@ class Repository:
                     "INSERT OR IGNORE INTO opportunities(id,url,title,company,location) "
                     "VALUES (?,?,?,?,?)",
                     (job.key, job.url, job.title, job.company, job.location),
+                )
+                # Idempotent by construction rather than by knowing whether the insert
+                # above fired: replaying a message, or a second message carrying the same
+                # job, must not append another opening event.
+                conn.execute(
+                    "INSERT INTO opportunity_status_history(opportunity_id,status,actor,reason) "
+                    "SELECT ?,?,'intake','' WHERE NOT EXISTS "
+                    "(SELECT 1 FROM opportunity_status_history WHERE opportunity_id=?)",
+                    (job.key, INITIAL, job.key),
                 )
                 current = conn.execute(
                     "SELECT r.id,r.content_digest FROM reviews r JOIN opportunities o "
@@ -114,6 +124,46 @@ class Repository:
                 "SELECT item_index,excerpt,reason,opportunity_id,review_id "
                 "FROM extraction_items WHERE message_id=? ORDER BY item_index",
                 (message_id,),
+            ).fetchall()
+
+    def record_status(self, opportunity_id, status, *, actor, reason="") -> str:
+        """Append a status event. Nothing is edited, so a correction is another event."""
+        value = validate(status)
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("An actor is required")
+        if not isinstance(reason, str):
+            raise ValueError("Reason must be text")
+        with connection(self.path) as conn, transaction(conn):
+            if not conn.execute(
+                "SELECT 1 FROM opportunities WHERE id=?", (opportunity_id,)
+            ).fetchone():
+                raise ValueError("Unknown opportunity")
+            conn.execute(
+                "INSERT INTO opportunity_status_history(opportunity_id,status,actor,reason) "
+                "VALUES (?,?,?,?)",
+                # The reason is the operator's own prose. Only surrounding whitespace is
+                # removed, because a stray trailing newline is noise but the line breaks
+                # inside a note are theirs to keep.
+                (opportunity_id, value, actor.strip(), reason.strip()),
+            )
+        return value
+
+    def status(self, opportunity_id):
+        """Derived from history, never stored: the latest event is the current state."""
+        with connection(self.path) as conn:
+            row = conn.execute(
+                "SELECT status FROM opportunity_status_history WHERE opportunity_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (opportunity_id,),
+            ).fetchone()
+            return row[0] if row else None
+
+    def status_history(self, opportunity_id):
+        with connection(self.path) as conn:
+            return conn.execute(
+                "SELECT status,actor,reason,created_at FROM opportunity_status_history "
+                "WHERE opportunity_id=? ORDER BY id",
+                (opportunity_id,),
             ).fetchall()
 
     def review(self, review_id):
