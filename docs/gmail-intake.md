@@ -23,6 +23,8 @@ The access token is read from the `CAREERSIGNAL_GMAIL_TOKEN` environment variabl
 
 The token appears only in an `Authorization` header. It is never placed in a URL or query string, never included in an error message, and `GmailCredentials` redacts it from its own representation so it cannot reach a log line, a traceback frame dump, or a captured test report.
 
+Because the token is only ever used as a header value, a token that could not legally sit in one — anything outside visible ASCII, including a stray newline, a space or a NUL — is refused when the credentials are constructed. It is refused rather than trimmed: `http.client` rejects an illegal header by quoting the whole value, which would put the token in a traceback, and silently trimming would authenticate with a credential you did not supply. The error says what is wrong without repeating the value. If your token arrives from a file, strip the trailing newline yourself so the credential you intend is the credential that is used.
+
 ## Provenance
 
 The Gmail message identifier is the provenance. It is immutable, unique within a mailbox, and recorded as the `external_id` in `message_sources`.

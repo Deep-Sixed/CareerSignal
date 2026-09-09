@@ -27,6 +27,9 @@ NETWORK_TIMEOUT = 30.0
 # a bearer token must never be offered to a host the operator did not authorize.
 READ_PATH = re.compile(r"^/gmail/v1/users/me/messages(?:/([0-9A-Za-z_-]{1,128}))?$")
 IDENTIFIER = re.compile(r"^[0-9A-Za-z_-]{1,128}$")
+# A token is only ever used as an HTTP header value, so anything that cannot legally sit
+# in one is not a usable token. RFC 6750 bearer tokens are already visible ASCII.
+HEADER_SAFE = re.compile(r"^[\x21-\x7e]+$")
 # Segments that name a Gmail operation or collection rather than a message. A malformed or
 # hostile identifier must not be spellable into one of them.
 RESERVED_SEGMENTS = frozenset(
@@ -66,8 +69,17 @@ class GmailCredentials:
     scopes: tuple[str, ...] = (READONLY_SCOPE,)
 
     def __post_init__(self):
-        if not isinstance(self.access_token, str) or not self.access_token.strip():
+        if not isinstance(self.access_token, str) or not self.access_token:
             raise ValueError("An access token is required")
+        # Refused rather than trimmed. A stray newline would otherwise be rejected deeper in
+        # the stack by an error that quotes the entire header value, putting the token in a
+        # traceback; and silently trimming would authenticate with a credential the operator
+        # did not supply. The offending value is never echoed.
+        if not HEADER_SAFE.fullmatch(self.access_token):
+            raise ValueError(
+                "Access token must be visible ASCII with no spaces or control characters; "
+                "check for a stray newline. The supplied value is not repeated here."
+            )
         if not isinstance(self.mailbox, str):
             raise TypeError("A mailbox identifier is required")
         # Gmail addresses are not case sensitive, so two spellings of one mailbox must not
@@ -114,6 +126,12 @@ def https_get(url: str, headers: dict) -> tuple[int, bytes]:
     except OSError as exc:
         # The reason may quote the URL or the server; the token is never in either.
         raise GmailError(f"Gmail read failed: {type(exc).__name__}") from exc
+    except ValueError:
+        # The standard library rejects an illegal header by quoting the whole value, which
+        # is where the bearer token lives. GmailCredentials already refuses such a token;
+        # this is the second line, for any header this helper is handed. The cause is
+        # deliberately dropped rather than chained: chaining would print the original.
+        raise GmailError("Gmail request headers were rejected before any network I/O") from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise GmailError("Gmail response exceeds the read limit")
     return status, body

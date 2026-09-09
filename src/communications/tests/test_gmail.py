@@ -2,6 +2,7 @@
 
 import base64
 import json
+import traceback
 
 import pytest
 
@@ -325,10 +326,56 @@ def test_a_missing_mailbox_is_refused(mailbox):
         credentials(mailbox=mailbox)
 
 
-@pytest.mark.parametrize("token", ["", "   ", None, 17])
+@pytest.mark.parametrize("token", ["", None, 17])
 def test_a_missing_access_token_is_refused(token):
     with pytest.raises((ValueError, TypeError)):
         credentials(access_token=token)
+
+
+# A header value is where the token is used, so anything that cannot legally sit in one is
+# not a usable token. http.client rejects such a value by quoting the whole header, which
+# would put the token in a traceback.
+HEADER_UNSAFE_TOKENS = [
+    "synthetic\r\nX-Injected: evil",
+    "synthetic\nX-Injected: evil",
+    "synthetic\r",
+    "synthetic\x00value",
+    "synthetic value",
+    " synthetic",
+    "synthetic ",
+    "   ",
+    "synthetic\tvalue",
+    "synthetic\x7f",
+    "synthét1c",
+]
+
+
+@pytest.mark.parametrize("token", HEADER_UNSAFE_TOKENS)
+def test_a_token_that_cannot_sit_in_a_header_is_refused_without_echoing_it(token):
+    with pytest.raises(ValueError) as failure:
+        credentials(access_token=token)
+    assert token not in str(failure.value)
+
+
+def test_a_refused_token_never_reaches_a_transport():
+    """Construction fails, so no reader exists that could carry the value to a request."""
+    transport = Recorder(*one_message())
+    with pytest.raises(ValueError):
+        GmailReader(credentials(access_token="synthetic\r\nX-Injected: evil"), transport)
+    assert transport.requests == []
+
+
+def test_the_network_helper_refuses_an_illegal_header_without_echoing_it():
+    """Defence in depth: the standard library quotes the whole value when it rejects one."""
+    poisoned = TOKEN + "\r\nX-Injected: evil"
+    with pytest.raises(GmailError) as failure:
+        gmail.https_get(
+            f"https://{GMAIL_HOST}/gmail/v1/users/me/messages", {"Authorization": poisoned}
+        )
+    # The whole chain is checked, not just the message: an implicit __context__ would print
+    # the original ValueError, and that is what carries the token.
+    rendered = "".join(traceback.format_exception(failure.value))
+    assert TOKEN not in rendered and "X-Injected" not in rendered
 
 
 # --- Reading --------------------------------------------------------------------------
