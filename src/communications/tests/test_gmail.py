@@ -365,6 +365,37 @@ def test_the_limit_bounds_the_read_and_stops_paging():
     assert len(transport.requests) == 1
 
 
+def test_a_duplicate_across_pages_does_not_consume_the_limit():
+    """A repeat must not spend the budget a distinct message was still waiting for."""
+    pages = [
+        {"messages": [{"id": "aaa1"}], "nextPageToken": "page-2"},
+        {"messages": [{"id": "aaa1"}, {"id": "bbb2"}]},
+    ]
+    client = GmailReader(credentials(), transport=Recorder(pages))
+    assert client.identifiers(limit=2) == ("aaa1", "bbb2")
+
+
+def test_a_page_of_only_duplicates_keeps_paging():
+    pages = [
+        {"messages": [{"id": "aaa1"}, {"id": "bbb2"}], "nextPageToken": "page-2"},
+        {"messages": [{"id": "bbb2"}, {"id": "aaa1"}], "nextPageToken": "page-3"},
+        {"messages": [{"id": "ccc3"}]},
+    ]
+    transport = Recorder(pages)
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identifiers(limit=3) == ("aaa1", "bbb2", "ccc3")
+    assert len(transport.requests) == 3
+
+
+def test_unique_identifiers_keep_first_seen_order_across_pages():
+    pages = [
+        {"messages": [{"id": "ccc3"}, {"id": "aaa1"}], "nextPageToken": "page-2"},
+        {"messages": [{"id": "aaa1"}, {"id": "bbb2"}]},
+    ]
+    client = GmailReader(credentials(), transport=Recorder(pages))
+    assert client.identifiers(limit=3) == ("ccc3", "aaa1", "bbb2")
+
+
 @pytest.mark.parametrize("limit", [0, -1, "5", 1.5, True, None])
 def test_a_limit_that_is_not_a_positive_count_is_refused(limit):
     client, transport = reader()

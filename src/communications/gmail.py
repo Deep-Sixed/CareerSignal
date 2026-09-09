@@ -202,7 +202,10 @@ class GmailReader:
             raise ValueError("A positive result limit is required")
         if isinstance(label_ids, str):
             raise ValueError("Label identifiers must be a sequence, not a single string")
-        found, token, pages = [], None, 0
+        # A mailbox is not a snapshot, so one identifier can appear on two pages. Unique
+        # identifiers are counted toward the limit as they are seen, because letting a repeat
+        # spend the budget would silently drop a distinct message that was still to come.
+        found, token, pages = {}, None, 0
         while len(found) < limit and pages < MAX_PAGES:
             parameters = [("maxResults", min(limit - len(found), MAX_RESULTS))]
             if query:
@@ -219,14 +222,14 @@ class GmailReader:
             for entry in entries:
                 if not isinstance(entry, dict):
                     raise GmailError("Gmail returned an unexpected message listing")
-                found.append(_identifier(entry.get("id")))
+                found[_identifier(entry.get("id"))] = None
                 if len(found) >= limit:
                     break
             token, pages = page.get("nextPageToken"), pages + 1
             if not token:
                 break
-        # A mailbox is not a snapshot, so one identifier can appear on two pages.
-        return tuple(dict.fromkeys(found))
+        # dict preserves first-seen order, which is the order the mailbox offered them.
+        return tuple(found)
 
     def fetch(self, message_id) -> Message:
         identifier = _identifier(message_id)
