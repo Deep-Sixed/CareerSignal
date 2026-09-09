@@ -29,6 +29,17 @@ The Gmail adapter is read-only by construction: it defines no send, draft or mod
 
 Outside the demo, call `Workflow.intake`, inspect `Repository.review`, record a decision with `Repository.decide`, then call `Workflow.draft`. These are local trusted-caller APIs, not authenticated public endpoints. A changed review needs a new approval. A review recorded before stated skill coverage is not actionable after upgrading; re-ingest its opportunity under a new message ID to score it again. Incoming message IDs are immutable: reusing an ID with different content fails, while repeating the same message returns its original review references. Re-evaluation requires a new intake event.
 
+Read what has accumulated with the operator views:
+
+```sh
+uv run careersignal opportunities --db var/private.db
+uv run careersignal opportunities --db var/private.db --active --min-coverage 70
+uv run careersignal opportunity <id> --db var/private.db
+uv run careersignal opportunities --db var/private.db --json
+```
+
+These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. See [operator views](docs/operator-views.md).
+
 An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
 
 Relative database paths resolve from the current working directory. Set `CAREERSIGNAL_DB_PATH` to override the default `var/careersignal.db`; explicit `--db` takes precedence. Keep personal runtime data outside the source tree or under ignored `var`.

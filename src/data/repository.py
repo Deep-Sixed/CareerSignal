@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from data.store import connection, migrate, transaction
 from recruiting.models import Review, fingerprint
-from recruiting.status import INITIAL, validate
+from recruiting.status import ACTIVE, INITIAL, STATUSES, validate
 
 
 class Repository:
@@ -125,6 +125,107 @@ class Repository:
                 "FROM extraction_items WHERE message_id=? ORDER BY item_index",
                 (message_id,),
             ).fetchall()
+
+    # One row per opportunity: the durable business object. The review is evidence about
+    # it, joined in as columns rather than being the subject of the list.
+    SUMMARY = (
+        "SELECT o.id,o.company,o.title,o.location,o.url,s.status,s.created_at,"
+        "r.id,r.coverage,r.stated_skills,r.matched_skills,r.advances,"
+        "json_extract(r.payload,'$.eligible') "
+        "FROM opportunities o "
+        "LEFT JOIN reviews r ON r.id=o.current_review "
+        "LEFT JOIN opportunity_status_history s ON s.id="
+        "(SELECT h.id FROM opportunity_status_history h "
+        "WHERE h.opportunity_id=o.id ORDER BY h.id DESC LIMIT 1)"
+    )
+
+    @staticmethod
+    def _summary(row) -> dict:
+        stated = row[9]
+        return {
+            "id": row[0],
+            "company": row[1],
+            "title": row[2],
+            "location": row[3],
+            "url": row[4],
+            "status": row[5],
+            "status_changed_at": row[6],
+            "review": row[7],
+            "coverage": row[8],
+            "matched_skills": row[10],
+            "stated_skills": stated,
+            "advances": None if row[11] is None else bool(row[11]),
+            "eligible": None if row[12] is None else bool(row[12]),
+            # A review written before stated skill coverage keeps NULL in these columns and
+            # cannot be approved or drafted. The operator needs to see that, not a blank.
+            "scored": None if row[7] is None else stated not in (None, 0),
+            "actionable": None if row[7] is None else stated is not None,
+        }
+
+    def opportunities(
+        self, *, status=None, active=False, eligible=None, min_coverage=None, max_coverage=None
+    ) -> list[dict]:
+        """Read-only. Nothing here writes, decides, drafts, or contacts anything."""
+        clauses, values = [], []
+        if status is not None:
+            clauses.append("s.status=?")
+            values.append(validate(status))
+        if active:
+            clauses.append("s.status IN (" + ",".join("?" * len(ACTIVE)) + ")")
+            values.extend(ACTIVE)
+        if eligible is not None:
+            if type(eligible) is not bool:
+                raise ValueError("Eligible must be a boolean")
+            clauses.append("json_extract(r.payload,'$.eligible')=?")
+            values.append(int(eligible))
+        for name, bound, comparison in (
+            ("min_coverage", min_coverage, ">="),
+            ("max_coverage", max_coverage, "<="),
+        ):
+            if bound is None:
+                continue
+            if type(bound) is not int or not 0 <= bound <= 100:
+                raise ValueError(f"{name} must be a whole number between 0 and 100")
+            clauses.append(f"r.coverage{comparison}?")
+            values.append(bound)
+        sql = self.SUMMARY + (" WHERE " + " AND ".join(clauses) if clauses else "")
+        with connection(self.path) as conn:
+            rows = [self._summary(row) for row in conn.execute(sql, tuple(values)).fetchall()]
+        # Ordered in Python because the pipeline order is the domain's vocabulary, which the
+        # database does not know: stage first, then best covered, then company for stability.
+        order = {name: index for index, name in enumerate(STATUSES)}
+        return sorted(
+            rows,
+            key=lambda row: (
+                order.get(row["status"], len(order)),
+                -(row["coverage"] if row["coverage"] is not None else -1),
+                row["company"].casefold(),
+                row["title"].casefold(),
+            ),
+        )
+
+    def opportunity(self, opportunity_id) -> dict:
+        """One opportunity with its current review packet and its whole status history."""
+        with connection(self.path) as conn:
+            row = conn.execute(self.SUMMARY + " WHERE o.id=?", (opportunity_id,)).fetchone()
+            if row is None:
+                raise KeyError(opportunity_id)
+            summary = self._summary(row)
+            packet = conn.execute(
+                "SELECT payload FROM reviews WHERE id=?", (summary["review"],)
+            ).fetchone()
+            history = conn.execute(
+                "SELECT status,actor,reason,created_at FROM opportunity_status_history "
+                "WHERE opportunity_id=? ORDER BY id",
+                (opportunity_id,),
+            ).fetchall()
+        return {
+            **summary,
+            "packet": json.loads(packet[0]) if packet else None,
+            "history": [
+                {"status": h[0], "actor": h[1], "reason": h[2], "created_at": h[3]} for h in history
+            ],
+        }
 
     def record_status(self, opportunity_id, status, *, actor, reason="") -> str:
         """Append a status event. Nothing is edited, so a correction is another event."""
