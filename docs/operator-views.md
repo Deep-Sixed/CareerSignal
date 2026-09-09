@@ -63,6 +63,21 @@ The table is what an operator reads; the JSON is what anything else consumes. A 
 
 The last two are distinct on purpose. A `pre-coverage` review is the upgrade case from migration 0003: it is not actionable and the operator needs to see that rather than a blank cell to interpret.
 
+## Terminal safety
+
+A job title comes from a recruiter's message. `recruiting.models.clean` collapses whitespace but leaves control characters intact, so a title such as `Engineer\x1b]0;spoofed\x07` reaches storage exactly as sent — and, printed raw, would retitle the terminal window. `\x1b[2J` would clear the screen.
+
+Terminal-bound text is therefore escaped at the presentation boundary, in `system/views.py`, and nowhere else. C0, DEL and C1 control characters are rendered as `\x1b`-style text: visible to the operator rather than silently dropped, so they can see that a message contained one.
+
+Two things this deliberately does **not** do:
+
+- **It does not sanitize stored evidence.** The database keeps exactly what arrived, so the record of what a recruiter actually sent is never quietly rewritten. Only the printing is made safe.
+- **It does not flatten text to ASCII.** `Zürich Söhne`, `東京` and `İstanbul` print unchanged. Safety comes from escaping control characters, not from restricting the alphabet.
+
+A newline inside an operator's reason stays structural: the detail view prints each line on its own row, so a multi-line note remains readable while no single row can carry anything executable.
+
+The `--json` form needs none of this — `json.dumps` escapes control characters already — and it retains the underlying value, so automation still sees exactly what was stored.
+
 ## What these commands are not
 
 - They do not change status. That is `Repository.record_status`, and a command for it is deliberately later work.

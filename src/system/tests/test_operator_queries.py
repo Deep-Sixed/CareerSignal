@@ -1,6 +1,7 @@
 """The operator query commands report; they must never change anything."""
 
 import json
+import re
 
 import pytest
 
@@ -143,6 +144,100 @@ def test_a_filter_that_cannot_mean_anything_stops_the_command(tmp_path, monkeypa
     ):
         printed = refusal(monkeypatch, capsys, *arguments, "--db", str(path))
         assert expected in printed, (arguments, printed)
+
+
+# Control characters survive recruiting.models.clean, which collapses whitespace only, so
+# a hostile title reaches the terminal unless presentation escapes it.
+ESC, BEL = chr(0x1B), chr(0x07)
+HOSTILE_TITLE = f"Engineer{ESC}]0;spoofed{BEL}"
+HOSTILE_COMPANY = f"Z\u00fcrich S\u00f6hne{ESC}[2J"
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+HOSTILE_BODY = json.dumps(
+    {
+        "jobs": [
+            {
+                "title": HOSTILE_TITLE,
+                "company": HOSTILE_COMPANY,
+                "url": "https://jobs.example.com/9",
+                "location": f"remote{ESC}[31m",
+                "skills": ["Python", "SQL"],
+            }
+        ]
+    }
+)
+
+
+def hostile(path):
+    repository = Repository(path)
+    flow = Workflow(repository, ControlledDrafts(), Profile(("python", "sql")))
+    flow.intake("hostile-message", HOSTILE_BODY)
+    identifier = repository.opportunities()[0]["id"]
+    repository.record_status(
+        identifier,
+        "reviewing",
+        actor="operator",
+        reason=f"line one\nline two{ESC}[31m",
+    )
+    return repository, identifier
+
+
+def test_a_hostile_title_reaches_storage_unchanged(tmp_path):
+    """The premise of the tests below: normalization does not remove these characters."""
+    repository, identifier = hostile(tmp_path / "db")
+    assert repository.opportunity(identifier)["title"] == HOSTILE_TITLE
+    assert ESC in repository.opportunity(identifier)["title"]
+
+
+def test_no_control_sequence_reaches_the_terminal_from_an_ingested_opportunity(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    _, identifier = hostile(path)
+    for arguments in (
+        ("opportunities",),
+        ("opportunities", "--status", "reviewing"),
+        ("opportunity", identifier),
+    ):
+        printed = run(monkeypatch, capsys, *arguments, "--db", str(path))
+        assert printed, arguments
+        for line in printed.splitlines():
+            assert not CONTROL.search(line), (arguments, repr(line))
+
+
+def test_the_escaped_form_is_visible_and_the_unicode_is_not_flattened(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    hostile(path)
+    printed = run(monkeypatch, capsys, "opportunities", "--db", str(path))
+    assert "\\x1b" in printed and "\\x07" in printed
+    assert "Z\u00fcrich S\u00f6hne" in printed
+
+
+def test_a_multi_line_reason_survives_the_detail_view_one_safe_line_at_a_time(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    _, identifier = hostile(path)
+    printed = run(monkeypatch, capsys, "opportunity", identifier, "--db", str(path))
+    assert "line one" in printed and "line two" in printed
+    for line in printed.splitlines():
+        assert not CONTROL.search(line), repr(line)
+
+
+def test_the_json_form_keeps_the_underlying_data_escaped_by_json(tmp_path, monkeypatch, capsys):
+    """JSON needs no help: json.dumps escapes controls, and the raw value must survive."""
+    path = tmp_path / "db"
+    _, identifier = hostile(path)
+    printed = run(monkeypatch, capsys, "opportunities", "--json", "--db", str(path))
+    assert ESC not in printed and BEL not in printed
+    assert "\\u001b" in printed
+    assert json.loads(printed)[0]["title"] == HOSTILE_TITLE
+    record = json.loads(
+        run(monkeypatch, capsys, "opportunity", identifier, "--json", "--db", str(path))
+    )
+    assert record["title"] == HOSTILE_TITLE
+    assert record["history"][-1]["reason"] == f"line one\nline two{ESC}[31m"
 
 
 def test_the_detail_command_shows_the_packet_and_the_history(tmp_path, monkeypatch, capsys):

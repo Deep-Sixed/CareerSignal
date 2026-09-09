@@ -1,8 +1,29 @@
 """Rendering only. These tests never open a database."""
 
+import re
+
 import pytest
 
-from system.views import MISSING, coverage, detail, table
+from system.views import CONTROL, MISSING, coverage, detail, safe, safe_lines, table
+
+# Every character a terminal may act on, not the handful that came to mind.
+CONTROLS = (
+    [chr(code) for code in range(0x00, 0x20)]
+    + [chr(0x7F)]
+    + [chr(code) for code in range(0x80, 0xA0)]
+)
+# Sequences a real terminal would execute, if any of these reached it.
+ATTACKS = [
+    "Engineer\x1b]0;spoofed\x07",
+    "Engineer\x1b[2J",
+    "Engineer\x1b[31mred",
+    "Engineer\x1b]8;;https://evil.example.com\x07click\x1b]8;;\x07",
+    "Engineer\x08\x08\x08\x08hidden",
+    "Engineer\rOverwritten",
+    "Engineer\x9b2J",
+    "Engineer\x7fdelete",
+    "Engineer\x00null",
+]
 
 
 def row(**overrides):
@@ -69,10 +90,70 @@ def test_a_long_title_is_never_truncated():
     assert long in rendered
 
 
-def test_the_table_is_plain_ascii_on_every_console():
+def test_the_table_chrome_is_plain_ascii():
+    """The headers, padding and markers are ASCII; the data is whatever the mailbox sent."""
     rendered = table([row(), row(coverage=None, scored=False, eligible=False)])
     rendered.encode("ascii")
     assert "yes" in rendered and "no" in rendered
+
+
+@pytest.mark.parametrize("character", CONTROLS)
+def test_every_control_character_is_escaped_rather_than_printed(character):
+    escaped = safe(f"before{character}after")
+    assert character not in escaped
+    assert escaped == f"before\\x{ord(character):02x}after"
+
+
+@pytest.mark.parametrize(
+    "text", ["Zürich Söhne", "東京", "Ivan Kovačević", "naïve café", "Ω≈ç√", "İstanbul"]
+)
+def test_ordinary_unicode_survives_untouched(text):
+    """Safety is not achieved by flattening everything to ASCII."""
+    assert safe(text) == text
+
+
+@pytest.mark.parametrize("attack", ATTACKS)
+def test_no_attack_sequence_survives_into_a_table(attack):
+    rendered = table([row(title=attack, company=attack, status=attack)])
+    assert not CONTROL.search(rendered.replace("\n", ""))
+    # The escape is visible rather than silently dropped, so the operator can see it.
+    assert "\\x1b" in rendered or "\\x" in rendered
+
+
+@pytest.mark.parametrize("attack", ATTACKS)
+def test_no_attack_sequence_survives_into_a_detail_view(attack):
+    record = {
+        **row(title=attack, company=attack, location=attack, url=attack),
+        "packet": {"reasons": [attack], "draft": attack},
+        "history": [{"status": "new", "actor": attack, "reason": attack, "created_at": 1}],
+    }
+    assert not CONTROL.search(detail(record).replace("\n", ""))
+
+
+def test_a_newline_stays_structure_while_everything_else_escapes():
+    assert safe_lines("line one\nline two\x1b[31m") == ["line one", "line two\\x1b[31m"]
+    assert safe_lines("") == [""]
+    assert safe_lines("only") == ["only"]
+
+
+def test_a_multi_line_operator_reason_is_still_readable():
+    record = {
+        **row(),
+        "packet": None,
+        "history": [
+            {
+                "status": "rejected",
+                "actor": "operator",
+                "reason": "Wrong team\nRevisit next quarter",
+                "created_at": 1,
+            }
+        ],
+    }
+    rendered = detail(record)
+    assert "Wrong team" in rendered and "Revisit next quarter" in rendered
+    assert not CONTROL.search(rendered.replace("\n", ""))
+    for line in rendered.splitlines():
+        assert not re.search(r"[\x00-\x1f\x7f-\x9f]", line), repr(line)
 
 
 def test_booleans_read_as_words_and_missing_values_as_a_dash():
