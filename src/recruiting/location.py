@@ -110,16 +110,33 @@ class Location:
             for start in _find_all(words, phrase.split())
         ]
         spoken = {index for _, start, end in occurrences for index in range(start, end)}
-        offered, consumed = set(), set(spoken)
-        for name, start, end in occurrences:
-            # A denial never reaches across another stated mode: in "onsite (no remote
-            # option)" the denial belongs to remote, and onsite is still offered.
-            others = spoken - set(range(start, end))
-            denial = _denied_before(words, start, others) or _denied_after(words, end, others)
+        # Prefix denials are resolved first because they are the unambiguous ones: a negation
+        # reaching a mode across filler belongs to that mode. It cannot then also deny an
+        # earlier mode, which is what "onsite, no option for hybrid" would otherwise do --
+        # the availability word sits before the mode being denied, so a forward scan from
+        # onsite finds "option" and negates the very mode the posting offers.
+        prefix = [
+            _denied_before(words, start, spoken - set(range(start, end)))
+            for _, start, end in occurrences
+        ]
+        claimed = {index for denial in prefix if denial for index in denial}
+        offered, denied, consumed = set(), set(), set(spoken)
+        for (name, start, end), denial in zip(occurrences, prefix):
+            if denial is None:
+                # A denial never reaches across another stated mode either: in "onsite (no
+                # remote option)" the denial belongs to remote, and onsite is still offered.
+                suffix = _denied_after(words, end, spoken - set(range(start, end)))
+                denial = suffix if suffix and not suffix & claimed else None
             if denial:
                 consumed.update(denial)
+                denied.add(name)
             else:
                 offered.add(name)
+        # A denial is about the mode, not the wording. "no remote/WFH option" states one mode
+        # twice and denies it once; reading the second spelling as an offer would hand a
+        # remote profile a job that says it is not remote. Two names for one thing are not
+        # two things, so this cannot make a posting ambiguous either.
+        offered -= denied
         # Every stated mode was negated, none was stated, or several were offered at once.
         mode = offered.pop() if len(offered) == 1 else AMBIGUOUS if offered else UNKNOWN
         # Words following a surviving negation describe what is ruled out, not where the job is.

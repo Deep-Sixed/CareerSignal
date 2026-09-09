@@ -158,6 +158,13 @@ NEGATED = [
     "remote unsupported",
     "no option for remote",
     "no remote option",
+    # One mode stated under two spellings and denied once. The generated families missed
+    # this too until they were extended: the second spelling re-offered the denied mode and
+    # handed a remote profile a job that says it is not remote.
+    "no remote/WFH option",
+    "no option for remote/work from home",
+    "remote/WFH not available",
+    "no remote (work from home) option",
 ]
 
 
@@ -202,6 +209,12 @@ NOT_A_MODE_DENIAL = [
     ("onsite only, no remote", "onsite"),
     ("onsite (no remote option)", "onsite"),
     ("hybrid, remote not available", "hybrid"),
+    # Found by the generated invariants, not by this list. The availability word sits before
+    # the mode being denied, so a forward scan from onsite reached "option" and negated the
+    # mode the posting actually offers. Only word order separates these from the case above.
+    ("onsite, no option for hybrid", "onsite"),
+    ("remote, no option for onsite", "remote"),
+    ("in office (no option for WFH)", "onsite"),
 ]
 
 
@@ -209,6 +222,21 @@ NOT_A_MODE_DENIAL = [
 def test_a_denial_does_not_reach_past_what_it_denies(posting, configured):
     """Over-negating would trade a false positive for a false negative."""
     assert Location.parse(configured).accepts(Location.parse(posting))
+
+
+@pytest.mark.parametrize(
+    ("posting", "mode"),
+    [
+        ("remote or WFH", "remote"),
+        ("remote / work from home", "remote"),
+        ("onsite or in office", "onsite"),
+        ("on-site (on site)", "onsite"),
+    ],
+)
+def test_two_spellings_of_one_mode_are_that_mode_not_two_modes(posting, mode):
+    """Only genuinely different modes are ambiguous; two names for one thing are not."""
+    parsed = Location.parse(posting)
+    assert parsed.work_mode == mode and Location.parse(mode).accepts(parsed)
 
 
 def test_a_denial_never_infers_the_opposite_mode():
