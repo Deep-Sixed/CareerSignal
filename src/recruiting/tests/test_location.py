@@ -202,6 +202,12 @@ NOT_A_MODE_DENIAL = [
     ("onsite only, no remote", "onsite"),
     ("onsite (no remote option)", "onsite"),
     ("hybrid, remote not available", "hybrid"),
+    # Found by the generated invariants, not by this list. The availability word sits before
+    # the mode being denied, so a forward scan from onsite reached "option" and negated the
+    # mode the posting actually offers. Only word order separates these from the case above.
+    ("onsite, no option for hybrid", "onsite"),
+    ("remote, no option for onsite", "remote"),
+    ("in office (no option for WFH)", "onsite"),
 ]
 
 

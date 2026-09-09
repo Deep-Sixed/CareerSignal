@@ -110,12 +110,23 @@ class Location:
             for start in _find_all(words, phrase.split())
         ]
         spoken = {index for _, start, end in occurrences for index in range(start, end)}
+        # Prefix denials are resolved first because they are the unambiguous ones: a negation
+        # reaching a mode across filler belongs to that mode. It cannot then also deny an
+        # earlier mode, which is what "onsite, no option for hybrid" would otherwise do --
+        # the availability word sits before the mode being denied, so a forward scan from
+        # onsite finds "option" and negates the very mode the posting offers.
+        prefix = [
+            _denied_before(words, start, spoken - set(range(start, end)))
+            for _, start, end in occurrences
+        ]
+        claimed = {index for denial in prefix if denial for index in denial}
         offered, consumed = set(), set(spoken)
-        for name, start, end in occurrences:
-            # A denial never reaches across another stated mode: in "onsite (no remote
-            # option)" the denial belongs to remote, and onsite is still offered.
-            others = spoken - set(range(start, end))
-            denial = _denied_before(words, start, others) or _denied_after(words, end, others)
+        for (name, start, end), denial in zip(occurrences, prefix):
+            if denial is None:
+                # A denial never reaches across another stated mode either: in "onsite (no
+                # remote option)" the denial belongs to remote, and onsite is still offered.
+                suffix = _denied_after(words, end, spoken - set(range(start, end)))
+                denial = suffix if suffix and not suffix & claimed else None
             if denial:
                 consumed.update(denial)
             else:
