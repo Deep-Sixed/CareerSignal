@@ -2,7 +2,7 @@
 
 CareerSignal is a local recruiting application foundation: deduplicate opportunities, explain eligibility and fit, require explicit approval, and record controlled drafts and their audit trail in libSQL.
 
-The application accepts structured opportunities, supplied text/HTML recruiting messages with explicit job fields, and messages read from an authorized Gmail mailbox. It uses an in-memory draft provider and does not send email, create Gmail drafts, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations, and [Gmail intake](docs/gmail-intake.md) for the read-only mailbox adapter.
+The application accepts structured opportunities, supplied text/HTML recruiting messages with explicit job fields, and messages read from an authorized Gmail mailbox. It creates Gmail drafts only from an explicitly approved review, under a separate compose credential, and does not send email, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations, and [Gmail intake](docs/gmail-intake.md) for the read-only mailbox adapter.
 
 ## Run locally
 
@@ -23,7 +23,7 @@ uv run careersignal gmail-ingest --mailbox operator@example.com --label Label_Jo
   --skill python --skill sql --db var/private.db
 ```
 
-The Gmail adapter is read-only by construction: it defines no send, draft or modify operation, addresses one fixed host and two read URLs, refuses redirects, and takes its token from the environment rather than a flag. It creates no drafts and approves nothing. The token's scope is configured, not verified, and the tests drive recorded synthetic payloads rather than a live mailbox — see [Gmail intake](docs/gmail-intake.md) for exactly what is and is not established.
+The Gmail *intake* adapter is read-only by construction: it defines no send, draft or modify operation, addresses one fixed host and two read URLs, refuses redirects, and takes its token from the environment rather than a flag. It creates no drafts and approves nothing, and it cannot address the drafts collection at all. Creating a draft is a separate adapter under a separate credential, described below. The token's scope is configured, not verified, and the tests drive recorded synthetic payloads rather than a live mailbox — see [Gmail intake](docs/gmail-intake.md) for exactly what is and is not established.
 
 `demo` is an explicitly synthetic certification scenario, including a simulated operator approval. Use a separate demo database. Repeating it proves persisted receipt replay without creating another controlled draft. The provider is in-memory: a process restart loses its unrecorded drafts; unresolved attempts stay uncertain rather than being retried blindly.
 
@@ -39,6 +39,25 @@ uv run careersignal opportunities --db var/private.db --json
 ```
 
 These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. See [operator views](docs/operator-views.md).
+
+An approved review can become a real draft in an authorized mailbox. This is the only
+capability that writes outside this machine, so it is never implicit:
+
+```sh
+uv run careersignal approve <review-id> --actor operator --db var/private.db
+uv run careersignal draft <review-id> --db var/private.db          # in-memory provider
+
+export CAREERSIGNAL_GMAIL_COMPOSE_TOKEN=...
+uv run careersignal draft <review-id> --provider gmail \
+  --mailbox operator@example.com --db var/private.db               # a real Gmail draft
+```
+
+The compose credential is separate from the read credential in every respect: its own
+environment variable, its own scope, its own adapter and its own path allowlist. The
+adapter defines no send operation and refuses the Gmail send endpoint by path. An approval
+binds to the review, its exact wording and the status it was read in, and all three are
+rechecked before the write; a recruiter-supplied address carrying a control character is
+refused rather than repaired. See [approved drafts](docs/approved-drafts.md).
 
 An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
 

@@ -95,9 +95,9 @@ def test_uncertain_external_result_never_blindly_retries(flow, after_success):
     flow.repository.decide(review, approved=True, actor="operator")
     original = flow.provider.create
 
-    def fail(key, text):
+    def fail(key, text, **addressing):
         if after_success:
-            original(key, text)
+            original(key, text, **addressing)
         raise OSError("controlled interruption")
 
     flow.provider.create = fail
