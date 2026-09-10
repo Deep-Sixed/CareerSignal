@@ -255,6 +255,34 @@ class Repository:
             "receipt": intent[1] if intent else None,
         }
 
+    @classmethod
+    def _bound(cls, conn, review_id) -> dict | None:
+        """Exactly the material an approval binds, read the way the approval reads it.
+
+        Deliberately built from _binding(), the same statement decide() and claim() bind
+        and re-verify from, rather than assembled from separate lookups. The operator has
+        to be shown what will actually be authorized: a view that reconstructed the
+        recipient by its own route could agree with the write path today and drift from it
+        later, and the drift would be invisible precisely where it matters most.
+
+        The wording comes from the reviews.draft column for the same reason. The payload
+        carries a copy of it, written from the same value at intake, but the copy is not
+        what the approval's draft digest is taken over.
+
+        Returns None when the opportunity has no current review, which is also when there
+        is nothing an approval could bind.
+        """
+        if review_id is None:
+            return None
+        binding = cls._binding(conn, review_id)
+        return {
+            "review": review_id,
+            "source": binding["addressing"]["source"],
+            "to": binding["addressing"]["to"],
+            "subject": binding["addressing"]["subject"],
+            "wording": binding["draft"],
+        }
+
     def opportunity(self, opportunity_id) -> dict:
         """One opportunity with its current review packet and its whole status history."""
         with connection(self.path) as conn:
@@ -271,10 +299,12 @@ class Repository:
                 (opportunity_id,),
             ).fetchall()
             action = self._action(conn, summary["review"])
+            bound = self._bound(conn, summary["review"])
         return {
             **summary,
             "packet": json.loads(packet[0]) if packet else None,
             "action": action,
+            "bound": bound,
             "history": [
                 {"status": h[0], "actor": h[1], "reason": h[2], "created_at": h[3], "event": h[4]}
                 for h in history

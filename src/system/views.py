@@ -144,14 +144,28 @@ def detail(record) -> str:
         f"  approval   {approval(record['action'])}",
         f"  draft      {attempt(record['action'])}",
     ]
-    packet = record["packet"]
-    if packet:
-        lines.append("  reasons")
+    # Both are keyed on the opportunity's current review, so they are present together
+    # or not at all; one condition, rather than two that could disagree.
+    packet, bound = record["packet"], record["bound"]
+    if bound:
+        # What an approval would bind, shown before the operator gives one. The recipient
+        # and subject are recruiter-supplied and reach a terminal for the first time here.
+        lines.extend(
+            [
+                f"  review     {safe(bound['review'])}",
+                f"  source     {safe(bound['source']) if bound['source'] else MISSING}",
+                f"  recipient  {safe(bound['to']) if bound['to'] else MISSING}",
+                f"  subject    {safe(bound['subject']) if bound['subject'] else MISSING}",
+                "  reasons",
+            ]
+        )
         lines.extend(f"    {safe(reason)}" for reason in packet["reasons"])
         # Labelled for what it is. The line above says whether a draft was attempted;
-        # this is the wording an approval binds to, which is a different thing.
+        # this is the wording an approval binds to, which is a different thing. Printed
+        # from the bound material rather than the payload's copy of it, so that what is
+        # read here is what the approval's digest is taken over.
         lines.append("  wording")
-        lines.extend(f"    {part}" for part in safe_lines(packet["draft"]))
+        lines.extend(f"    {part}" for part in safe_lines(bound["wording"]))
     else:
         lines.append("  reasons    no current review")
     lines.append("  history")

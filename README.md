@@ -38,7 +38,7 @@ uv run careersignal opportunity <id> --db var/private.db
 uv run careersignal opportunities --db var/private.db --json
 ```
 
-These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. The detail view also says whether an opportunity has been approved and whether a draft was refused, attempted, left uncertain or created. See [operator views](docs/operator-views.md).
+These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. The detail view also says whether an opportunity has been approved and whether a draft was refused, attempted, left uncertain or created, and shows the exact material an approval binds — review id, source message, recipient, subject and wording — so an outward draft is never approved unseen. See [operator views](docs/operator-views.md) and [the approval packet](docs/operator-interface.md#the-approval-packet).
 
 Moving an opportunity through the search is one command, and it names the state it was decided against:
 

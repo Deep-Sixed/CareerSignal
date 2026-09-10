@@ -31,10 +31,10 @@ careersignal opportunities --active --min-coverage 70
 careersignal opportunity <id>
 ```
 
-The detail view now also says where the opportunity stands as an action, not just as a record:
+The detail view says where the opportunity stands as an action, not just as a record, and shows the exact material an approval would bind:
 
 ```
-Example Company - Application Engineer
+Example Corp - IAM Architect
   id         6f3551ba3e49758400763a1551750f138ae3a4c5424859207aa4543e8878f803
   url        https://jobs.example.com/roles/1
   location   remote
@@ -42,15 +42,19 @@ Example Company - Application Engineer
   coverage   100%
   eligible   yes
   advances   yes
-  approval   approved by synthetic-operator
-  draft      created; receipt controlled-282c3d5d302dc886…
+  approval   approved by operator
+  draft      not attempted
+  review     b6435bf9f264c545cc268f317d7f4516a8e1d1b308bf3bee0b37efc4b10b7443
+  source     message:75aba036cfaa92ecc20d2a4f7f332335369220dc33cfcf682c4be58ee54f70f2
+  recipient  jane.recruiter@example.com
+  subject    IAM Architect - remote
   reasons
     Stated skill coverage: 2/2 (100%)
     Matched: python, sql
     Location eligible
     Advances
   wording
-    I would like to learn more about Application Engineer at Example Company.
+    I would like to learn more about IAM Architect at Example Corp.
   history
     1  1789021264  new  intake
     2  1789021272  interested  operator
@@ -58,6 +62,28 @@ Example Company - Application Engineer
 ```
 
 Each history row is the event id, when it was recorded, the status and the actor, with the operator's note on the lines beneath it. The event id is what `--expect` names.
+
+## The approval packet
+
+`review`, `source`, `recipient`, `subject` and `wording` are what an approval binds. Approving this review binds a digest over the recipient and subject, a digest over the wording, the review's own content digest, and the status the opportunity was read in; the claim re-verifies every one of them before anything leaves this machine. So the operator has to be able to see them first — approving a binding to values that were never displayed is not an approval of anything in particular.
+
+The invariant is:
+
+```
+what the operator sees == what the approval binds == what the claim verifies
+```
+
+It holds because all of it is read from **one place**: `Repository._bound()` is built on `_binding()`, the same statement `decide()` binds from and `claim()` re-verifies against. The view does not reassemble the recipient by its own route. A second route could agree today and drift later, and the drift would be invisible exactly where it matters.
+
+The wording is read from the `reviews.draft` column rather than from the copy inside the review payload. Both are written from the same value at intake, so either would look right; only the column is what the approval's draft digest is taken over.
+
+`source` names the message the addressing came from. It is **provenance, not an authorization gate** — the same recipient and subject arriving in a second message is not a materially different outward action, so it does not force reapproval. See [approved drafts](approved-drafts.md).
+
+A recipient or subject of `-` means the opportunity arrived without message addressing — through structured intake rather than a mailbox. There is nothing to address a draft to, and the composition boundary refuses rather than inventing one.
+
+When the opportunity has no current review there is nothing an approval could bind, and the packet is absent rather than empty.
+
+**This is one read, not a lock.** Nothing is reserved by looking. If a newer message lands between the operator reading the packet and approving it, the approval binds what was current at the moment it was recorded, and the claim refuses if the target has moved since. The packet makes the target visible; it does not freeze it.
 
 `approval` is `not yet decided`, `approved by <actor>` or `rejected by <actor>`. `draft` is one of:
 
@@ -77,7 +103,7 @@ This is **reporting, not prediction**. The write paths decide for themselves whe
 
 The `wording` block is the draft text an approval binds to. It is labelled separately from the `draft` line above it, which is about whether one was attempted.
 
-Every value in this view that came from outside — a title, a recruiter's subject, an operator's actor and reason, a provider's receipt — is escaped for the terminal exactly as [operator views](operator-views.md) describes. The `--json` form keeps the underlying value.
+Every value in this view that came from outside — a title, a recruiter's subject and address, an operator's actor and reason, a provider's receipt — is escaped for the terminal exactly as [operator views](operator-views.md) describes. The recipient and subject are recruiter-supplied header values and reach a terminal for the first time here. The `--json` form keeps the underlying value, because automation has to see what the approval will bind rather than a rendering of it.
 
 ## Recording a status
 

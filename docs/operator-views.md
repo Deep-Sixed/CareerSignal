@@ -43,7 +43,7 @@ careersignal opportunity <id>
 
 Shows what it is, what the current review concluded — coverage, eligibility, whether it advances, and the full reasons — the draft wording an approval would bind to, and the whole status history with event id, actor, reason and timestamp.
 
-It also reports where the opportunity stands as an action: whether it has been approved and who by, and whether a draft was refused, attempted, left uncertain or created. See [the operator interface](operator-interface.md#finding-work-and-reading-one-opportunity) for what each of those means and why it reports rather than predicts.
+It also reports where the opportunity stands as an action: whether it has been approved and who by, and whether a draft was refused, attempted, left uncertain or created. Alongside those it shows the exact material an approval binds — review id, source message, recipient, subject and wording — read from the same statement the authorization binds and re-verifies from. See [the approval packet](operator-interface.md#the-approval-packet).
 
 ## Structured output
 

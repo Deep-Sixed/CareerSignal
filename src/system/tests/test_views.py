@@ -45,6 +45,13 @@ def row(**overrides):
         "actionable": True,
         "status_event": 12,
         "action": {"decision": None, "actor": None, "draft": "none", "receipt": None},
+        "bound": {
+            "review": "review-1",
+            "source": "message-1",
+            "to": "recruiter@example.com",
+            "subject": "A role for you",
+            "wording": "Hello",
+        },
     }
     return {**base, **overrides}
 
@@ -130,7 +137,19 @@ def test_no_attack_sequence_survives_into_a_table(attack):
 @pytest.mark.parametrize("attack", ATTACKS)
 def test_no_attack_sequence_survives_into_a_detail_view(attack):
     record = {
-        **row(title=attack, company=attack, location=attack, url=attack),
+        **row(
+            title=attack,
+            company=attack,
+            location=attack,
+            url=attack,
+            bound={
+                "review": "review-1",
+                "source": attack,
+                "to": attack,
+                "subject": attack,
+                "wording": attack,
+            },
+        ),
         "packet": {"reasons": [attack], "draft": attack},
         "history": [
             {"status": "new", "actor": attack, "reason": attack, "created_at": 1, "event": 1}
@@ -173,7 +192,7 @@ def test_no_attack_sequence_survives_a_multiline_path(attack):
     for line in safe_lines(attack):
         assert not CONTROL.search(line), (attack, repr(line))
     record = {
-        **row(),
+        **row(bound={**row()["bound"], "wording": f"first\n{attack}\nlast"}),
         "packet": {"reasons": ["ok"], "draft": f"first\n{attack}\nlast"},
         "history": [
             {
@@ -195,7 +214,7 @@ def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
     """\\r would return the cursor and let later text overwrite what was already printed."""
     assert safe_lines("visible\rhidden") == ["visible\\x0dhidden"]
     record = {
-        **row(),
+        **row(bound={**row()["bound"], "wording": "visible\rhidden"}),
         "packet": {"reasons": ["ok"], "draft": "visible\rhidden"},
         "history": [
             {
@@ -214,7 +233,7 @@ def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
 
 def test_a_multi_line_operator_reason_is_still_readable():
     record = {
-        **row(),
+        **row(bound=None),
         "packet": None,
         "history": [
             {
@@ -278,6 +297,7 @@ def test_the_detail_view_survives_an_opportunity_with_no_review():
             eligible=None,
             advances=None,
             status=None,
+            bound=None,
         ),
         "packet": None,
         "history": [],
