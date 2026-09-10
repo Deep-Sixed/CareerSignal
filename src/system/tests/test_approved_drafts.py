@@ -312,6 +312,47 @@ def test_an_uncertain_draft_stays_reconcilable_after_a_later_hostile_source(tmp_
     assert workflow.repository.intent(review)[0] == "uncertain"
 
 
+@pytest.mark.parametrize(
+    "receipt,expected", [("gmail-draft:from-elsewhere", "gmail-draft:from-elsewhere"), (None, None)]
+)
+def test_an_intent_settled_during_the_preflight_still_wins(tmp_path, receipt, expected):
+    """The refusal path never reaches claim(), so its guard has to live in refuse().
+
+    Interleaving: this caller reads intent() and finds none; another settles one; a later
+    hostile source arrives; this caller's preflight returns a reason. Without an atomic
+    check at the refusal, recording it raised ValueError and the caller lost the receipt --
+    later data revising an external attempt that had already become authoritative.
+    """
+    path = tmp_path / "db"
+    workflow, review = ingest(path, sender="jane@example.com")
+    workflow.repository.decide(review, approved=True, actor="operator")
+
+    class Racing:
+        """Settles the intent, then lands hostile data, then refuses -- inside the preflight."""
+
+        def refusal(self, key, body, *, to="", subject_line=""):
+            workflow.repository.claim(review)
+            workflow.repository.finish(review, receipt)
+            later_hostile_source(workflow)
+            return "Recipient contains prohibited control characters"
+
+        def create(self, *args, **kwargs):
+            raise AssertionError("a settled intent still reached the provider")
+
+    workflow.provider = Racing()
+    assert workflow.repository.intent(review) is None, "the race has not started yet"
+    assert workflow.draft(review) == expected
+
+    # The external state that became authoritative first is exactly what it was left as.
+    assert workflow.repository.intent(review) == (
+        "confirmed" if receipt else "uncertain",
+        receipt,
+    )
+    # And no refusal was recorded against an attempt that had already happened.
+    assert "draft_refused" not in workflow.repository.audit(review)
+    assert workflow.repository.audit(review).count("draft_intent") == 1
+
+
 def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):
     """The opposite case, unchanged: past the request the outcome genuinely is unknown."""
     path = tmp_path / "db"

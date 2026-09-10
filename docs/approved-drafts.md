@@ -145,9 +145,17 @@ existing intent?
 load current material → preflight → claim/verify/bind → create the claimed material
 ```
 
-The claim transaction keeps its own check on the same thing. The read above is for replay;
-the one inside the transaction is the atomic guard against an intent appearing in between.
-Removing either would leave a hole the other does not cover.
+That read is for replay, and it is not sufficient on its own — an intent can appear after
+it. Both paths out of it therefore carry their own atomic check:
+
+* the **allowed** path reaches `claim()`, whose transaction refuses if an intent now exists;
+* the **refusal** path never reaches `claim()`, so `refuse()` does the same job. Inside its
+  transaction it returns the settled state instead of recording anything, and the workflow
+  replays confirmed or uncertain from that outcome.
+
+Without the second, a later hostile source could revise a result that an external attempt
+had already made authoritative: the refusal recording would find the new intent and raise,
+and the caller would lose a receipt it was entitled to.
 
 **A refusal is not an uncertain external write, and must not be recorded as one.** The
 provider is asked whether the draft can be composed *before* any durable intent is

@@ -60,7 +60,14 @@ class Workflow:
             review_id, material["body"], to=material["to"], subject_line=material["subject"]
         )
         if reason:
-            self.repository.refuse(review_id)
+            # refuse() decides this inside its own transaction. The read above is for
+            # replay; this is the atomic guard on the refusal path, which never reaches
+            # claim() and would otherwise have none. If an intent appeared in between, the
+            # external attempt is authoritative and a later hostile source does not revise
+            # it -- the same rule as at the top of this method, applied where it can hold.
+            settled = self.repository.refuse(review_id)
+            if settled:
+                return settled["receipt"] if settled["state"] == "confirmed" else None
             raise DraftRefused(reason)
         claim = self.repository.claim(review_id)
         if not claim["claimed"]:

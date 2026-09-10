@@ -531,19 +531,29 @@ class Repository:
     def refuse(self, review_id):
         """Record that a draft was refused before anything left this machine.
 
-        No intent row is written. That is the whole point: an intent means an external
-        write was attempted and its outcome may be unknown, and here it is known that
-        nothing was sent. Writing one would strand the review -- the decision locks for
-        reconciliation, and reconciliation cannot find a draft that was never created.
+        Returns the settled intent if one already exists, and records nothing in that case;
+        returns None once the refusal is recorded.
+
+        No intent row is ever written here. That is the whole point: an intent means an
+        external write was attempted and its outcome may be unknown, and here it is known
+        that nothing was sent. Writing one would strand the review -- the decision locks
+        for reconciliation, and reconciliation cannot find a draft that was never created.
+
+        The check is inside this transaction rather than left to the caller's earlier read,
+        because the refusal path never reaches claim() and so has no other atomic guard. An
+        intent appearing between that read and this write means an external attempt became
+        authoritative first, and data arriving afterwards must not revise what it was.
         """
         with connection(self.path) as conn, transaction(conn):
-            if conn.execute(
-                "SELECT 1 FROM draft_intents WHERE review_id=?", (review_id,)
-            ).fetchone():
-                raise ValueError("Draft already attempted; a refusal cannot follow an attempt")
+            prior = conn.execute(
+                "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
+            ).fetchone()
+            if prior:
+                return {"state": prior[0], "receipt": prior[1]}
             conn.execute(
                 "INSERT INTO audit(review_id,event) VALUES (?, 'draft_refused')", (review_id,)
             )
+            return None
 
     def authorization(self, review_id):
         """What an approval for this review is bound to, and what is true now."""
