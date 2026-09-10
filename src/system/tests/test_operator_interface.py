@@ -612,3 +612,147 @@ def test_a_fault_before_anything_was_reserved_is_not_reported_as_uncertain(
     with pytest.raises(RuntimeError, match="misconfigured"):
         run(monkeypatch, capsys, "draft", review, "--db", str(path))
     assert Repository(path).intent(review) is None
+
+
+# --- the reported state is the current one, not everything that ever happened ----------------
+
+
+def source(path, external_id, sender):
+    """A later alert for the same opportunity, which reuses the unchanged review."""
+    Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql"))).intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id=external_id,
+            sender=sender,
+            subject="A role for you",
+            text=JOB_TEXT,
+        )
+    )
+
+
+def refuse_a_draft(path, review, monkeypatch, capsys):
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+    out, _ = stopped(
+        monkeypatch,
+        capsys,
+        1,
+        "draft",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+    return out
+
+
+def test_a_refusal_a_later_approval_has_answered_is_not_the_current_state(
+    tmp_path, monkeypatch, capsys
+):
+    """A refusal is history once a new approval stands over it.
+
+    The audit row survives, correctly -- audit is history and nothing rewrites it. But the
+    decisions row is upserted, so a reapproval replaces the decision while the old refusal
+    stays behind it. Reporting that refusal as the current draft state tells the operator
+    they cannot act when they can. Which is current is decided by order, not existence.
+    """
+    path = tmp_path / "db"
+    _, review, opportunity = ingest(path, sender=HOSTILE_SENDER)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    refuse_a_draft(path, review, monkeypatch, capsys)
+    assert "draft      refused; nothing was created" in run(
+        monkeypatch, capsys, "opportunity", opportunity, "--db", str(path)
+    )
+
+    # The recruiter's next alert carries an address that can be used, and the operator
+    # approves the corrected review.
+    source(path, "m2", "recruiter@example.com")
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "approval   approved by operator" in printed
+    assert "draft      not attempted" in printed
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["draft"] == "none"
+    assert structured["action"]["decision"] == "approved"
+    # The refusal is still in the audit trail; only what it means now has changed.
+    assert "draft_refused" in Repository(path).audit(review)
+
+    # And a refusal recorded after that approval is current again.
+    source(path, "m3", HOSTILE_SENDER)
+    refuse_a_draft(path, review, monkeypatch, capsys)
+    assert "draft      refused; nothing was created" in run(
+        monkeypatch, capsys, "opportunity", opportunity, "--db", str(path)
+    )
+
+
+def test_an_attempt_still_outranks_a_refusal_recorded_after_it(tmp_path, monkeypatch, capsys):
+    """Ordering decides between a decision and a refusal, never against an intent.
+
+    An intent means an external write was attempted and its outcome is a fact about that
+    attempt. No later event -- an approval, a refusal, anything -- revises it.
+    """
+    path = tmp_path / "db"
+    _, review, opportunity = approved(path, monkeypatch, capsys)
+    repository = Repository(path)
+    repository.claim(review)
+    repository.finish(review, None)
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute("INSERT INTO audit(review_id,event) VALUES (?, 'draft_refused')", (review,))
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "draft      uncertain; reconciliation required" in printed
+    assert "refused" not in printed
+
+
+# --- an id that names nothing is a mistyped command -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("approve", "no-such-review", "--actor", "operator"),
+        ("reject", "no-such-review", "--actor", "operator"),
+        ("draft", "no-such-review"),
+        ("reconcile", "no-such-review"),
+    ],
+)
+def test_a_review_id_that_names_nothing_is_a_usage_error(tmp_path, monkeypatch, capsys, arguments):
+    """Exit 2 on stderr, like an unknown opportunity id, because that is what it is.
+
+    Reported as REFUSED it would be indistinguishable from an approval the rules turned
+    down, and `reconcile` said "No intent to reconcile" -- which reads as though the review
+    existed and simply had not been drafted.
+    """
+    path = tmp_path / "db"
+    ingest(path)
+    out, err = stopped(monkeypatch, capsys, 2, *arguments, "--db", str(path))
+    assert "No review with id no-such-review" in err
+    assert out == ""
+
+
+def test_a_review_that_exists_but_cannot_be_acted_on_is_still_refused(
+    tmp_path, monkeypatch, capsys
+):
+    """The other side of the same distinction: existing and unusable is not unknown."""
+    path = tmp_path / "db"
+    _, review, _ = approved(path, monkeypatch, capsys)
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute("UPDATE reviews SET draft='different wording' WHERE id=?", (review,))
+    out, err = stopped(monkeypatch, capsys, 1, "draft", review, "--db", str(path))
+    assert out.startswith("REFUSED")
+    assert "approve it again" in out
+    assert err == ""
+
+
+def test_a_decision_is_reported_in_words_rather_than_assembled_from_the_command(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    _, review, _ = ingest(path)
+    printed = run(monkeypatch, capsys, "reject", review, "--actor", "operator", "--db", str(path))
+    assert "rejected by operator" in printed
+    assert "rejectd" not in printed

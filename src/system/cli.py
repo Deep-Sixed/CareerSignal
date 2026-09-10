@@ -49,6 +49,9 @@ from system.workflow import Workflow
 
 ACCEPTED, REFUSED, UNCERTAIN = "accepted", "refused", "uncertain"
 CODES = {ACCEPTED: 0, REFUSED: 1, UNCERTAIN: 3}
+# Written out rather than built from the command name: "reject" + "d" is not a word, and a
+# message the operator reads should not be assembled by string arithmetic.
+DECIDED = {"approve": "approved", "reject": "rejected"}
 
 
 def _provider(args, parser):
@@ -61,6 +64,23 @@ def _provider(args, parser):
     if not args.mailbox:
         parser.error("--provider gmail requires --mailbox")
     return GmailDrafts(GmailComposeCredentials(token, args.mailbox))
+
+
+def known_review(repository, identifier, parser):
+    """Stop on a review id that names nothing, before any command acts on it.
+
+    An id that does not exist is a mistyped command, not the system refusing: the
+    documented contract puts an unknown id with the other argparse errors at exit 2, and
+    the opportunity commands already do this. Without it a nonexistent review reports the
+    same REFUSED as a real one whose approval went stale -- and `reconcile` reported "No
+    intent to reconcile", which reads as though the review existed and had not been
+    drafted. A review that exists but is stale stays a refusal; only nonexistence is
+    decided here.
+    """
+    try:
+        repository.review(identifier)
+    except KeyError:
+        parser.error(f"No review with id {identifier}")
 
 
 def report(record, structured: bool):
@@ -310,6 +330,7 @@ def main():
         if not args.actor or not args.actor.strip():
             parser.error(f"{args.command} requires --actor")
         repository = Repository(path)
+        known_review(repository, args.identifier, parser)
         try:
             repository.decide(args.identifier, approved=args.command == "approve", actor=args.actor)
         except (ValueError, KeyError) as exc:
@@ -327,7 +348,8 @@ def main():
                 "command": args.command,
                 "review": args.identifier,
                 "outcome": ACCEPTED,
-                "message": f"review {args.identifier} {args.command}d by {args.actor.strip()}",
+                "message": f"review {args.identifier} "
+                f"{DECIDED[args.command]} by {args.actor.strip()}",
             }
         report(record, args.json)
         return
@@ -335,6 +357,7 @@ def main():
         if not args.identifier:
             parser.error(f"{args.command} requires a review id")
         repository = Repository(path)
+        known_review(repository, args.identifier, parser)
         workflow = Workflow(repository, _provider(args, parser), Profile(("placeholder",)))
         report(attempted(workflow, repository, args), args.json)
         return

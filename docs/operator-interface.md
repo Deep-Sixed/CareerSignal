@@ -14,6 +14,8 @@ The commands an operator reads — `opportunities`, `opportunity`, `status`, `ap
 
 Argparse keeps exit 2 for a command that was written wrongly — a missing argument, an unknown id, a filter that cannot mean anything — and writes it to stderr. An outcome goes to stdout, because it is the answer rather than a diagnostic.
 
+An id that names nothing is a mistyped command, so every command that takes one refuses it that way: an unknown opportunity id for `opportunity` and `status`, an unknown review id for `approve`, `reject`, `draft` and `reconcile`. A review that **exists** but cannot be acted on — approved and then changed, already attempted, an ended opportunity — is a refusal, exit 1, because that is the system deciding rather than the operator mistyping.
+
 **Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means nothing was created, the operator's approval survives, and correcting the cause and retrying is safe. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
 
 The intake and setup commands — `init`, `verify`, `demo`, `ingest`, `gmail-ingest` — emit a JSON document as they always have. They report no outcome because they contain no operator decision.
@@ -65,6 +67,10 @@ Each history row is the event id, when it was recorded, the status and the actor
 | `uncertain; reconciliation required` | The provider was contacted and the outcome is unknown. |
 | `created; receipt <id>` | The draft exists and this is its receipt. |
 
+`refused` means the **most recent** thing that happened was a refusal, not that one ever happened. A refusal and a decision are both audit events, and audit is history: a refused draft leaves its row behind permanently, while the decision row is replaced when the operator approves again. So which of the two is current is decided by their order. Correct the recruiter's address, reapprove, and the state reads `not attempted` again — the refusal stays in the audit trail, but it has been answered. Refuse again after that approval and it reads `refused` again.
+
+An intent is outside that ordering entirely. Once an external write has been attempted, its outcome is a fact about that attempt, and no later event revises it: `attempting`, `uncertain` and `confirmed` always win over any refusal, whenever it was recorded.
+
 This is **reporting, not prediction**. The write paths decide for themselves whether an action is still authorized — the claim transaction rechecks every binding — so an `approved` here means an approval was recorded, not that drafting will be permitted now. A review that changed since it was approved still refuses at the moment of writing, which is the only moment where the answer cannot go stale.
 
 The `wording` block is the draft text an approval binds to. It is labelled separately from the `draft` line above it, which is about whether one was attempted.
@@ -103,7 +109,7 @@ careersignal reconcile <review-id>
 
 These call the existing machinery described in [approved drafts](approved-drafts.md), unchanged. The controlled provider remains the default and Gmail must be named explicitly, with its own credential in the environment.
 
-An approval the decision rules refuse — an ineligible review, a review that predates stated skill coverage, an opportunity already ended, a review whose draft was already attempted — is `REFUSED` with the reason, not a usage error. The operator can act on what it names.
+An approval the decision rules refuse — an ineligible review, a review that predates stated skill coverage, an opportunity already ended, a review whose draft was already attempted — is `REFUSED` with the reason, not a usage error. The operator can act on what it names. A review id that does not exist at all is exit 2 instead, as above.
 
 ## What this interface is not
 

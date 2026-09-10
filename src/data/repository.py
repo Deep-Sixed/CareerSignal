@@ -231,8 +231,15 @@ class Repository:
         intent = conn.execute(
             "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
         ).fetchone()
-        refused = conn.execute(
-            "SELECT 1 FROM audit WHERE review_id=? AND event='draft_refused' LIMIT 1",
+        # The most recent of the events that can change what the operator may do next.
+        # Asking whether a refusal has ever been recorded would report a refusal that a
+        # later approval has already answered: the decisions row is upserted, so a
+        # reapproval replaces the decision while the old audit row stays -- correctly,
+        # since audit is history. Which of the two is current is decided by their order,
+        # and audit ids are append-only, so the latest one is the current action state.
+        latest = conn.execute(
+            "SELECT event FROM audit WHERE review_id=? AND "
+            "event IN ('approved','rejected','draft_refused') ORDER BY id DESC LIMIT 1",
             (review_id,),
         ).fetchone()
         return {
@@ -240,9 +247,11 @@ class Repository:
             "actor": decision[1] if decision else None,
             # Refused and uncertain are different facts and are never collapsed. A refusal
             # means nothing was attempted; an intent means something was, and its outcome
-            # is a fact about that attempt. So an intent wins over an earlier refusal: the
-            # refusal describes a draft that was never proposed, not the current state.
-            "draft": intent[0] if intent else ("refused" if refused else "none"),
+            # is a fact about that attempt. So an intent wins absolutely: the refusal
+            # describes a draft that was never proposed, not the current state.
+            "draft": intent[0]
+            if intent
+            else ("refused" if latest and latest[0] == "draft_refused" else "none"),
             "receipt": intent[1] if intent else None,
         }
 
