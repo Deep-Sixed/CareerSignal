@@ -18,6 +18,8 @@ An id that names nothing is a mistyped command, so every command that takes one 
 
 **Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means nothing was created, the operator's approval survives, and correcting the cause and retrying is safe. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
 
+`UNCERTAIN` is therefore reserved for exactly what it says: **a provider was contacted and the outcome is unknown.** A draft whose write was reserved but not yet attempted is recorded as `attempting`, which says nothing about contact, so running `draft` against one is `REFUSED` — this invocation reserved nothing, contacted nothing and wrote nothing, because a claim already stood. `reconcile` is the exception and stays exit 3 on an unsettled intent: it does contact the provider to look, and its answer is about what the lookup found. Refusing it would close the one route out of `attempting`.
+
 The intake and setup commands — `init`, `verify`, `demo`, `ingest`, `gmail-ingest` — emit a JSON document as they always have. They report no outcome because they contain no operator decision.
 
 ## Finding work and reading one opportunity

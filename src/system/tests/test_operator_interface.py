@@ -756,3 +756,98 @@ def test_a_decision_is_reported_in_words_rather_than_assembled_from_the_command(
     printed = run(monkeypatch, capsys, "reject", review, "--actor", "operator", "--db", str(path))
     assert "rejected by operator" in printed
     assert "rejectd" not in printed
+
+
+# --- reserved is not contacted ------------------------------------------------------------------
+
+
+def reserved(path, monkeypatch, capsys):
+    """An intent claimed and left in `attempting`: the provider was never called."""
+    _, review, opportunity = approved(path, monkeypatch, capsys)
+    Repository(path).claim(review)
+    assert Repository(path).intent(review) == ("attempting", None)
+    return review, opportunity
+
+
+def no_provider_contact(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("a reserved attempt reached the provider")
+
+    monkeypatch.setattr(ControlledDrafts, "refusal", refuse)
+    monkeypatch.setattr(ControlledDrafts, "create", refuse)
+    monkeypatch.setattr(ControlledDrafts, "lookup", refuse)
+
+
+def test_a_reserved_attempt_is_refused_rather_than_called_uncertain(tmp_path, monkeypatch, capsys):
+    """UNCERTAIN says a provider was contacted. An `attempting` row does not say that.
+
+    It records that the write was reserved. Whether anything was contacted is not in the
+    record, so reporting uncertain claims more than the record holds -- and uncertain is
+    the state whose whole meaning is "reconcile, because a draft may already exist".
+    """
+    path = tmp_path / "db"
+    review, _ = reserved(path, monkeypatch, capsys)
+    no_provider_contact(monkeypatch)
+    out, err = stopped(monkeypatch, capsys, 1, "draft", review, "--db", str(path))
+    assert out.startswith("REFUSED")
+    assert "already in progress" in out
+    assert "UNCERTAIN" not in out
+    assert err == ""
+    # Nothing was retried and nothing moved.
+    assert Repository(path).intent(review) == ("attempting", None)
+    assert Repository(path).audit(review).count("draft_intent") == 1
+
+
+def test_the_structured_form_of_a_reserved_attempt_says_refused_and_attempting(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    review, _ = reserved(path, monkeypatch, capsys)
+    no_provider_contact(monkeypatch)
+    out, _ = stopped(monkeypatch, capsys, 1, "draft", review, "--json", "--db", str(path))
+    record = json.loads(out)
+    assert record["outcome"] == "refused"
+    assert record["state"] == "attempting"
+    assert record["receipt"] is None
+
+
+def test_a_contacted_attempt_is_still_uncertain(tmp_path, monkeypatch, capsys):
+    """The other side of the distinction, unchanged: exit 3 stays for the contacted state."""
+    path = tmp_path / "db"
+    review, _ = reserved(path, monkeypatch, capsys)
+    Repository(path).finish(review, None)
+    assert Repository(path).intent(review) == ("uncertain", None)
+    out, _ = stopped(monkeypatch, capsys, 3, "draft", review, "--json", "--db", str(path))
+    record = json.loads(out)
+    assert record["outcome"] == "uncertain"
+    assert record["state"] == "uncertain"
+
+
+def test_reconciling_a_reserved_attempt_is_not_refused(tmp_path, monkeypatch, capsys):
+    """Refusing every `attempting` invocation would close the one route out of it.
+
+    `draft` reads as a refusal because it reserved nothing and contacted nothing.
+    `reconcile` does contact the provider to look, so its answer is about what the lookup
+    found -- and finding the draft is how an attempt that was never confirmed settles.
+    """
+    path = tmp_path / "db"
+    review, opportunity = reserved(path, monkeypatch, capsys)
+    monkeypatch.setattr(ControlledDrafts, "lookup", lambda self, key: "controlled-recovered")
+    printed = run(monkeypatch, capsys, "reconcile", review, "--db", str(path))
+    assert printed.startswith("ACCEPTED")
+    assert "controlled-recovered" in printed
+    assert Repository(path).intent(review) == ("confirmed", "controlled-recovered")
+    assert "draft      created; receipt controlled-recovered" in run(
+        monkeypatch, capsys, "opportunity", opportunity, "--db", str(path)
+    )
+
+
+def test_a_reconcile_that_finds_nothing_for_a_reserved_attempt_stays_unsettled(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    review, _ = reserved(path, monkeypatch, capsys)
+    monkeypatch.setattr(ControlledDrafts, "lookup", lambda self, key: None)
+    out, _ = stopped(monkeypatch, capsys, 3, "reconcile", review, "--db", str(path))
+    assert out.startswith("UNCERTAIN")
+    assert Repository(path).intent(review) == ("attempting", None)

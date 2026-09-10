@@ -106,6 +106,12 @@ def attempted(workflow, repository, args) -> dict:
     workflow has already written what it knows -- an attempt whose result never came back
     is uncertain, not failed -- so reading that back is the only honest answer. Before the
     claim nothing was reserved and the refusal is certain.
+
+    `attempting` and `uncertain` are both unsettled, and they are not the same answer.
+    UNCERTAIN says a provider was contacted and the result is unknown, which is exactly
+    what makes reconciliation the next move. An `attempting` row says only that the write
+    was reserved; whether anything was contacted is not recorded, so reporting it as
+    uncertain claims more than the record holds.
     """
     review, command = args.identifier, args.command
     common = {"command": command, "review": review}
@@ -146,6 +152,19 @@ def attempted(workflow, repository, args) -> dict:
             "state": state[0] if state else None,
             "receipt": receipt,
             "message": f"draft confirmed; receipt {receipt}",
+        }
+    if command == "draft" and state and state[0] == "attempting":
+        # This invocation reserved nothing, contacted nothing and wrote nothing: a claim
+        # already stood, so it stopped. That is a refusal. Only `draft` reads this way --
+        # `reconcile` does contact the provider to look, so its answer is about what the
+        # lookup found, and refusing it here would close the one route out of this state.
+        return {
+            **common,
+            "outcome": REFUSED,
+            "state": state[0],
+            "receipt": None,
+            "message": "a draft attempt is already in progress; it is never retried automatically",
+            "next": f"Inspect the opportunity, or run: careersignal reconcile {review}",
         }
     return {
         **common,
