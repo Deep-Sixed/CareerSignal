@@ -99,12 +99,13 @@ The record of who approved is never erased — it is the true history of what wa
 
 What to do about a stale approval depends on whether a draft has been attempted, and the line says only what is actually available:
 
-| Shown | Because |
-|---|---|
-| `stale: … ; reapprove` | No intent exists, so the decision is not locked. Reapproving the current packet binds it again — stale is a statement about drift, not a state the review is stuck in. |
-| `stale: … ; the draft attempt stands` | An intent exists, and `decide()` refuses every further decision once one does. Reapproval is not available, so it is not suggested. The `draft` line directly below says which attempt it is and what follows: reconcile an unsettled one, or accept a confirmed one as authoritative. |
+| Shown | When | Because |
+|---|---|---|
+| `stale: … ; reapprove` | No intent exists | The decision is not locked. Reapproving the current packet binds it again — stale is a statement about drift, not a state the review is stuck in. |
+| `stale: … ; reconcile the attempt, do not retry` | `attempting` or `uncertain` | An intent exists, so `decide()` refuses every further decision, and the attempt's outcome is unrecorded. Reconciliation is the only route out; the write is never repeated. |
+| `stale: … ; the earlier draft stands` | `confirmed` | There is nothing to reconcile. The draft exists, its receipt is recorded, and that attempt is authoritative regardless of where the material has moved since. |
 
-A refusal reserves no intent, so a refused draft leaves reapproval open. Whether an intent exists is taken from the row itself rather than inferred from the state name, so this cannot drift from the state machine.
+A refusal reserves no intent, so a refused draft leaves reapproval open. Whether an intent exists at all is taken from the row itself, never inferred from the state name, so that cannot drift from the state machine.
 
 This remains **reporting, not prediction**: it says whether the recorded approval binds the material displayed, not whether a draft would be permitted. Terminal status, an existing intent and the rest of the claim's conditions are the write path's to decide, and it decides them in its own transaction.
 

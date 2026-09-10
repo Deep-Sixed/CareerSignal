@@ -71,6 +71,8 @@ def cell(row, field) -> str:
 # deliberately different sentences: one means nothing left this machine, the other means
 # something may have, and the operator's next move differs.
 APPROVAL = {"approved": "approved by", "rejected": "rejected by", None: "not yet decided"}
+# Said once, so the three remediations differ only in the part that is actually different.
+STALE = "stale: does not bind the material below"
 DRAFTS = {
     "none": "not attempted",
     "refused": "refused; nothing was created",
@@ -97,12 +99,14 @@ def approval(action) -> str:
     if action["decision"] == "approved" and not action["binds"]:
         # Say what can be done, not what would be refused. Once a draft has been
         # attempted, decide() locks the decision, so telling the operator to reapprove
-        # would send them at a wall. Which attempt it is -- attempting, uncertain or
-        # confirmed -- is the line directly below this one, and it says what follows from
-        # that; this line only stops promising a route that is closed.
-        if action["attempted"]:
-            return f"{decided} (stale: does not bind the material below; the draft attempt stands)"
-        return f"{decided} (stale: does not bind the material below; reapprove)"
+        # would send them at a wall -- and the three ways out differ. Whether an intent
+        # exists comes from the row, as `attempted`; which one it is, is the state name
+        # this module already renders directly below.
+        if not action["attempted"]:
+            return f"{decided} ({STALE}; reapprove)"
+        if action["draft"] == "confirmed":
+            return f"{decided} ({STALE}; the earlier draft stands)"
+        return f"{decided} ({STALE}; reconcile the attempt, do not retry)"
     return decided
 
 

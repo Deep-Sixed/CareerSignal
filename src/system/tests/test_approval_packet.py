@@ -418,7 +418,12 @@ def test_a_stale_approval_beside_an_attempt_does_not_ask_for_reapproval(
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "stale" in printed
     assert "reapprove" not in printed
-    assert "the draft attempt stands" in printed
+    # Unsettled attempts have a route out; a confirmed one is simply authoritative.
+    if state == "confirmed":
+        assert "the earlier draft stands" in printed
+        assert "reconcile" not in printed
+    else:
+        assert "reconcile the attempt, do not retry" in printed
     assert "recipient  bob.other@example.com" in printed
 
     structured = json.loads(

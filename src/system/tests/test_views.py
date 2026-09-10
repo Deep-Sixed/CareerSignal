@@ -351,7 +351,21 @@ def test_a_stale_approval_never_asks_for_a_reapproval_that_cannot_happen(state):
     stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": state})
     assert "stale" in stale
     assert "reapprove" not in stale
-    assert "the draft attempt stands" in stale
+
+
+@pytest.mark.parametrize("state", ["attempting", "uncertain"])
+def test_an_unsettled_attempt_points_at_reconciliation(state):
+    """Reconciliation is the only route out of an attempt whose outcome is unrecorded."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": state})
+    assert "reconcile" in stale
+    assert "do not retry" in stale
+
+
+def test_a_confirmed_attempt_is_reported_as_authoritative_rather_than_recoverable():
+    """There is nothing to reconcile: the draft exists and its receipt is recorded."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": "confirmed"})
+    assert "the earlier draft stands" in stale
+    assert "reconcile" not in stale
 
 
 def test_a_stale_approval_after_a_refusal_still_asks_for_reapproval():
