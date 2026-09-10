@@ -41,7 +41,9 @@ Filters compose. A status outside the vocabulary, a coverage bound outside 0–1
 careersignal opportunity <id>
 ```
 
-Shows what it is, what the current review concluded — coverage, eligibility, whether it advances, and the full reasons — the proposed draft text, and the whole status history with actor, reason and timestamp.
+Shows what it is, what the current review concluded — coverage, eligibility, whether it advances, and the full reasons — the draft wording an approval would bind to, and the whole status history with event id, actor, reason and timestamp.
+
+It also reports where the opportunity stands as an action: whether it has been approved and who by, and whether a draft was refused, attempted, left uncertain or created. See [the operator interface](operator-interface.md#finding-work-and-reading-one-opportunity) for what each of those means and why it reports rather than predicts.
 
 ## Structured output
 
@@ -82,9 +84,9 @@ The `--json` form needs none of this — `json.dumps` escapes control characters
 
 ## What these commands are not
 
-- They do not change status. That is `Repository.record_status`, and a command for it is deliberately later work.
+- They do not change status. That is the `status` command, which is a [compare-and-append](status-history.md#compare-and-append) write and a different command on purpose.
 - They do not approve, reject or draft anything. Drafting still requires an explicit decision against a specific review version.
-- They do not read Gmail. A test refuses to let any query path construct a Gmail reader.
+- They do not read Gmail, and they build no provider at all. A test refuses to let any reporting path construct a Gmail reader, a Gmail draft writer or the controlled provider.
 
 ## Limitations
 

@@ -38,7 +38,17 @@ uv run careersignal opportunity <id> --db var/private.db
 uv run careersignal opportunities --db var/private.db --json
 ```
 
-These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. See [operator views](docs/operator-views.md).
+These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. The detail view also says whether an opportunity has been approved and whether a draft was refused, attempted, left uncertain or created. See [operator views](docs/operator-views.md).
+
+Moving an opportunity through the search is one command, and it names the state it was decided against:
+
+```sh
+uv run careersignal opportunity <id> --db var/private.db            # read the status event
+uv run careersignal status <id> --to applied --expect 12 \
+  --actor operator --reason "Sent CV" --db var/private.db
+```
+
+If the opportunity moved since that event, nothing is written and the command says what it found. See [the operator interface](docs/operator-interface.md) for the whole command surface, and [status history](docs/status-history.md#compare-and-append) for the rule.
 
 An approved review can become a real draft in an authorized mailbox. This is the only
 capability that writes outside this machine, so it is never implicit:
@@ -59,7 +69,9 @@ binds to the review, its exact wording and the status it was read in, and all th
 rechecked before the write; a recruiter-supplied address carrying a control character is
 refused rather than repaired. See [approved drafts](docs/approved-drafts.md).
 
-An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
+An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. An operator-facing write is a compare-and-append: it names the event it was decided against and refuses if the opportunity has moved since. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
+
+The commands an operator reads print text by default, take `--json` for anything else, and report an outcome: `ACCEPTED` (exit 0), `REFUSED` (exit 1, nothing left this machine, correct it and ask again) or `UNCERTAIN` (exit 3, a provider was contacted and only reconciliation can say). A command written wrongly stays exit 2 on stderr, because that is a different thing from the system refusing.
 
 Relative database paths resolve from the current working directory. Set `CAREERSIGNAL_DB_PATH` to override the default `var/careersignal.db`; explicit `--db` takes precedence. Keep personal runtime data outside the source tree or under ignored `var`.
 

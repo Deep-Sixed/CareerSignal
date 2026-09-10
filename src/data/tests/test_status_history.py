@@ -105,7 +105,11 @@ def test_the_whole_history_reconstructs_every_state_it_passed_through(tmp_path):
 @pytest.mark.parametrize("status", STATUSES)
 def test_the_database_accepts_every_status_the_domain_accepts(tmp_path, status):
     instance = repository(tmp_path / f"db-{status}")
-    assert instance.record_status("job-key", status, actor="operator") == status
+    recorded = instance.record_status("job-key", status, actor="operator")
+    assert recorded["status"] == status
+    # The append names the event it wrote, so a caller never has to ask afterwards which
+    # row was theirs -- by then another writer may have appended a newer one.
+    assert recorded["event"] > recorded["previous_event"]
 
 
 def test_the_stored_check_and_the_domain_vocabulary_cannot_drift():
@@ -162,7 +166,7 @@ def test_a_recorded_status_is_normalized_rather_than_refused(tmp_path):
     path = tmp_path / "db"
     instance = repository(path)
     for spelling in ("Applied", "  APPLIED  ", "Applied\n"):
-        assert instance.record_status("job-key", spelling, actor="operator") == "applied"
+        assert instance.record_status("job-key", spelling, actor="operator")["status"] == "applied"
     assert {row[0] for row in instance.status_history("job-key")} == {"applied"}
 
 

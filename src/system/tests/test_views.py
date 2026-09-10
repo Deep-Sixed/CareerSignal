@@ -43,8 +43,15 @@ def row(**overrides):
         "eligible": True,
         "scored": True,
         "actionable": True,
+        "status_event": 12,
+        "action": {"decision": None, "actor": None, "draft": "none", "receipt": None},
     }
     return {**base, **overrides}
+
+
+def acted(**overrides):
+    """The approval and draft state a detail view reports."""
+    return {"action": {**row()["action"], **overrides}}
 
 
 COVERAGE_CASES = [
@@ -125,7 +132,9 @@ def test_no_attack_sequence_survives_into_a_detail_view(attack):
     record = {
         **row(title=attack, company=attack, location=attack, url=attack),
         "packet": {"reasons": [attack], "draft": attack},
-        "history": [{"status": "new", "actor": attack, "reason": attack, "created_at": 1}],
+        "history": [
+            {"status": "new", "actor": attack, "reason": attack, "created_at": 1, "event": 1}
+        ],
     }
     assert not CONTROL.search(detail(record).replace("\n", ""))
 
@@ -167,7 +176,13 @@ def test_no_attack_sequence_survives_a_multiline_path(attack):
         **row(),
         "packet": {"reasons": ["ok"], "draft": f"first\n{attack}\nlast"},
         "history": [
-            {"status": "new", "actor": "operator", "reason": f"one\n{attack}", "created_at": 1}
+            {
+                "status": "new",
+                "actor": "operator",
+                "reason": f"one\n{attack}",
+                "created_at": 1,
+                "event": 1,
+            }
         ],
     }
     rendered = detail(record)
@@ -183,7 +198,13 @@ def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
         **row(),
         "packet": {"reasons": ["ok"], "draft": "visible\rhidden"},
         "history": [
-            {"status": "new", "actor": "operator", "reason": "visible\rhidden", "created_at": 1}
+            {
+                "status": "new",
+                "actor": "operator",
+                "reason": "visible\rhidden",
+                "created_at": 1,
+                "event": 1,
+            }
         ],
     }
     rendered = detail(record)
@@ -201,6 +222,7 @@ def test_a_multi_line_operator_reason_is_still_readable():
                 "actor": "operator",
                 "reason": "Wrong team\nRevisit next quarter",
                 "created_at": 1,
+                "event": 1,
             }
         ],
     }
@@ -221,8 +243,14 @@ def test_the_detail_view_names_what_it_shows():
         **row(),
         "packet": {"reasons": ["Stated skill coverage: 6/7 (86%)", "Advances"], "draft": "Hello"},
         "history": [
-            {"status": "new", "actor": "intake", "reason": "", "created_at": 1},
-            {"status": "reviewing", "actor": "operator", "reason": "Worth a look", "created_at": 2},
+            {"status": "new", "actor": "intake", "reason": "", "created_at": 1, "event": 1},
+            {
+                "status": "reviewing",
+                "actor": "operator",
+                "reason": "Worth a look",
+                "created_at": 2,
+                "event": 2,
+            },
         ],
     }
     rendered = detail(record)

@@ -85,10 +85,19 @@ def run(monkeypatch, capsys, *arguments):
 
 
 def refusal(monkeypatch, capsys, *arguments):
+    """A command written wrongly: argparse stops it, exit 2, message on stderr."""
     with pytest.raises(SystemExit) as stopped:
         run(monkeypatch, capsys, *arguments)
     assert stopped.value.code == 2, arguments
     return capsys.readouterr().err
+
+
+def refused(monkeypatch, capsys, *arguments):
+    """The system refusing, which is a different thing: exit 1, outcome on stdout."""
+    with pytest.raises(SystemExit) as stopped:
+        run(monkeypatch, capsys, *arguments)
+    assert stopped.value.code == 1, arguments
+    return capsys.readouterr().out
 
 
 # --- the premise the rest of the tests depend on -----------------------------------------
@@ -456,9 +465,15 @@ def test_the_external_provider_is_never_the_default(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(gmail_draft.GmailDrafts, "__init__", refuse)
     monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
     run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
-    printed = json.loads(run(monkeypatch, capsys, "draft", review, "--db", str(path)))
+    printed = json.loads(run(monkeypatch, capsys, "draft", review, "--json", "--db", str(path)))
     assert printed["state"] == "confirmed"
+    assert printed["outcome"] == "accepted"
     assert printed["receipt"].startswith("controlled-")
+    # The same run read by a person rather than a script: replaying the settled intent
+    # reports the state it is in, not a second creation.
+    replayed = run(monkeypatch, capsys, "draft", review, "--db", str(path))
+    assert replayed.startswith("ACCEPTED")
+    assert printed["receipt"] in replayed
 
 
 def test_the_gmail_provider_requires_its_own_token_and_a_mailbox(tmp_path, monkeypatch, capsys):
@@ -510,4 +525,4 @@ def test_a_changed_review_is_refused_at_the_command_line_with_a_reason(
     run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
     with store.connection(path) as conn, store.transaction(conn):
         conn.execute("UPDATE reviews SET draft='different wording' WHERE id=?", (review,))
-    assert "approve it again" in refusal(monkeypatch, capsys, "draft", review, "--db", str(path))
+    assert "approve it again" in refused(monkeypatch, capsys, "draft", review, "--db", str(path))
