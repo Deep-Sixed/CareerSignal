@@ -36,3 +36,24 @@ def validate(status) -> str:
     if normalized not in STATUSES:
         raise ValueError("Unknown status; expected one of " + ", ".join(STATUSES))
     return normalized
+
+
+class StatusConflict(ValueError):
+    """The opportunity moved between the read the operator acted on and the write.
+
+    Raised instead of appending, so a decision taken against `interested` cannot land on
+    top of a `withdrawn` recorded in the meantime and quietly become the current status.
+    Nothing is stored: the ledger is append-only and this is not an event, it is the
+    refusal to write one. The operator reads the current state again and decides again.
+
+    A ValueError so that any caller already refusing on a bad status also refuses here
+    rather than continuing on a write that did not happen; callers that can tell the
+    operator more catch this first and report what was found.
+    """
+
+    def __init__(self, expected, observed, status):
+        super().__init__(
+            f"Opportunity status changed since it was read: expected event {expected}, "
+            f"found event {observed}" + (f" ({status})" if status else " (no status history)")
+        )
+        self.expected, self.observed, self.status = expected, observed, status

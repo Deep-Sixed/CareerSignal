@@ -67,6 +67,50 @@ def cell(row, field) -> str:
     return safe(value)
 
 
+# How an approval and a draft attempt read to an operator. Refused and uncertain are
+# deliberately different sentences: one means nothing left this machine, the other means
+# something may have, and the operator's next move differs.
+APPROVAL = {"approved": "approved by", "rejected": "rejected by", None: "not yet decided"}
+DRAFTS = {
+    "none": "not attempted",
+    "refused": "refused; nothing was created",
+    "attempting": "attempting; no outcome recorded yet",
+    "uncertain": "uncertain; reconciliation required",
+    "confirmed": "created",
+}
+
+
+def approval(action) -> str:
+    """Who decided, or that nobody has. The actor is operator-supplied text."""
+    if action["decision"] is None:
+        return APPROVAL[None]
+    return f"{APPROVAL[action['decision']]} {safe(action['actor'])}"
+
+
+def attempt(action) -> str:
+    """The draft state, and the receipt when there is one to quote.
+
+    A receipt comes from the provider, so it is escaped like any other outside text.
+    """
+    state = action["draft"]
+    described = DRAFTS.get(state, safe(state))
+    if state == "confirmed" and action["receipt"]:
+        return f"{described}; receipt {safe(action['receipt'])}"
+    return described
+
+
+def outcome(record) -> str:
+    """One command's result: what happened, and what the operator does about it.
+
+    The whole line is escaped rather than trusted, because a refusal reason can quote a
+    status, an actor or a provider receipt, and none of those originate here.
+    """
+    lines = [f"{record['outcome'].upper():<9} {safe(record['message'])}"]
+    if record.get("next"):
+        lines.append(f"          {safe(record['next'])}")
+    return "\n".join(lines)
+
+
 def table(rows) -> str:
     if not rows:
         return "No opportunities match."
@@ -93,23 +137,28 @@ def detail(record) -> str:
         f"  id         {safe(record['id'])}",
         f"  url        {safe(record['url'])}",
         f"  location   {safe(record['location']) if record['location'] else MISSING}",
-        f"  status     {cell(record, 'status')}",
+        f"  status     {cell(record, 'status')} (event {record['status_event']})",
         f"  coverage   {coverage(record)}",
         f"  eligible   {cell(record, 'eligible')}",
         f"  advances   {cell(record, 'advances')}",
+        f"  approval   {approval(record['action'])}",
+        f"  draft      {attempt(record['action'])}",
     ]
     packet = record["packet"]
     if packet:
         lines.append("  reasons")
         lines.extend(f"    {safe(reason)}" for reason in packet["reasons"])
-        lines.append("  draft")
+        # Labelled for what it is. The line above says whether a draft was attempted;
+        # this is the wording an approval binds to, which is a different thing.
+        lines.append("  wording")
         lines.extend(f"    {part}" for part in safe_lines(packet["draft"]))
     else:
         lines.append("  reasons    no current review")
     lines.append("  history")
     for event in record["history"]:
         lines.append(
-            f"    {safe(event['created_at'])}  {safe(event['status'])}  {safe(event['actor'])}"
+            f"    {event['event']}  {safe(event['created_at'])}  {safe(event['status'])}  "
+            f"{safe(event['actor'])}"
         )
         # An operator's reason may span lines. Each one is printed on its own row so the
         # newline stays structural and no single row carries anything executable.

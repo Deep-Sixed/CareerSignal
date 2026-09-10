@@ -42,19 +42,61 @@ Status is a record of what the operator decided. It is not authorization.
 
 Migration 0004 backfills a `new` event for every opportunity recorded before status history existed. Those rows name `migration` as the actor and say they were backfilled, so the record does not claim an operator was there.
 
+## Compare and append
+
+An operator records a status because of a state they read. That state has to still hold when the write lands, or the decision is being applied to something else.
+
+Suppose the operator reads event 41, `interested`, and decides `applied`. Before their write, another process records event 42, `withdrawn`. Appending `applied` now would bury a newer decision under an older one and make it current — silently, because append-only makes an overwrite impossible but does nothing about ordering.
+
+So the operator-facing write names the event it was decided against:
+
+```python
+repository.record_status(
+    opportunity_id, "applied", actor="operator", reason="Sent CV", expected_event_id=41
+)
+```
+
+and the comparison happens inside the write transaction:
+
+```
+BEGIN IMMEDIATE
+  latest event == expected?
+      yes -> append
+      no  -> refuse; the state moved, reevaluate
+COMMIT
+```
+
+Inside, not before. Reading the latest event before opening the transaction would only move the race earlier: the value has to be read where nothing can commit between reading it and the insert that depends on it. A test asserts this by checking that the write reservation is already held at the moment the comparison reads.
+
+A refusal writes nothing — not even a record of the refusal. The ledger is append-only and this is not an event; it is the decision not to write one. `StatusConflict` names the event that was expected and the event and status that were found, so the operator can read the current state and decide again.
+
+This is the same rule an approval already follows before an outward draft: act against a known state, and refuse rather than proceed when the state has moved. It adds no new status, no lock and no reservation — only the refusal to write blindly.
+
+`expected_event_id` is optional in the API because not every append is an operator acting on something they read: intake records the opening `new` inside the transaction that creates the opportunity, where there is no prior state to have moved. Every operator-facing write supplies it, and [the CLI](operator-interface.md#recording-a-status) has no path that omits it.
+
 ## Use
 
 ```python
-repository.record_status(opportunity_id, "applied", actor="operator", reason="Sent CV")
+recorded = repository.record_status(
+    opportunity_id, "applied", actor="operator", reason="Sent CV", expected_event_id=41
+)
+recorded  # {'status': 'applied', 'event': 42, 'previous_event': 41}
 repository.status(opportunity_id)  # 'applied'
 repository.status_history(opportunity_id)  # [(status, actor, reason, created_at), ...]
 ```
 
-There is no CLI or operator view yet; that is deliberately the next piece of work rather than part of this one.
+The append returns the event it wrote rather than leaving the caller to look it up afterwards; by then another writer may have appended a newer one.
+
+From a terminal:
+
+```sh
+careersignal status <opportunity-id> --to applied --expect 41 --actor operator --reason "Sent CV"
+```
 
 ## Limitations
 
-- **Concurrent recordings both persist.** Append-only makes an overwrite impossible, so two operators moving one opportunity at the same time produce two events in the order the database serialized them, and the later one is current. Nothing detects that the second operator was acting on a state the first had already changed; a compare-and-append guard would be a separate decision.
+- **A blind append is still possible from inside the application.** `expected_event_id` is what makes a write safe, and a caller that omits it gets the old behaviour: two writers produce two events in the order the database serialized them and the later one is current. The operator interface never omits it, but the API cannot force it without also refusing the opening event that intake records.
+- **An expectation is not a reservation.** It says the opportunity has not moved since the value was read. It does not stop a second operator from winning the race — only from winning it silently.
 - **Duplicate consecutive statuses are allowed.** Recording `applied` twice records it twice. That is what happened, and collapsing it would be an edit.
 - **The vocabulary is enforced in two places** — the domain module and a SQL `CHECK` — so the database refuses a bad value on its own. A test asserts the two lists stay equal, since nothing else would notice them drifting apart.
 - **`reason` is free text** and can contain personal information at runtime. Keep the database private; public fixtures are synthetic.

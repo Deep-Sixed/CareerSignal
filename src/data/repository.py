@@ -5,7 +5,14 @@ from dataclasses import replace
 
 from data.store import connection, migrate, transaction
 from recruiting.models import Review, fingerprint
-from recruiting.status import ACTIVE, INITIAL, STATUSES, TERMINAL, validate
+from recruiting.status import (
+    ACTIVE,
+    INITIAL,
+    STATUSES,
+    TERMINAL,
+    StatusConflict,
+    validate,
+)
 
 
 class Repository:
@@ -131,7 +138,7 @@ class Repository:
     SUMMARY = (
         "SELECT o.id,o.company,o.title,o.location,o.url,s.status,s.created_at,"
         "r.id,r.coverage,r.stated_skills,r.matched_skills,r.advances,"
-        "json_extract(r.payload,'$.eligible') "
+        "json_extract(r.payload,'$.eligible'),s.id "
         "FROM opportunities o "
         "LEFT JOIN reviews r ON r.id=o.current_review "
         "LEFT JOIN opportunity_status_history s ON s.id="
@@ -155,6 +162,10 @@ class Repository:
             "matched_skills": row[10],
             "stated_skills": stated,
             "advances": None if row[11] is None else bool(row[11]),
+            # The event the status was read from. An operator recording the next status
+            # names it, so that a decision taken against this state cannot land on top of
+            # one recorded in between. Zero means no history at all.
+            "status_event": row[13] or 0,
             "eligible": None if row[12] is None else bool(row[12]),
             # A review written before stated skill coverage keeps NULL in these columns and
             # cannot be approved or drafted. The operator needs to see that, not a blank.
@@ -204,6 +215,37 @@ class Repository:
             ),
         )
 
+    @staticmethod
+    def _action(conn, review_id) -> dict:
+        """What has been decided and attempted for this review, in the operator's terms.
+
+        Reporting only. The write paths decide for themselves whether an action is still
+        authorized -- claim() rechecks every binding inside its own transaction -- so this
+        is what has happened, not a prediction of what would be allowed next.
+        """
+        if review_id is None:
+            return {"decision": None, "actor": None, "draft": "none", "receipt": None}
+        decision = conn.execute(
+            "SELECT approved,actor FROM decisions WHERE review_id=?", (review_id,)
+        ).fetchone()
+        intent = conn.execute(
+            "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
+        ).fetchone()
+        refused = conn.execute(
+            "SELECT 1 FROM audit WHERE review_id=? AND event='draft_refused' LIMIT 1",
+            (review_id,),
+        ).fetchone()
+        return {
+            "decision": None if decision is None else ("approved" if decision[0] else "rejected"),
+            "actor": decision[1] if decision else None,
+            # Refused and uncertain are different facts and are never collapsed. A refusal
+            # means nothing was attempted; an intent means something was, and its outcome
+            # is a fact about that attempt. So an intent wins over an earlier refusal: the
+            # refusal describes a draft that was never proposed, not the current state.
+            "draft": intent[0] if intent else ("refused" if refused else "none"),
+            "receipt": intent[1] if intent else None,
+        }
+
     def opportunity(self, opportunity_id) -> dict:
         """One opportunity with its current review packet and its whole status history."""
         with connection(self.path) as conn:
@@ -215,30 +257,77 @@ class Repository:
                 "SELECT payload FROM reviews WHERE id=?", (summary["review"],)
             ).fetchone()
             history = conn.execute(
-                "SELECT status,actor,reason,created_at FROM opportunity_status_history "
+                "SELECT status,actor,reason,created_at,id FROM opportunity_status_history "
                 "WHERE opportunity_id=? ORDER BY id",
                 (opportunity_id,),
             ).fetchall()
+            action = self._action(conn, summary["review"])
         return {
             **summary,
             "packet": json.loads(packet[0]) if packet else None,
+            "action": action,
             "history": [
-                {"status": h[0], "actor": h[1], "reason": h[2], "created_at": h[3]} for h in history
+                {"status": h[0], "actor": h[1], "reason": h[2], "created_at": h[3], "event": h[4]}
+                for h in history
             ],
         }
 
-    def record_status(self, opportunity_id, status, *, actor, reason="") -> str:
-        """Append a status event. Nothing is edited, so a correction is another event."""
+    @staticmethod
+    def _latest_event(conn, opportunity_id):
+        """The id and status of the newest event, or (0, "") when there is no history.
+
+        Zero is the unbound value here for the same reason it is in _binding: no row can
+        carry it, so nothing an operator supplies compares equal to it by accident.
+        """
+        row = conn.execute(
+            "SELECT id,status FROM opportunity_status_history WHERE opportunity_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (opportunity_id,),
+        ).fetchone()
+        return (row[0], row[1]) if row else (0, "")
+
+    def record_status(
+        self, opportunity_id, status, *, actor, reason="", expected_event_id=None
+    ) -> dict:
+        """Append a status event. Nothing is edited, so a correction is another event.
+
+        Returns the status recorded and the id of the event that recorded it. The id is
+        returned rather than looked up afterwards because the caller needs the event it
+        actually appended: reading "the latest event" after the transaction would name a
+        different row if another writer appended in between.
+
+        `expected_event_id` makes this a compare-and-append. The operator reads a state,
+        decides against it, and names the event they read; if the newest event is no longer
+        that one, the opportunity moved under the decision and nothing is written. That is
+        the same rule the draft path applies to an approval: act against a known state, and
+        refuse rather than proceed when the state has moved.
+
+        It stays optional because not every append is an operator acting on something they
+        read. Intake records the opening `new` inside the transaction that creates the
+        opportunity, where there is no prior state to have moved. Every operator-facing
+        write supplies it -- the CLI has no path that omits it -- because a blind append
+        from a surface that just printed a status is exactly the race this closes.
+        """
         value = validate(status)
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError("An actor is required")
         if not isinstance(reason, str):
             raise ValueError("Reason must be text")
+        if expected_event_id is not None and (
+            type(expected_event_id) is not int or expected_event_id <= 0
+        ):
+            raise ValueError("Expected event id must be a positive whole number")
         with connection(self.path) as conn, transaction(conn):
             if not conn.execute(
                 "SELECT 1 FROM opportunities WHERE id=?", (opportunity_id,)
             ).fetchone():
                 raise ValueError("Unknown opportunity")
+            # Read and compare inside the write transaction. Checking before it would only
+            # move the race earlier: the value has to be read where it cannot change before
+            # the insert lands.
+            observed, current = self._latest_event(conn, opportunity_id)
+            if expected_event_id is not None and observed != expected_event_id:
+                raise StatusConflict(expected_event_id, observed, current)
             conn.execute(
                 "INSERT INTO opportunity_status_history(opportunity_id,status,actor,reason) "
                 "VALUES (?,?,?,?)",
@@ -247,7 +336,8 @@ class Repository:
                 # inside a note are theirs to keep.
                 (opportunity_id, value, actor.strip(), reason.strip()),
             )
-        return value
+            event = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": value, "event": event, "previous_event": observed}
 
     def status(self, opportunity_id):
         """Derived from history, never stored: the latest event is the current state."""
