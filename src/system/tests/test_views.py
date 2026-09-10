@@ -48,6 +48,7 @@ def row(**overrides):
             "decision": None,
             "actor": None,
             "binds": None,
+            "attempted": False,
             "draft": "none",
             "receipt": None,
         },
@@ -312,7 +313,13 @@ def test_the_detail_view_survives_an_opportunity_with_no_review():
     assert "no current review" in rendered
 
 
-APPROVED = {"decision": "approved", "actor": "operator", "draft": "none", "receipt": None}
+APPROVED = {
+    "decision": "approved",
+    "actor": "operator",
+    "attempted": False,
+    "draft": "none",
+    "receipt": None,
+}
 
 
 def test_an_approval_that_still_binds_reads_plainly():
@@ -328,7 +335,7 @@ def test_an_approval_that_no_longer_binds_says_so():
 
 def test_a_rejection_is_never_called_stale():
     """A rejection authorizes nothing, so there is nothing for it to have stopped binding."""
-    rejected = {"decision": "rejected", "actor": "operator", "draft": "none", "receipt": None}
+    rejected = {**APPROVED, "decision": "rejected"}
     assert approval({**rejected, "binds": False}) == "rejected by operator"
 
 
@@ -336,3 +343,18 @@ def test_a_stale_approvals_actor_is_still_escaped():
     hostile = approval({**APPROVED, "actor": f"oper{chr(0x1B)}[2Jator", "binds": False})
     assert not CONTROL.search(hostile)
     assert "\\x1b" in hostile
+
+
+@pytest.mark.parametrize("state", ["attempting", "uncertain", "confirmed"])
+def test_a_stale_approval_never_asks_for_a_reapproval_that_cannot_happen(state):
+    """decide() locks the decision once an intent exists, so reapproval is not available."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": state})
+    assert "stale" in stale
+    assert "reapprove" not in stale
+    assert "the draft attempt stands" in stale
+
+
+def test_a_stale_approval_after_a_refusal_still_asks_for_reapproval():
+    """A refusal reserves no intent, so the decision is not locked and reapproval works."""
+    stale = approval({**APPROVED, "binds": False, "attempted": False, "draft": "refused"})
+    assert "reapprove" in stale

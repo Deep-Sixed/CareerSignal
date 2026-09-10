@@ -363,3 +363,94 @@ def test_changed_wording_also_stops_the_approval_binding(tmp_path, monkeypatch, 
     )
     out, _ = stopped(monkeypatch, capsys, 1, "draft", review, "--db", str(path))
     assert "approve it again" in out
+
+
+# --- a stale approval never points at a route that is closed ---------------------------------
+
+
+def settle(path, review, receipt):
+    """Reserve the write, and optionally record its outcome."""
+    repository = Repository(path)
+    repository.claim(review)
+    if receipt is not False:
+        repository.finish(review, receipt)
+    return repository.intent(review)
+
+
+@pytest.mark.parametrize(
+    "receipt,state",
+    [
+        ("controlled-settled", "confirmed"),
+        (None, "uncertain"),
+        (False, "attempting"),
+    ],
+)
+def test_a_stale_approval_beside_an_attempt_does_not_ask_for_reapproval(
+    tmp_path, monkeypatch, capsys, receipt, state
+):
+    """decide() refuses every decision change once an intent exists, so the view must not
+    send the operator to reapprove. The attempt is what stands; the draft line beside this
+    one says which attempt it is and what follows from that."""
+    path = tmp_path / "db"
+    workflow, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    intent = settle(path, review, receipt)
+    assert intent[0] == state
+
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender="bob.other@example.com",
+            subject="A different subject",
+            text=JOB_TEXT,
+        )
+    )
+    before = snapshot(path)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("reading a stale approval built a client")
+
+    monkeypatch.setattr(gmail_draft.GmailDrafts, "__init__", refuse)
+    monkeypatch.setattr(gmail.GmailReader, "__init__", refuse)
+    monkeypatch.setattr(ControlledDrafts, "__init__", refuse)
+
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "stale" in printed
+    assert "reapprove" not in printed
+    assert "the draft attempt stands" in printed
+    assert "recipient  bob.other@example.com" in printed
+
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["binds"] is False
+    assert structured["action"]["attempted"] is True
+    assert structured["action"]["draft"] == state
+
+    # The attempt is untouched, and nothing was written by looking at it.
+    assert Repository(path).intent(review) == intent
+    assert snapshot(path) == before
+
+
+def test_the_view_agrees_with_what_the_repository_would_actually_do(tmp_path, monkeypatch, capsys):
+    """The claim the wording makes, checked against the decision path rather than assumed."""
+    path = tmp_path / "db"
+    workflow, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    settle(path, review, "controlled-settled")
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender="bob.other@example.com",
+            subject="A different subject",
+            text=JOB_TEXT,
+        )
+    )
+    assert "reapprove" not in run(
+        monkeypatch, capsys, "opportunity", opportunity, "--db", str(path)
+    )
+    # Because this is what reapproving would actually do.
+    with pytest.raises(ValueError, match="locked for reconciliation"):
+        Repository(path).decide(review, approved=True, actor="operator")

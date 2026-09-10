@@ -228,6 +228,7 @@ class Repository:
                 "decision": None,
                 "actor": None,
                 "binds": None,
+                "attempted": False,
                 "draft": "none",
                 "receipt": None,
             }
@@ -270,6 +271,11 @@ class Repository:
             # means nothing was attempted; an intent means something was, and its outcome
             # is a fact about that attempt. So an intent wins absolutely: the refusal
             # describes a draft that was never proposed, not the current state.
+            # Whether a durable intent exists at all, taken from the row rather than
+            # inferred from the state name. Once one does, decide() refuses every further
+            # decision, so a reader that describes what the operator may do next has to
+            # know this without keeping its own copy of which states imply it.
+            "attempted": intent is not None,
             "draft": intent[0]
             if intent
             else ("refused" if latest and latest[0] == "draft_refused" else "none"),

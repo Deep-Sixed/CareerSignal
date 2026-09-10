@@ -95,7 +95,16 @@ When the opportunity has no current review there is nothing an approval could bi
 
 That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording.
 
-The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. Reapproving the current packet makes it current again; stale is a statement about drift, not a state the review is stuck in. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, which no real digest equals, so it reads as not binding — the same conclusion `claim()` reaches.
+The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, which no real digest equals, so it reads as not binding — the same conclusion `claim()` reaches.
+
+What to do about a stale approval depends on whether a draft has been attempted, and the line says only what is actually available:
+
+| Shown | Because |
+|---|---|
+| `stale: … ; reapprove` | No intent exists, so the decision is not locked. Reapproving the current packet binds it again — stale is a statement about drift, not a state the review is stuck in. |
+| `stale: … ; the draft attempt stands` | An intent exists, and `decide()` refuses every further decision once one does. Reapproval is not available, so it is not suggested. The `draft` line directly below says which attempt it is and what follows: reconcile an unsettled one, or accept a confirmed one as authoritative. |
+
+A refusal reserves no intent, so a refused draft leaves reapproval open. Whether an intent exists is taken from the row itself rather than inferred from the state name, so this cannot drift from the state machine.
 
 This remains **reporting, not prediction**: it says whether the recorded approval binds the material displayed, not whether a draft would be permitted. Terminal status, an existing intent and the rest of the claim's conditions are the write path's to decide, and it decides them in its own transaction.
 

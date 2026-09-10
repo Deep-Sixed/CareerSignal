@@ -95,6 +95,13 @@ def approval(action) -> str:
         return APPROVAL[None]
     decided = f"{APPROVAL[action['decision']]} {safe(action['actor'])}"
     if action["decision"] == "approved" and not action["binds"]:
+        # Say what can be done, not what would be refused. Once a draft has been
+        # attempted, decide() locks the decision, so telling the operator to reapprove
+        # would send them at a wall. Which attempt it is -- attempting, uncertain or
+        # confirmed -- is the line directly below this one, and it says what follows from
+        # that; this line only stops promising a route that is closed.
+        if action["attempted"]:
+            return f"{decided} (stale: does not bind the material below; the draft attempt stands)"
         return f"{decided} (stale: does not bind the material below; reapprove)"
     return decided
 
