@@ -81,10 +81,22 @@ DRAFTS = {
 
 
 def approval(action) -> str:
-    """Who decided, or that nobody has. The actor is operator-supplied text."""
+    """Who decided, or that nobody has, and whether that decision binds what is shown.
+
+    An approval recorded against one recipient stays on record after a later message
+    moves the target. Printing it plainly beside the new material would tell the operator
+    they have authorized something they have not: the words are true about the past and
+    misleading about the present. Only an approval is qualified this way -- a rejection
+    authorizes nothing, so there is nothing for it to have stopped binding.
+
+    The actor is operator-supplied text.
+    """
     if action["decision"] is None:
         return APPROVAL[None]
-    return f"{APPROVAL[action['decision']]} {safe(action['actor'])}"
+    decided = f"{APPROVAL[action['decision']]} {safe(action['actor'])}"
+    if action["decision"] == "approved" and not action["binds"]:
+        return f"{decided} (stale: does not bind the material below; reapprove)"
+    return decided
 
 
 def attempt(action) -> str:

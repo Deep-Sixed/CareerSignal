@@ -216,7 +216,7 @@ class Repository:
         )
 
     @staticmethod
-    def _action(conn, review_id) -> dict:
+    def _action(conn, review_id, binding) -> dict:
         """What has been decided and attempted for this review, in the operator's terms.
 
         Reporting only. The write paths decide for themselves whether an action is still
@@ -224,9 +224,16 @@ class Repository:
         is what has happened, not a prediction of what would be allowed next.
         """
         if review_id is None:
-            return {"decision": None, "actor": None, "draft": "none", "receipt": None}
+            return {
+                "decision": None,
+                "actor": None,
+                "binds": None,
+                "draft": "none",
+                "receipt": None,
+            }
         decision = conn.execute(
-            "SELECT approved,actor FROM decisions WHERE review_id=?", (review_id,)
+            "SELECT approved,actor,addressing_digest,draft_digest FROM decisions WHERE review_id=?",
+            (review_id,),
         ).fetchone()
         intent = conn.execute(
             "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
@@ -245,6 +252,20 @@ class Repository:
         return {
             "decision": None if decision is None else ("approved" if decision[0] else "rejected"),
             "actor": decision[1] if decision else None,
+            # Whether the recorded decision binds the material being shown beside it. A
+            # later message can move the recipient and subject without touching anything
+            # else, and the decision row stays exactly as it was recorded -- correctly, it
+            # is the record of what was approved. Reporting it as current next to material
+            # it does not bind would tell the operator they have authorized something they
+            # have not. Compared against the same binding the packet was read from, so the
+            # two describe one moment. A decision predating the addressing binding carries
+            # an empty digest, which no real digest equals, so it reads as not binding.
+            "binds": None
+            if decision is None
+            else (
+                decision[2] == binding["addressing"]["digest"]
+                and decision[3] == binding["draft_digest"]
+            ),
             # Refused and uncertain are different facts and are never collapsed. A refusal
             # means nothing was attempted; an intent means something was, and its outcome
             # is a fact about that attempt. So an intent wins absolutely: the refusal
@@ -255,8 +276,8 @@ class Repository:
             "receipt": intent[1] if intent else None,
         }
 
-    @classmethod
-    def _bound(cls, conn, review_id) -> dict | None:
+    @staticmethod
+    def _bound(review_id, binding) -> dict | None:
         """Exactly the material an approval binds, read the way the approval reads it.
 
         Deliberately built from _binding(), the same statement decide() and claim() bind
@@ -274,7 +295,6 @@ class Repository:
         """
         if review_id is None:
             return None
-        binding = cls._binding(conn, review_id)
         return {
             "review": review_id,
             "source": binding["addressing"]["source"],
@@ -298,8 +318,13 @@ class Repository:
                 "WHERE opportunity_id=? ORDER BY id",
                 (opportunity_id,),
             ).fetchall()
-            action = self._action(conn, summary["review"])
-            bound = self._bound(conn, summary["review"])
+            # One read of the binding, shared by the packet and by the approval state, so
+            # that what is shown and what is said about it describe the same moment.
+            binding = (
+                self._binding(conn, summary["review"]) if summary["review"] is not None else None
+            )
+            action = self._action(conn, summary["review"], binding)
+            bound = self._bound(summary["review"], binding)
         return {
             **summary,
             "packet": json.loads(packet[0]) if packet else None,

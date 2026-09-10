@@ -75,6 +75,8 @@ what the operator sees == what the approval binds == what the claim verifies
 
 It holds because all of it is read from **one place**: `Repository._bound()` is built on `_binding()`, the same statement `decide()` binds from and `claim()` re-verifies against. The view does not reassemble the recipient by its own route. A second route could agree today and drift later, and the drift would be invisible exactly where it matters.
 
+The equality is established when the approval is recorded. It does not survive on its own: a later message can move the recipient and subject without touching the decision, and then the packet on screen is no longer the packet the approval binds. **The view says so rather than letting the equality quietly lapse** — see below.
+
 The wording is read from the `reviews.draft` column rather than from the copy inside the review payload. Both are written from the same value at intake, so either would look right; only the column is what the approval's draft digest is taken over.
 
 `source` names the message the addressing came from. It is **provenance, not an authorization gate** — the same recipient and subject arriving in a second message is not a materially different outward action, so it does not force reapproval. See [approved drafts](approved-drafts.md).
@@ -85,7 +87,19 @@ When the opportunity has no current review there is nothing an approval could bi
 
 **This is one read, not a lock.** Nothing is reserved by looking. If a newer message lands between the operator reading the packet and approving it, the approval binds what was current at the moment it was recorded, and the claim refuses if the target has moved since. The packet makes the target visible; it does not freeze it.
 
-`approval` is `not yet decided`, `approved by <actor>` or `rejected by <actor>`. `draft` is one of:
+`approval` is `not yet decided`, `approved by <actor>`, `rejected by <actor>`, or an approval that no longer binds what is shown:
+
+```
+  approval   approved by operator (stale: does not bind the material below; reapprove)
+```
+
+That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording.
+
+The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. Reapproving the current packet makes it current again; stale is a statement about drift, not a state the review is stuck in. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, which no real digest equals, so it reads as not binding — the same conclusion `claim()` reaches.
+
+This remains **reporting, not prediction**: it says whether the recorded approval binds the material displayed, not whether a draft would be permitted. Terminal status, an existing intent and the rest of the claim's conditions are the write path's to decide, and it decides them in its own transaction.
+
+`draft` is one of:
 
 | Shown | Means |
 |---|---|

@@ -190,6 +190,106 @@ def test_a_corrected_source_changes_the_packet_and_the_old_approval_stops_author
     assert Repository(path).intent(review) is None
 
 
+def test_an_approval_is_never_shown_as_binding_material_it_does_not_bind(
+    tmp_path, monkeypatch, capsys
+):
+    """The approval line and the packet beside it have to agree.
+
+    A later message moves the recipient and subject without touching the decision, which
+    stays exactly as recorded -- correctly, it is the record of what was approved. Printed
+    plainly next to the new material it would tell the operator they have authorized
+    something they have not, which is the whole thing this view exists to prevent.
+    """
+    path = tmp_path / "db"
+    workflow, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "approval   approved by operator" in printed
+    assert "stale" not in printed
+    assert f"recipient  {SENDER}" in printed
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["binds"] is True
+
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender="bob.other@example.com",
+            subject="A different subject",
+            text=JOB_TEXT,
+        )
+    )
+    # Taken after the move and before any reading, so what follows isolates the reads.
+    before = snapshot(path)
+
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "recipient  bob.other@example.com" in printed
+    assert "stale" in printed and "reapprove" in printed
+    # The record of who approved is not erased; only the claim that it binds this packet.
+    assert "approved by operator" in printed
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["binds"] is False
+    assert structured["action"]["decision"] == "approved"
+    assert structured["action"]["actor"] == "operator"
+
+    # Reading the stale state changed nothing at all, and the write path still refuses
+    # through the existing check rather than anything this view introduced.
+    assert snapshot(path) == before
+    out, _ = stopped(monkeypatch, capsys, 1, "draft", review, "--db", str(path))
+    assert "Addressing changed since approval" in out
+
+
+def test_reapproving_the_moved_material_makes_the_approval_current_again(
+    tmp_path, monkeypatch, capsys
+):
+    """Stale is a statement about drift, not a state the review is stuck in."""
+    path = tmp_path / "db"
+    workflow, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender="bob.other@example.com",
+            subject="A different subject",
+            text=JOB_TEXT,
+        )
+    )
+    assert "stale" in run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "approval   approved by operator" in printed
+    assert "stale" not in printed
+    packet = shown(monkeypatch, capsys, path, opportunity)
+    authorization = Repository(path).authorization(review)
+    assert authorization["bound_addressing"] == fingerprint([packet["to"], packet["subject"]])
+
+
+def test_a_decision_predating_the_addressing_binding_does_not_read_as_current(
+    tmp_path, monkeypatch, capsys
+):
+    """Migration 0006 left older rows an empty digest, which no real digest equals."""
+    path = tmp_path / "db"
+    _, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute("UPDATE decisions SET addressing_digest='' WHERE review_id=?", (review,))
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "stale" in printed
+    assert (
+        json.loads(
+            run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+        )["action"]["binds"]
+        is False
+    )
+
+
 # --- the view only reads --------------------------------------------------------------------
 
 
@@ -241,3 +341,25 @@ def test_the_structured_packet_keeps_the_value_that_was_stored(tmp_path, monkeyp
     with store.connection(path) as conn:
         stored = conn.execute("SELECT sender,subject FROM message_sources").fetchone()
     assert stored == (HOSTILE_SENDER, HOSTILE_SUBJECT)
+
+
+def test_changed_wording_also_stops_the_approval_binding(tmp_path, monkeypatch, capsys):
+    """The approval binds the wording as well as the target; both can drift."""
+    path = tmp_path / "db"
+    _, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    assert "stale" not in run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute("UPDATE reviews SET draft='different wording' WHERE id=?", (review,))
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "stale" in printed
+    assert "different wording" in printed, "the packet shows the wording that is now current"
+    assert (
+        json.loads(
+            run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+        )["action"]["binds"]
+        is False
+    )
+    out, _ = stopped(monkeypatch, capsys, 1, "draft", review, "--db", str(path))
+    assert "approve it again" in out
