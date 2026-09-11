@@ -141,10 +141,11 @@ class Workflow:
         intent = self.repository.intent(review_id)
         if not intent:
             raise ValueError("No intent to reconcile")
-        # Bound the same way draft() binds a replay: declared identity only, checked before
-        # any lookup. An uncertain attempt belonging to one destination must not be
-        # reconciled using a different provider or a different declared mailbox -- Gmail's
-        # own lookup would search a mailbox this attempt was never made against.
+        # Bound the same way draft() binds a replay: declared identity first, checked
+        # before any lookup and before any request. An uncertain attempt belonging to one
+        # destination must not be reconciled using a different provider or a different
+        # declared mailbox -- Gmail's own lookup would search a mailbox this attempt was
+        # never made against.
         bound = self.repository.intent_identity(review_id)
         requested = (self.provider.provider, self.provider.namespace)
         if bound is None or (bound["provider"], bound["provider_namespace"]) != requested:
@@ -153,7 +154,20 @@ class Workflow:
                 "review; reconcile using the original provider and mailbox"
             )
         if intent[0] == "confirmed":
+            # A settled receipt is a fact about an attempt already made. Replaying it
+            # needs no live check: unlike the lookup below, nothing here could search the
+            # wrong mailbox, because nothing here searches at all.
             return intent[1]
+        # The declared mailbox matching the intent is not proof the credential behind it
+        # does: a credential that verifies as somebody else would otherwise have Gmail's
+        # own lookup search a mailbox this attempt was never made against, silently. The
+        # same live check draft() makes before claim() is made here before lookup().
+        verified_namespace = self.provider.identity()
+        if verified_namespace != bound["provider_namespace"]:
+            raise ValueError(
+                "Verified provider identity does not match the draft intent reserved for "
+                "this review; reconcile using the original provider and mailbox"
+            )
         receipt = self.provider.lookup(review_id)
         if receipt:
             self.repository.finish(review_id, receipt)

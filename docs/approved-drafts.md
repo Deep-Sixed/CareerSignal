@@ -176,22 +176,32 @@ against a genuinely verified identity, not one taken on faith. For `controlled`,
 constant with nothing to contact; the identity check costs nothing over what was already
 true before this work.
 
-**Reconciliation is bound too, but never re-verified live.** An uncertain intent belongs to
-whichever destination `claim()` recorded onto it, and reconciling with a different declared
-provider or mailbox is refused before any lookup:
+**Reconciliation is bound too, and a confirmed receipt is the only part that skips a live
+check.** An uncertain or attempting intent belongs to whichever destination `claim()`
+recorded onto it, and reconciling against a different one is refused before any lookup --
+first on the declared comparison, which costs nothing, and then again on a live one, which
+is the only way to know the declared mailbox and the credential agree:
 
 ```
 reconcile(review, requested provider)
   │
   ├─ requested does not match the intent's own provider/namespace
-  │     → REFUSE, zero draft lookup, zero draft create
-  └─ matches → the existing reconciliation path proceeds unchanged
+  │     → REFUSE, zero draft lookup, zero draft create, zero requests
+  └─ matches
+       ├─ confirmed → return the recorded receipt; nothing to verify, nothing to search
+       └─ attempting/uncertain
+            ├─ provider.identity() -- the same live read draft() makes before claim()
+            └─ verified identity does not match the intent's own provider/namespace
+                  → REFUSE, zero draft lookup, zero draft create
+            → matches → the existing lookup() proceeds unchanged
 ```
 
-This is declared identity only, the same comparison the existing-intent branch of `draft()`
-makes and for the same reason: reconciling is a read against a destination the intent
-already names, not a fresh request that could be aimed anywhere, so there is nothing new to
-verify live. Nothing about this work permits `create()` during reconciliation.
+The declared check alone is not enough: a credential that verifies as `bob@example.com`
+while the operator typed `--mailbox alice@example.com` would otherwise have `lookup()`
+search Bob's drafts for Alice's intent header, silently. A confirmed intent needs neither
+check to matter twice over -- it already passed the declared comparison above, and it does
+no searching at all, so there is nothing left for a live read to protect. Nothing about this
+work permits `create()` during reconciliation.
 
 **Legacy rows fail closed, exactly like every binding before this one.** A decision or an
 intent written before migration 0007 carries `''` in both new columns, which no real

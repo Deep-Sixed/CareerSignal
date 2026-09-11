@@ -43,6 +43,8 @@ Example Corp - IAM Architect
   eligible   yes
   advances   yes
   approval   approved by operator
+  provider   controlled
+  namespace  controlled
   draft      not attempted
   review     b6435bf9f264c545cc268f317d7f4516a8e1d1b308bf3bee0b37efc4b10b7443
   source     message:75aba036cfaa92ecc20d2a4f7f332335369220dc33cfcf682c4be58ee54f70f2
@@ -76,6 +78,8 @@ what the operator sees == what the approval binds == what the claim verifies
 It holds because all of it is read from **one place**: `Repository._bound()` is built on `_binding()`, the same statement `decide()` binds from and `claim()` re-verifies against. The view does not reassemble the recipient by its own route. A second route could agree today and drift later, and the drift would be invisible exactly where it matters.
 
 The equality is established when the approval is recorded. It does not survive on its own: a later message can move the recipient and subject without touching the decision, and then the packet on screen is no longer the packet the approval binds. **The view says so rather than letting the equality quietly lapse** — see below.
+
+`provider` and `namespace` are the destination this decision names — `controlled`, or `gmail` and a mailbox such as `gmail:alice@example.com` — read straight from the decision row, the same one `claim()` re-checks. They are shown next to `approval` rather than folded into the stale/reapprove logic below: a request for a different destination is a mismatch `Workflow.draft` refuses outright, not a drift in the review's own material that this approval could still be shown as authorizing. A decision recorded before migration 0007 shows `-` for both, exactly like a missing recipient or subject. See [provider identity](approved-drafts.md#provider-identity) for the binding and verification this reports on.
 
 The wording is read from the `reviews.draft` column rather than from the copy inside the review payload. Both are written from the same value at intake, so either would look right; only the column is what the approval's draft digest is taken over.
 
@@ -153,13 +157,15 @@ Recording a status is not an outward action and builds no provider. It creates n
 ## Approving and drafting
 
 ```sh
-careersignal approve <review-id> --actor operator
+careersignal approve <review-id> --actor operator                # controlled, the default
+careersignal approve <review-id> --actor operator \
+  --provider gmail --mailbox operator@example.com                # names a destination too
 careersignal draft <review-id>                                   # controlled, on this machine
 careersignal draft <review-id> --provider gmail --mailbox operator@example.com
 careersignal reconcile <review-id>
 ```
 
-These call the existing machinery described in [approved drafts](approved-drafts.md), unchanged. The controlled provider remains the default and Gmail must be named explicitly, with its own credential in the environment.
+These call the existing machinery described in [approved drafts](approved-drafts.md), unchanged. The controlled provider remains the default and Gmail must be named explicitly, with its own credential in the environment. `approve` takes `--provider`/`--mailbox` too, and needs no credential to do it: naming a destination at approval time is a declaration, checked later against what `draft` actually contacts.
 
 An approval the decision rules refuse — an ineligible review, a review that predates stated skill coverage, an opportunity already ended, a review whose draft was already attempted — is `REFUSED` with the reason, not a usage error. The operator can act on what it names. A review id that does not exist at all is exit 2 instead, as above.
 

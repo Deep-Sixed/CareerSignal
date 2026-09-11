@@ -231,9 +231,12 @@ class Repository:
                 "attempted": False,
                 "draft": "none",
                 "receipt": None,
+                "provider": None,
+                "provider_namespace": None,
             }
         decision = conn.execute(
-            "SELECT approved,actor,addressing_digest,draft_digest FROM decisions WHERE review_id=?",
+            "SELECT approved,actor,addressing_digest,draft_digest,provider,provider_namespace "
+            "FROM decisions WHERE review_id=?",
             (review_id,),
         ).fetchone()
         intent = conn.execute(
@@ -280,6 +283,14 @@ class Repository:
             if intent
             else ("refused" if latest and latest[0] == "draft_refused" else "none"),
             "receipt": intent[1] if intent else None,
+            # The destination this decision names, straight from the row. Not folded into
+            # "binds": a request for a different provider or mailbox is a mismatch that
+            # workflow.draft() refuses outright, not a drift in the review's own material
+            # that this approval could still be shown as authorizing. An empty value here
+            # is a decision that predates this binding, and is shown as none rather than
+            # guessed at.
+            "provider": decision[4] or None if decision else None,
+            "provider_namespace": decision[5] or None if decision else None,
         }
 
     @staticmethod

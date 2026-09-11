@@ -51,6 +51,8 @@ def row(**overrides):
             "attempted": False,
             "draft": "none",
             "receipt": None,
+            "provider": None,
+            "provider_namespace": None,
         },
         "bound": {
             "review": "review-1",

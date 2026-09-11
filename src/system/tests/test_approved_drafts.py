@@ -598,6 +598,40 @@ def test_reconciling_an_uncertain_gmail_intent_with_the_verified_mailbox_proceed
     assert workflow.repository.intent(review)[0] == "uncertain"
 
 
+def test_reconciling_refuses_a_credential_that_verifies_as_someone_else(tmp_path, monkeypatch):
+    """The declared mailbox matched the intent; the credential behind it did not.
+
+    A declared match is not proof: Gmail's own lookup does not care what --mailbox was
+    typed, only what the credential can reach. Without this check, reconciliation would
+    silently search a mailbox this attempt was never made against.
+    """
+    workflow, review = ingest(tmp_path / "db")
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    approve(workflow, review)
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+    recorder = Recorder(identity="someone-else@example.com")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("looked up drafts with a credential that verified as someone else")
+
+    monkeypatch.setattr(workflow.provider, "lookup", unreachable)
+    with pytest.raises(ValueError, match="Verified provider identity does not match"):
+        workflow.reconcile(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+
 # --- the read grant is not a write grant ---------------------------------------------------
 
 

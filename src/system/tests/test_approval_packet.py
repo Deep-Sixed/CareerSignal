@@ -459,3 +459,76 @@ def test_the_view_agrees_with_what_the_repository_would_actually_do(tmp_path, mo
     # Because this is what reapproving would actually do.
     with pytest.raises(ValueError, match="locked for reconciliation"):
         Repository(path).decide(review, approved=True, actor="operator")
+
+
+# --- the destination an approval binds is shown too, not only the wording ----------------
+
+
+def test_what_the_operator_sees_is_the_destination_the_approval_binds(
+    tmp_path, monkeypatch, capsys
+):
+    """#15 extends what an approval binds with a provider and a namespace.
+
+    The same invariant this file opens with -- what the operator sees is what the approval
+    binds -- would be incomplete if the destination were the one bound value left off the
+    view: a later mismatch refuses correctly, but the operator could not have told from the
+    detail view what it would be refused against.
+    """
+    path = tmp_path / "db"
+    _, review, opportunity = ingest(path)
+    run(
+        monkeypatch,
+        capsys,
+        "approve",
+        review,
+        "--actor",
+        "operator",
+        "--provider",
+        "gmail",
+        "--mailbox",
+        "alice@example.com",
+        "--db",
+        str(path),
+    )
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "provider   gmail" in printed
+    assert "namespace  gmail:alice@example.com" in printed
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["provider"] == "gmail"
+    assert structured["action"]["provider_namespace"] == "gmail:alice@example.com"
+
+    # And what the view now shows is exactly what claim() would verify: a request for a
+    # different destination refuses, never silently reads the earlier one as authorizing it.
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        Repository(path).claim(review, provider="controlled", provider_namespace="controlled")
+
+    # Reapproving for a different destination replaces what is shown, the same way a
+    # changed recipient or subject already does.
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "provider   controlled" in printed
+    assert "namespace  controlled" in printed
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        Repository(path).claim(
+            review, provider="gmail", provider_namespace="gmail:alice@example.com"
+        )
+    assert Repository(path).claim(review)["claimed"] is True
+
+
+def test_a_decision_predating_the_provider_binding_shows_as_not_recorded(
+    tmp_path, monkeypatch, capsys
+):
+    """Migration 0007 left older rows an empty provider, which reads as none, not guessed."""
+    path = tmp_path / "db"
+    _, review, opportunity = ingest(path)
+    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    with store.connection(path) as conn, store.transaction(conn):
+        conn.execute(
+            "UPDATE decisions SET provider='',provider_namespace='' WHERE review_id=?",
+            (review,),
+        )
+    printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
+    assert "provider   -" in printed
+    assert "namespace  -" in printed
