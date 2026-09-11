@@ -104,7 +104,18 @@ class Workflow:
         # for what it is right now, and an approval that comes into existence in the
         # instant between the read above and the transaction below is still checked against
         # a genuinely verified identity rather than an unverified declaration.
-        verified_namespace = self.provider.identity()
+        try:
+            verified_namespace = self.provider.identity()
+        except (RuntimeError, OSError) as exc:
+            # A read, not a write: nothing was reserved by asking, so a failure here is
+            # exactly as certain as the local composition refusal above, and carries the
+            # same atomic guard against an intent settling in the interval.
+            settled = self.repository.refuse(review_id)
+            if settled:
+                return settled["receipt"] if settled["state"] == "confirmed" else None
+            raise DraftRefused(
+                f"Could not verify the provider's identity, so the draft was refused: {exc}"
+            ) from exc
         if approval is not None and verified_namespace != approval["provider_namespace"]:
             raise ValueError(
                 "Verified provider identity does not match the approval; approve this "
@@ -162,7 +173,18 @@ class Workflow:
         # does: a credential that verifies as somebody else would otherwise have Gmail's
         # own lookup search a mailbox this attempt was never made against, silently. The
         # same live check draft() makes before claim() is made here before lookup().
-        verified_namespace = self.provider.identity()
+        try:
+            verified_namespace = self.provider.identity()
+        except (RuntimeError, OSError) as exc:
+            # A read that happens before the lookup, not the lookup itself: this
+            # invocation wrote nothing and changed nothing about the intent it found
+            # already settled or already unsettled. Reporting it as a new ambiguous
+            # write result would claim more than happened; nothing here contacted the
+            # provider about the draft at all.
+            raise DraftRefused(
+                "Could not verify the provider's identity; the existing draft intent is "
+                f"unaffected: {exc}"
+            ) from exc
         if verified_namespace != bound["provider_namespace"]:
             raise ValueError(
                 "Verified provider identity does not match the draft intent reserved for "

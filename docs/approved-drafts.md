@@ -217,6 +217,15 @@ credential belongs to is a GET, made solely to verify identity before anything i
 What stays true is narrower and still absolute: REFUSE means no draft was written or
 created, and no durable draft intent was reserved. A profile read is not a draft write.
 
+This applies to the read itself failing, not only to what it finds. A 401, a malformed
+profile response, or a transport failure from `identity()` is caught in both `draft()` and
+`reconcile()` and reported as a refusal, never as an uncaught fault and never as
+`UNCERTAIN`: nothing was reserved by asking, so there is nothing ambiguous about the write
+to report. In `draft()` this carries the same atomic guard as the local composition
+refusal, since it too runs before `claim()`. In `reconcile()` the intent already exists and
+is untouched either way, so the CLI reports the outcome as a refusal while still showing
+the intent's actual, unaffected state rather than claiming there is none to show.
+
 ## Concurrency
 
 The authorization check and the row that reserves the write are one `BEGIN IMMEDIATE`

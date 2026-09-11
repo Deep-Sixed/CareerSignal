@@ -136,13 +136,21 @@ def attempted(workflow, repository, args) -> dict:
     try:
         receipt = workflow.draft(review) if command == "draft" else workflow.reconcile(review)
     except DraftRefused as exc:
+        # Read rather than assumed: a refusal reached before any intent exists (the usual
+        # case for `draft`) truly has none to report, but an identity check that fails
+        # while reconciling an already-unsettled intent leaves that intent exactly as it
+        # was. Reporting it as None either time would say less than the record holds, or
+        # -- if this were a fault instead -- more than it does.
+        state = repository.intent(review)
         return {
             **common,
             "outcome": REFUSED,
-            "state": None,
-            "receipt": None,
+            "state": state[0] if state else None,
+            "receipt": state[1] if state else None,
             "message": str(exc),
-            "next": "Nothing was created and nothing was sent; the approval still stands.",
+            "next": "The existing draft intent is unaffected; correct the credential and try again."
+            if state
+            else "Nothing was created and nothing was sent; the approval still stands.",
         }
     except (ValueError, KeyError) as exc:
         # Raised before any intent is reserved: missing approval, a changed review, a

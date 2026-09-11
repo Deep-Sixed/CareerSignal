@@ -97,9 +97,9 @@ When the opportunity has no current review there is nothing an approval could bi
   approval   approved by operator (stale: does not bind the material below; reapprove)
 ```
 
-That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording.
+That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording — and, since migration 0007, the provider and namespace too. An approval whose `provider`/`namespace` line reads `-` predates that binding and authorizes no destination at all, so it is reported stale on that basis alone even when the recipient, subject and wording all still match: `claim()` already refuses such a row, and the view says so rather than showing an approval as current that cannot actually be acted on.
 
-The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, which no real digest equals, so it reads as not binding — the same conclusion `claim()` reaches.
+The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, and one recorded before migration 0007 carries an empty provider and namespace; neither empty value equals a real one, so both read as not binding — the same conclusion `claim()` reaches.
 
 What to do about a stale approval depends on whether a draft has been attempted, and the line says only what is actually available:
 

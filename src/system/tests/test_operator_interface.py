@@ -638,6 +638,98 @@ def test_a_fault_before_anything_was_reserved_is_not_reported_as_uncertain(
     assert Repository(path).intent(review) is None
 
 
+def test_a_failed_gmail_identity_check_is_refused_not_a_fault(tmp_path, monkeypatch, capsys):
+    """#15 narrows REFUSE to allow a profile GET; it does not turn that read's own failure
+    into an unrecorded fault. Nothing was created and nothing was reserved by asking."""
+    path = tmp_path / "db"
+    _, review, _ = approved(path, monkeypatch, capsys, provider="gmail", mailbox=MAILBOX)
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+
+    def broken(self):
+        raise gmail.GmailError("Gmail rejected the access token (401)")
+
+    monkeypatch.setattr(gmail_draft.GmailDrafts, "identity", broken)
+    out, err = stopped(
+        monkeypatch,
+        capsys,
+        1,
+        "draft",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+    assert out.startswith("REFUSED")
+    assert "401" in out
+    assert err == ""
+    assert Repository(path).intent(review) is None
+    assert "draft_refused" in Repository(path).audit(review)
+
+
+def test_a_failed_gmail_identity_check_during_reconcile_leaves_the_intent_unaffected(
+    tmp_path, monkeypatch, capsys
+):
+    """The #15 contract reserves UNCERTAIN for ambiguity about the external write. A
+    profile-read failure ahead of the lookup introduces none: this invocation wrote
+    nothing, and the intent it found is exactly as unsettled as before it ran."""
+    path = tmp_path / "db"
+    _, review, _ = approved(path, monkeypatch, capsys, provider="gmail", mailbox=MAILBOX)
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+    Repository(path).claim(
+        review, provider="gmail", provider_namespace=gmail_draft.namespace_for(MAILBOX)
+    )
+    Repository(path).finish(review, None)
+    assert Repository(path).intent(review) == ("uncertain", None)
+
+    def broken(self):
+        raise gmail.GmailError("Gmail rejected the access token (401)")
+
+    monkeypatch.setattr(gmail_draft.GmailDrafts, "identity", broken)
+    out, err = stopped(
+        monkeypatch,
+        capsys,
+        1,
+        "reconcile",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+    assert out.startswith("REFUSED")
+    assert "401" in out
+    assert err == ""
+    # Unaffected: this failure resolved nothing and settled nothing.
+    assert Repository(path).intent(review) == ("uncertain", None)
+
+    json_out, _ = stopped(
+        monkeypatch,
+        capsys,
+        1,
+        "reconcile",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--json",
+        "--db",
+        str(path),
+    )
+    structured = json.loads(json_out)
+    # The record still names the intent this invocation found -- an existing, already
+    # unsettled attempt -- not the "nothing was ever reserved" shape a draft() refusal has.
+    assert structured["outcome"] == "refused"
+    assert structured["state"] == "uncertain"
+    assert structured["receipt"] is None
+    assert "unaffected" in structured["next"]
+
+
 # --- the reported state is the current one, not everything that ever happened ----------------
 
 

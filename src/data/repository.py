@@ -266,9 +266,16 @@ class Repository:
             # an empty digest, which no real digest equals, so it reads as not binding.
             "binds": None
             if decision is None
-            else (
+            else bool(
                 decision[2] == binding["addressing"]["digest"]
                 and decision[3] == binding["draft_digest"]
+                # A decision predating migration 0007 carries an empty provider and
+                # namespace, which claim() already refuses to authorize -- the same
+                # "cannot match a real value" fail-closed rule the addressing and draft
+                # digests use above. Reporting it as currently binding would tell the
+                # operator they can act on an approval that authorizes no destination.
+                and decision[4]
+                and decision[5]
             ),
             # Refused and uncertain are different facts and are never collapsed. A refusal
             # means nothing was attempted; an intent means something was, and its outcome

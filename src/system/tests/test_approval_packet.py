@@ -532,3 +532,13 @@ def test_a_decision_predating_the_provider_binding_shows_as_not_recorded(
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "provider   -" in printed
     assert "namespace  -" in printed
+    # A legacy row authorizes no destination at all -- claim() already refuses it -- so
+    # the approval must not read as current beside material it cannot actually bind.
+    assert "approval   approved by operator (stale: does not bind the material below; " in printed
+    assert "reapprove)" in printed
+    structured = json.loads(
+        run(monkeypatch, capsys, "opportunity", opportunity, "--json", "--db", str(path))
+    )
+    assert structured["action"]["binds"] is False
+    with pytest.raises(ValueError, match="predates draft authorization binding"):
+        Repository(path).claim(review)
