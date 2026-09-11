@@ -328,6 +328,64 @@ exactly as before, because past that point the outcome genuinely is unknown.
 same rules a second time. Two implementations of one rule are two sources of truth, and
 they drift the first time only one is corrected.
 
+## Provider rejection vs. an uncertain write
+
+`create()` can fail in three ways, and only two of them were distinguished before this
+work. A local refusal (above) never crosses the write boundary at all. Past that boundary,
+most failures are genuinely unknown -- a timeout, a connection reset, a malformed success
+body all leave open the possibility that Gmail created the draft anyway, so they are
+recorded as `uncertain` and left for reconciliation. But a narrow set of Gmail's own
+responses to the create request *prove*, rather than merely suggest, that nothing was
+created:
+
+```
+create()
+  │
+  ├─ never contacted anything           → DraftRefused          (certain: nothing sent)
+  ├─ contacted; response proves no draft → ProviderRejected      (certain: nothing created)
+  └─ contacted; outcome unknown          → ordinary exception    (uncertain: reconcile)
+```
+
+**The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403, 429}` in
+`gmail_draft.py`. Each is a check Google's API gateway performs *before* a request is ever
+routed to the service that would create a draft -- malformed request, rejected token,
+insufficient grant, exhausted quota -- which is what makes the response provable rather
+than merely plausible. A 5xx is deliberately excluded: the service may have accepted the
+request and then failed while creating it, so a response existing is not proof nothing did.
+An unrecognized status is excluded for the same reason -- this adapter never guesses what an
+unfamiliar code means. Fewer proven rejections is always the safe direction to be wrong in.
+
+**Retry without discarding history.** A proven rejection releases the `draft_intents` row
+the attempt reserved -- `repository.reject()` deletes it, exactly as a local refusal never
+reserves one -- while the rejection itself is written to the append-only audit log as
+`draft_rejected`, durable evidence distinct from the row that only ever describes the
+current attempt. Deleting the row rather than adding a new state to it needed no schema
+change, and it means an explicit, corrected `draft` invocation can claim again immediately:
+
+```
+approve → claim → create() → 403 → reject() (row deleted, audit kept) → approval untouched
+                                                                              │
+operator corrects the cause, invokes draft again ──────────────────────────┘
+                                                                              │
+                                                                claim() re-checks content,
+                                                                wording, addressing and
+                                                                provider/mailbox binding --
+                                                                exactly as any other claim
+```
+
+Nothing here re-derives claim()'s existing checks: they already refuse a retry whose
+recipient, wording, provider or mailbox moved since the approval, the same guard that
+protects every other retry path. A rejection never loosens the provider/mailbox binding
+from migration 0007 -- a retry against a different destination is refused exactly as a
+first attempt would be.
+
+**Reported, not silently retried.** The CLI reports `PROVIDER_REJECTED`, sharing REFUSED's
+exit code (1) and its safety -- nothing was created, and retrying once the cause is fixed
+needs no reconciliation -- but under its own name, because it is a different fact: a refusal
+never contacted the provider, while a rejection is what the provider itself proved once
+contacted. No automatic retry exists or is planned; the operator corrects the cause (a bad
+token, an insufficient grant, exhausted quota) and re-invokes `draft` explicitly.
+
 ## Correcting a source
 
 An opportunity can arrive in more than one message, and replay reuses the review when the

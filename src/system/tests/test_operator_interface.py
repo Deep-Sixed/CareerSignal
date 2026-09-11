@@ -606,7 +606,15 @@ def test_the_interface_never_reaches_past_the_workflow(tmp_path):
     exercised the happy path would not notice a second route being added beside it.
     """
     source = (pathlib.Path(__file__).parent.parent / "cli.py").read_text(encoding="utf-8")
-    for forbidden in (".claim(", ".finish(", ".create(", ".lookup(", ".decide(", "record_status("):
+    for forbidden in (
+        ".claim(",
+        ".finish(",
+        ".create(",
+        ".lookup(",
+        ".reject(",
+        ".decide(",
+        "record_status(",
+    ):
         occurrences = source.count(forbidden)
         if forbidden in (".decide(", "record_status("):
             # The two writes the interface is for, each reached one way only.

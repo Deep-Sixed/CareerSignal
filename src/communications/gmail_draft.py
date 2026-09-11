@@ -34,6 +34,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from communications.gmail import GMAIL_HOST, HEADER_SAFE, GmailError
 from communications.message import MAX_MESSAGE_BYTES
 from recruiting.ports import DraftRefused as PortDraftRefused
+from recruiting.ports import ProviderRejected as PortProviderRejected
 
 API_ROOT = f"https://{GMAIL_HOST}/gmail/v1/"
 COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
@@ -122,6 +123,18 @@ class DraftRefused(PortDraftRefused, GmailError):
     identity before anything is claimed or looked up. A profile read is not a draft write,
     so a refusal reached after one is exactly as certain as one reached without it --
     nothing was created and nothing was sent.
+    """
+
+
+class ProviderRejected(PortProviderRejected, GmailError):
+    """Gmail was contacted to create the draft, and its response proves it did not.
+
+    Raised only for the status codes in REJECTED_CREATE_STATUSES: the ones Gmail's own
+    API architecture rejects a request for before it is ever routed to the service that
+    would create anything. Every other failure -- a 5xx, an unrecognized status, a
+    malformed success body, a transport error -- is left as a plain GmailError, which is
+    the uncertain path. Carries the port's rejection type so a caller can tell this apart
+    from both a certain local refusal and a genuinely unknown outcome.
     """
 
 
@@ -374,6 +387,42 @@ def _failure(status: int) -> str:
     return f"Gmail draft request failed with HTTP {status}"
 
 
+def _create_rejected_failure(status: int) -> str:
+    if status == 400:
+        return "Gmail rejected the draft request as invalid (400); nothing was created"
+    if status == 401:
+        return (
+            "Gmail rejected the access token (401); nothing was created; "
+            "reauthorize with the compose scope"
+        )
+    if status == 403:
+        return (
+            "Gmail refused the draft (403); nothing was created; "
+            "the grant may not cover this mailbox"
+        )
+    if status == 429:
+        return "Gmail rate limited the draft request (429); nothing was created"
+    raise AssertionError(f"{status} is not a definite Gmail create rejection")
+
+
+# The narrowest set of Gmail responses to a draft-create request that can be *proven* to
+# mean nothing was created, not merely a status that happens to indicate failure:
+#
+#   400  the request itself was rejected as invalid -- malformed content, not a write
+#   401  the access token was rejected -- authentication runs before any write is possible
+#   403  the grant was rejected as insufficient -- authorization runs before any write
+#   429  the request was rejected for quota -- enforced before a request is routed to write
+#
+# All four are checks Google's API gateway performs before a request ever reaches the
+# service that would create a draft, which is what makes a response provable rather than
+# merely plausible. A 5xx is deliberately excluded: it can mean the service accepted the
+# request and then failed while creating it, so a response existing is not proof nothing
+# did. An unrecognized status is excluded for the same reason -- this adapter does not
+# guess what an unfamiliar code means. Anything not in this set stays an ordinary
+# GmailError, which the caller treats as an unknown outcome, never as a proven rejection.
+REJECTED_CREATE_STATUSES = frozenset({400, 401, 403, 429})
+
+
 def _identity_failure(status: int) -> str:
     if status == 401:
         return (
@@ -492,6 +541,11 @@ class GmailDrafts:
         status, response = self._create(
             url, self._headers(**{"Content-Type": "application/json"}), request_body
         )
+        # Classified before the ordinary success/failure parsing below, and only for the
+        # narrow set of statuses that prove nothing was created: every other status,
+        # success included, still goes through _payload() exactly as before.
+        if status in REJECTED_CREATE_STATUSES:
+            raise ProviderRejected(_create_rejected_failure(status))
         return "gmail-draft:" + self._draft_id(self._payload(status, response))
 
     def _metadata_intent(self, draft_id: str) -> str | None:

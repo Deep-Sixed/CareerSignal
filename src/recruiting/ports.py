@@ -25,6 +25,31 @@ class DraftRefused(RuntimeError):
     """
 
 
+class ProviderRejected(RuntimeError):
+    """The provider was contacted for this write, and its response proves none was created.
+
+    A third outcome, distinct from both of the others `create()` can produce:
+
+      DraftRefused      never contacted anything; certain by construction.
+      ProviderRejected  contacted, and the response itself proves no draft exists.
+      (anything else)   contacted, and the outcome is genuinely unknown -- uncertain.
+
+    That middle case only exists where a provider's own documented contract guarantees a
+    response proves non-creation: an authentication, authorization or request-validation
+    rejection that its API is specified to return before any write is attempted, never
+    merely because *a* response came back with a failing status. A provider that cannot
+    make that case must leave the failure as an ordinary exception and let it fall to the
+    uncertain path -- fewer proven rejections is always the safe direction to be wrong in,
+    for exactly the reason DraftRefused's own certainty matters.
+
+    Nothing here retries automatically. The approval this draft was claimed against is
+    unaffected and untouched; what changes is that the durable intent this attempt
+    reserved is released, so an explicit, corrected `draft` invocation can claim again
+    without editing or discarding history -- the rejection itself is what the audit
+    record durably keeps.
+    """
+
+
 class DraftProvider(Protocol):
     # Which implementation owns the external action this provider takes, e.g. "controlled"
     # or "gmail". Fixed per implementation: it names what the provider is, not what mailbox
@@ -59,6 +84,12 @@ class DraftProvider(Protocol):
         Addressing is passed rather than looked up, because a provider that could look it
         up would need to read the record it is writing about. Both values are untrusted
         recruiter text and it is the provider's job to refuse an unusable one.
+
+        May raise ProviderRejected instead of an ordinary exception, but only when the
+        response itself proves nothing was created. Everything else -- a timeout, a
+        connection reset, a malformed success body, an error a provider cannot attribute
+        to a pre-write check -- is left as an ordinary exception, and the caller treats
+        that as an unknown outcome rather than a proven one.
         """
 
     def lookup(self, key: str) -> str | None:
