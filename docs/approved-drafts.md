@@ -92,6 +92,121 @@ An ordinary move through the pipeline — `interested` to `applied`, `reviewing`
 approved words became wrong. Only ending the opportunity withdraws the authority to act
 outward on its behalf.
 
+## Provider identity
+
+One review still permits at most one external draft attempt, and everything above bound
+that attempt to a review's content, wording and address. It did not bind *where* the
+attempt goes. Approve a review while composing to `controlled`, then ask to draft it again
+against a real Gmail mailbox, and nothing above would have noticed: the review, the
+wording, the recipient and the status were all still exactly what was approved.
+
+Two columns, added by migration 0007, close it:
+
+```
+provider            which implementation owns the external action ("controlled", "gmail")
+provider_namespace  which destination owns it ("controlled", or "gmail:alice@example.com")
+```
+
+Deliberately not a uniqueness key. `draft_intents` stays globally one-attempt-per-review;
+these columns describe that one attempt, they do not open a second slot per provider or per
+mailbox. A review approved for one destination and then requested against another is a
+mismatch to refuse, never grounds for a second attempt.
+
+**An approval binds a destination, not only a target.** `approve` may name one:
+
+```sh
+uv run careersignal approve <review-id> --actor operator \
+  --provider gmail --mailbox alice@example.com --db var/private.db
+```
+
+Naming a mailbox at approval time needs no credential -- it records what a later attempt
+will be judged against, the same way the addressing digest records a recipient before any
+draft is composed. `controlled` stays the default when `--provider` is omitted, exactly as
+before.
+
+**The declared mailbox is not proof.** `--mailbox alice@example.com` is what the operator
+typed, not evidence of what the compose credential actually reaches. Google documents
+`GET users/me/profile` as readable under the existing `gmail.compose` grant, no additional
+scope, so one read turns the declaration into a fact:
+
+```
+operator says alice@example.com
+     │
+     ▼
+GET users/me/profile, same compose credential
+     │
+     ├─ emailAddress == alice@example.com  →  identity verified
+     └─ anything else                      →  REFUSE, no intent, no draft POST
+```
+
+The profile read is allowlisted by its own `profile_url()`, never by `writable_url()`.
+Widening the drafts allowlist to admit `/profile` would let one boundary quietly answer for
+two different guarantees; `users/me/profile` stays refused there, exactly as every other
+non-drafts path is.
+
+**Where each check sits, and what each one costs:**
+
+```
+draft(review, requested provider)
+  │
+  ├─ existing intent?
+  │    ├─ requested does not match the intent's own provider/namespace
+  │    │     → REFUSE, no new write, no request made
+  │    └─ matches → confirmed replays the receipt; attempting/uncertain use the
+  │                 existing recovery rules -- neither re-verifies identity
+  │
+  └─ no existing intent
+       ├─ an approval exists and names a different provider/namespace
+       │     → REFUSE, no request made -- this comparison is two declared
+       │       strings and costs nothing to make
+       ├─ local composition preflight (unchanged; still contacts nothing)
+       ├─ provider.identity() -- the one read that is not a draft operation
+       │    └─ verified identity does not match the approval
+       │          → REFUSE, no intent -- the profile read already happened
+       └─ claim() -- atomically re-checks content, wording, addressing and now
+            provider/namespace together, persists the verified identity onto
+            the intent, and only then is create() ever called
+```
+
+`identity()` runs every time this point is reached, even against a review with no approval
+at all yet: claim() will refuse that case regardless ("Explicit approval is required"), and
+verifying first closes a narrow race an unverified declaration would leave open -- an
+approval landing in the instant between the read above and the transaction is still checked
+against a genuinely verified identity, not one taken on faith. For `controlled`, this is a
+constant with nothing to contact; the identity check costs nothing over what was already
+true before this work.
+
+**Reconciliation is bound too, but never re-verified live.** An uncertain intent belongs to
+whichever destination `claim()` recorded onto it, and reconciling with a different declared
+provider or mailbox is refused before any lookup:
+
+```
+reconcile(review, requested provider)
+  │
+  ├─ requested does not match the intent's own provider/namespace
+  │     → REFUSE, zero draft lookup, zero draft create
+  └─ matches → the existing reconciliation path proceeds unchanged
+```
+
+This is declared identity only, the same comparison the existing-intent branch of `draft()`
+makes and for the same reason: reconciling is a read against a destination the intent
+already names, not a fresh request that could be aimed anywhere, so there is nothing new to
+verify live. Nothing about this work permits `create()` during reconciliation.
+
+**Legacy rows fail closed, exactly like every binding before this one.** A decision or an
+intent written before migration 0007 carries `''` in both new columns, which no real
+provider name or namespace equals. An old approval no longer authorizes an outward draft --
+the operator re-approves, naming a destination under the current contract. An old intent
+never authorizes another write, and nothing here guesses which provider or mailbox it was
+originally for from the receipt string or from today's CLI flags: that would manufacture
+provenance CareerSignal never recorded.
+
+**Wording note.** A refusal here can still follow a read: proving whose mailbox a
+credential belongs to is a GET, made solely to verify identity before anything is claimed.
+"REFUSE means nothing left this machine" is now slightly too strong for this one path.
+What stays true is narrower and still absolute: REFUSE means no draft was written or
+created, and no durable draft intent was reserved. A profile read is not a draft write.
+
 ## Concurrency
 
 The authorization check and the row that reserves the write are one `BEGIN IMMEDIATE`
@@ -171,6 +286,12 @@ draft_material  →  provider.refusal()  →  refused  →  audit 'draft_refused
                                    →  finish(receipt) or, on any failure past this
                                       point, finish(None) = uncertain
 ```
+
+As the Provider identity section above describes, one read can land before `claim()`:
+verifying whose mailbox a Gmail credential belongs to. It is not a draft write and reserves
+nothing, so it does not change this diagram's guarantee -- it only means "the network
+starts here" is no longer literally the first request this path can make, only the first
+one that writes anything.
 
 The distinction is load-bearing rather than tidy. An intent means an external write was
 attempted and its outcome may be unknown; it locks the decision for reconciliation, and
@@ -272,15 +393,20 @@ uv run careersignal draft <review-id> --db var/private.db
 ```
 
 `draft` uses the in-memory controlled provider by default. Creating a real draft in a real
-mailbox is never implicit:
+mailbox is never implicit, and approving one now names the destination the same way:
 
 ```sh
+uv run careersignal approve <review-id> --actor operator \
+  --provider gmail --mailbox operator@example.com --db var/private.db
+
 export CAREERSIGNAL_GMAIL_COMPOSE_TOKEN=...
 uv run careersignal draft <review-id> --provider gmail \
   --mailbox operator@example.com --db var/private.db
 ```
 
-The read token is not accepted in place of the compose token.
+The read token is not accepted in place of the compose token. A `draft` naming a different
+provider or a different mailbox than the approval refuses, rather than creating a second
+attempt; see Provider identity above.
 
 ## Limits
 

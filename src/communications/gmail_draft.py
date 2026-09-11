@@ -14,6 +14,10 @@ from it. It comes from this module:
 The read adapter in communications.gmail is untouched by this module and keeps refusing
 every scope but gmail.readonly. Two credentials, two adapters: a fault here cannot turn
 the mailbox reader into a write path, which is the point of keeping them apart.
+
+One read-only exception exists: identity() proves whose mailbox the compose credential
+belongs to with a GET against users/me/profile, allowlisted by its own profile_url() and
+never by writable_url(), which keeps refusing that path. It creates nothing.
 """
 
 import base64
@@ -87,13 +91,35 @@ MAX_DRAFTS = 100
 MAX_DRAFT_PAGES = 10
 
 
-class DraftRefused(PortDraftRefused, GmailError):
-    """The draft was not created and no request was made. The offending value is retained.
+def namespace_for(mailbox: str) -> str:
+    """The stable destination name one mailbox is known by, normalized the same way once.
 
-    Refusing is not discarding. The evidence that caused the refusal is untouched in
-    storage, so the operator can correct the source and reevaluate. It also carries the
-    port's refusal type, so a caller can tell a refusal apart from a failure that may have
-    happened after Gmail was contacted -- the two call for opposite handling.
+    A pure function rather than a method, so an operator's declared --mailbox and a
+    verified emailAddress from Gmail's own profile response are turned into the same shape
+    by the same code and can be compared for equality rather than merely similarity.
+    """
+    if not isinstance(mailbox, str):
+        raise TypeError("A mailbox identifier is required")
+    normalized = " ".join(mailbox.split()).casefold()
+    if not normalized:
+        raise ValueError("A mailbox identifier is required")
+    return "gmail:" + normalized
+
+
+class DraftRefused(PortDraftRefused, GmailError):
+    """No draft was written or created, and no durable draft intent was reserved.
+
+    The offending value is retained: refusing is not discarding, and the evidence that
+    caused the refusal is untouched in storage, so the operator can correct the source and
+    reevaluate. It also carries the port's refusal type, so a caller can tell a refusal
+    apart from a failure that may have happened after Gmail was contacted -- the two call
+    for opposite handling.
+
+    This can be raised after a read: verifying whose mailbox a compose credential belongs
+    to is a GET against Gmail's profile endpoint, made solely to prove identity before
+    anything is claimed. A profile read is not a draft write, so a refusal reached after
+    one is exactly as certain as one reached without it -- nothing was created and nothing
+    was sent.
     """
 
 
@@ -130,7 +156,7 @@ class GmailComposeCredentials:
 
     @property
     def namespace(self) -> str:
-        return "gmail:" + self.mailbox
+        return namespace_for(self.mailbox)
 
 
 class _NoRedirect(request.HTTPRedirectHandler):
@@ -171,8 +197,13 @@ def https_read(url: str, headers: dict) -> tuple[int, bytes]:
     return _perform(request.Request(url, headers=headers, method="GET"))
 
 
-def writable_url(url: str) -> str:
-    """Refuse anything but an allowlisted Gmail draft URL, before a token is attached."""
+def _validated_host(url: str):
+    """Scheme, credential and host hygiene shared by every URL this adapter can request.
+
+    Neither allowlist below is complete on its own: each still checks its own path against
+    its own pattern. This only closes the parts a hostile URL could get wrong before either
+    allowlist looks at a path at all.
+    """
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise GmailError("Refused a Gmail URL that is not HTTPS")
@@ -184,11 +215,32 @@ def writable_url(url: str) -> str:
         raise GmailError("Refused a Gmail URL with an unreadable port") from exc
     if parts.hostname != GMAIL_HOST or port not in (None, 443):
         raise GmailError(f"Refused a request to a host other than {GMAIL_HOST}")
+    return parts
+
+
+def writable_url(url: str) -> str:
+    """Refuse anything but an allowlisted Gmail draft URL, before a token is attached."""
+    parts = _validated_host(url)
     match = DRAFT_PATH.match(parts.path)
     if not match:
         raise GmailError("Refused a path outside the Gmail draft allowlist")
     if match[1] and match[1].casefold() in FORBIDDEN_SEGMENTS:
         raise GmailError("Refused a reserved Gmail endpoint")
+    return url
+
+
+# The exact identity-read endpoint, and nothing shaped like it. Kept apart from DRAFT_PATH
+# rather than folded into it: the drafts allowlist exists to keep this adapter from
+# reaching anything but the drafts collection, and admitting /profile there would widen a
+# boundary built for a different purpose to cover one it was never meant to.
+PROFILE_PATH = "/gmail/v1/users/me/profile"
+
+
+def profile_url(url: str) -> str:
+    """Refuse anything but the one read used to prove whose mailbox a credential is."""
+    parts = _validated_host(url)
+    if parts.path != PROFILE_PATH or parts.query or parts.fragment:
+        raise GmailError("Refused a path outside the Gmail profile identity endpoint")
     return url
 
 
@@ -320,12 +372,29 @@ def _failure(status: int) -> str:
     return f"Gmail draft request failed with HTTP {status}"
 
 
+def _identity_failure(status: int) -> str:
+    if status == 401:
+        return (
+            "Gmail rejected the access token (401) while verifying mailbox identity; "
+            "reauthorize with the compose scope"
+        )
+    if status == 403:
+        return "Gmail refused the profile read (403) while verifying mailbox identity"
+    if status == 429:
+        return "Gmail rate limited the profile read (429); retry later"
+    return f"Gmail profile read failed with HTTP {status}"
+
+
 class GmailDrafts:
     """Creates Gmail drafts. It cannot send, delete, label or modify anything.
 
     Implements recruiting.ports.DraftProvider. The port defines create and lookup and no
     send operation, so nothing in the recruiting core can express one either.
     """
+
+    # Fixed for every instance: which provider a request declares is a property of the
+    # implementation, not of any one mailbox it happens to be constructed for.
+    provider = "gmail"
 
     def __init__(
         self, credentials: GmailComposeCredentials, *, create=https_create, read=https_read
@@ -337,6 +406,13 @@ class GmailDrafts:
 
     @property
     def namespace(self) -> str:
+        """The mailbox this credential was configured for. Declared, not yet verified.
+
+        Approving and requesting a draft compare against this value, because both are the
+        operator naming a destination before anything is contacted. Whether the credential
+        actually belongs to that mailbox is a separate question, answered only by
+        identity().
+        """
         return self._credentials.namespace
 
     def _headers(self, **extra) -> dict:
@@ -347,9 +423,9 @@ class GmailDrafts:
         }
 
     @staticmethod
-    def _payload(status: int, body: bytes) -> dict:
+    def _payload(status: int, body: bytes, *, failure=_failure) -> dict:
         if status not in (200, 201):
-            raise GmailError(_failure(status))
+            raise GmailError(failure(status))
         try:
             value = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -364,6 +440,22 @@ class GmailDrafts:
         if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
             raise GmailError("Gmail returned an unusable draft identifier")
         return value
+
+    def identity(self) -> str:
+        """Prove whose mailbox this credential belongs to, with one read-only request.
+
+        `--mailbox` is an operator's typed expectation, not evidence. Google documents
+        `users.me/profile` as readable under the same gmail.compose grant this adapter
+        already holds -- no additional scope -- so one GET turns that expectation into a
+        fact before anything is claimed or written. It is the only request this adapter
+        makes that neither reads nor creates a draft, and it reserves nothing.
+        """
+        url = profile_url(API_ROOT + "users/me/profile")
+        payload = self._payload(*self._read(url, self._headers()), failure=_identity_failure)
+        address = payload.get("emailAddress")
+        if not isinstance(address, str) or not address.strip():
+            raise GmailError("Gmail profile response did not include an email address")
+        return namespace_for(address)
 
     def refusal(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str | None:
         """Why this draft cannot be created, or None. Contacts nothing.

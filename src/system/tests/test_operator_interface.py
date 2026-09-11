@@ -300,16 +300,29 @@ def test_recording_a_status_never_builds_a_provider(tmp_path, monkeypatch, capsy
 # --- refused and uncertain are different states ----------------------------------------------
 
 
-def approved(path, monkeypatch, capsys, *, sender="recruiter@example.com"):
+def approved(
+    path,
+    monkeypatch,
+    capsys,
+    *,
+    sender="recruiter@example.com",
+    provider="controlled",
+    mailbox=None,
+):
     workflow, review, opportunity = ingest(path, sender=sender)
-    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    arguments = ["approve", review, "--actor", "operator", "--provider", provider]
+    if mailbox:
+        arguments += ["--mailbox", mailbox]
+    run(monkeypatch, capsys, *arguments, "--db", str(path))
     return workflow, review, opportunity
 
 
 def test_a_refused_draft_reports_a_refusal_and_contacts_nothing(tmp_path, monkeypatch, capsys):
     """A recruiter address that cannot become a header. Nothing was created or sent."""
     path = tmp_path / "db"
-    _, review, _ = approved(path, monkeypatch, capsys, sender=HOSTILE_SENDER)
+    _, review, _ = approved(
+        path, monkeypatch, capsys, sender=HOSTILE_SENDER, provider="gmail", mailbox=MAILBOX
+    )
     monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
 
     def refuse(*args, **kwargs):
@@ -356,7 +369,14 @@ def test_refused_and_uncertain_never_read_as_the_same_failure(tmp_path, monkeypa
     or abandon something that was only refused.
     """
     refused_path, uncertain_path = tmp_path / "refused", tmp_path / "uncertain"
-    _, refused_review, _ = approved(refused_path, monkeypatch, capsys, sender=HOSTILE_SENDER)
+    _, refused_review, _ = approved(
+        refused_path,
+        monkeypatch,
+        capsys,
+        sender=HOSTILE_SENDER,
+        provider="gmail",
+        mailbox=MAILBOX,
+    )
     monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
     refused_out, _ = stopped(
         monkeypatch,
@@ -469,7 +489,9 @@ def test_the_detail_view_separates_the_draft_states(
 def test_a_refusal_shows_as_refused_until_an_attempt_replaces_it(tmp_path, monkeypatch, capsys):
     """Refused is not a lesser uncertain: nothing was attempted, and it says so."""
     path = tmp_path / "db"
-    _, review, opportunity = approved(path, monkeypatch, capsys, sender=HOSTILE_SENDER)
+    _, review, opportunity = approved(
+        path, monkeypatch, capsys, sender=HOSTILE_SENDER, provider="gmail", mailbox=MAILBOX
+    )
     monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
     stopped(
         monkeypatch,
@@ -487,7 +509,9 @@ def test_a_refusal_shows_as_refused_until_an_attempt_replaces_it(tmp_path, monke
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "draft      refused; nothing was created" in printed
     # An attempt is a fact about an attempt; a refusal describes a draft never proposed.
-    Repository(path).claim(review)
+    Repository(path).claim(
+        review, provider="gmail", provider_namespace=gmail_draft.namespace_for(MAILBOX)
+    )
     Repository(path).finish(review, "controlled-later")
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "draft      created; receipt controlled-later" in printed
@@ -660,7 +684,20 @@ def test_a_refusal_a_later_approval_has_answered_is_not_the_current_state(
     """
     path = tmp_path / "db"
     _, review, opportunity = ingest(path, sender=HOSTILE_SENDER)
-    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    run(
+        monkeypatch,
+        capsys,
+        "approve",
+        review,
+        "--actor",
+        "operator",
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
     refuse_a_draft(path, review, monkeypatch, capsys)
     assert "draft      refused; nothing was created" in run(
         monkeypatch, capsys, "opportunity", opportunity, "--db", str(path)
@@ -669,7 +706,20 @@ def test_a_refusal_a_later_approval_has_answered_is_not_the_current_state(
     # The recruiter's next alert carries an address that can be used, and the operator
     # approves the corrected review.
     source(path, "m2", "recruiter@example.com")
-    run(monkeypatch, capsys, "approve", review, "--actor", "operator", "--db", str(path))
+    run(
+        monkeypatch,
+        capsys,
+        "approve",
+        review,
+        "--actor",
+        "operator",
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
 
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "approval   approved by operator" in printed

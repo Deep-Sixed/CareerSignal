@@ -11,8 +11,10 @@ reconcile -- are read by a person. They print text by default and structured out
     UNCERTAIN (exit 3)  a provider was contacted and the outcome is unknown; reconcile
 
 Refused and uncertain are never collapsed into one failure. They call for different moves:
-a refusal means nothing left this machine and the operator can correct and try again, while
-an uncertain result means something may have been created and only reconciliation can say.
+a refusal means no draft was written or created and no durable intent was reserved -- though
+verifying a Gmail identity ahead of a refusal may have read the mailbox's profile -- and the
+operator can correct and try again, while an uncertain result means something may have been
+created and only reconciliation can say.
 
 Argparse keeps exit 2 for a command that was written wrongly -- a missing argument, an
 unknown id, a filter that cannot mean anything. That is a different thing from the system
@@ -36,6 +38,7 @@ from communications.gmail_draft import (
     COMPOSE_TOKEN_VARIABLE,
     GmailComposeCredentials,
     GmailDrafts,
+    namespace_for,
 )
 from communications.message import MAX_MESSAGE_BYTES, Message
 from data.repository import Repository
@@ -64,6 +67,21 @@ def _provider(args, parser):
     if not args.mailbox:
         parser.error("--provider gmail requires --mailbox")
     return GmailDrafts(GmailComposeCredentials(token, args.mailbox))
+
+
+def _declared_identity(args, parser):
+    """The provider identity an approval declares, without a credential.
+
+    Deliberately not built from _provider(): approving does not need a working credential,
+    only the same declaration a later draft attempt will be judged against. Tying it to
+    whether Gmail can be reached right now would make recording an approval depend on
+    something the approval step has never needed.
+    """
+    if args.provider != "gmail":
+        return "controlled", "controlled"
+    if not args.mailbox:
+        parser.error("--provider gmail requires --mailbox")
+    return "gmail", namespace_for(args.mailbox)
 
 
 def known_review(repository, identifier, parser):
@@ -348,10 +366,17 @@ def main():
             parser.error(f"{args.command} requires a review id")
         if not args.actor or not args.actor.strip():
             parser.error(f"{args.command} requires --actor")
+        provider, namespace = _declared_identity(args, parser)
         repository = Repository(path)
         known_review(repository, args.identifier, parser)
         try:
-            repository.decide(args.identifier, approved=args.command == "approve", actor=args.actor)
+            repository.decide(
+                args.identifier,
+                approved=args.command == "approve",
+                actor=args.actor,
+                provider=provider,
+                provider_namespace=namespace,
+            )
         except (ValueError, KeyError) as exc:
             # A refusal by the decision rules, not a mistyped command: the operator can
             # correct what it names -- record an active status, re-ingest, approve the

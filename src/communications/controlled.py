@@ -17,6 +17,11 @@ def parse_message(body: str) -> list:
 class ControlledDrafts:
     """An in-memory provider for local certification, never a mailbox connection."""
 
+    # A fixed destination rather than one derived from any argument: this provider has no
+    # mailbox to be wrong about, so there is nothing here for an operator to name.
+    provider = "controlled"
+    namespace = "controlled"
+
     def __init__(self):
         self._drafts: dict[str, tuple[str, str]] = {}
         self._lock = Lock()
@@ -25,6 +30,10 @@ class ControlledDrafts:
     def refusal(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str | None:
         """Nothing to refuse: this provider composes no headers and contacts nothing."""
         return None
+
+    def identity(self) -> str:
+        """The namespace this provider is. Nothing to verify and nothing to contact."""
+        return self.namespace
 
     def create(self, key: str, body: str, *, to: str = "", subject_line: str = "") -> str:
         with self._lock:

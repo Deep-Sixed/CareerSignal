@@ -19,6 +19,8 @@ from communications.gmail_draft import (
     GmailDrafts,
     GmailError,
     compose,
+    namespace_for,
+    profile_url,
     recipient,
     subject,
     writable_url,
@@ -148,6 +150,103 @@ def test_a_url_carrying_credentials_is_refused_on_the_authorized_host_too(userin
     assert writable_url(API_ROOT + "users/me/drafts"), "the host in this test is the allowed one"
     with pytest.raises(GmailError, match="carrying credentials"):
         writable_url(url)
+
+
+# --- the profile identity endpoint is a second, narrower allowlist --------------------
+
+
+def test_the_exact_profile_endpoint_is_admitted():
+    url = API_ROOT + "users/me/profile"
+    assert profile_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "users/me/drafts",
+        "users/me/profile/",
+        "users/me/profile?fields=emailAddress",
+        "users/me/profileX",
+        "users/me/messages/profile",
+        "users/me/drafts/profile",
+    ],
+)
+def test_every_path_but_the_exact_profile_endpoint_is_refused(path):
+    with pytest.raises(GmailError):
+        profile_url(API_ROOT + path)
+
+
+def test_writable_url_does_not_admit_the_profile_endpoint():
+    """The identity check gets its own allowlist rather than widening the drafts one."""
+    with pytest.raises(GmailError):
+        writable_url(API_ROOT + "users/me/profile")
+
+
+def test_the_profile_endpoint_refuses_the_same_hostile_hosts_the_draft_allowlist_does():
+    """The credential-carrying case is covered once, on writable_url: both allowlists share
+    _validated_host(), so a URL refused there for carrying userinfo is refused here too."""
+    with pytest.raises(GmailError):
+        profile_url("http://" + GMAIL_HOST + "/gmail/v1/users/me/profile")
+    with pytest.raises(GmailError):
+        profile_url("https://evil.example.com/gmail/v1/users/me/profile")
+
+
+# --- proving whose mailbox a credential belongs to -------------------------------------
+
+
+def test_namespace_for_normalizes_case_and_whitespace():
+    assert namespace_for(" Operator@Example.COM ") == "gmail:operator@example.com"
+
+
+def test_namespace_for_refuses_an_empty_mailbox():
+    with pytest.raises(ValueError):
+        namespace_for("   ")
+
+
+def test_namespace_for_refuses_a_non_string_mailbox():
+    with pytest.raises(TypeError):
+        namespace_for(None)
+
+
+def test_a_credentials_namespace_and_an_identity_response_normalize_the_same_way():
+    """Approving compares one against the other; both must be built by the same function."""
+    assert credentials(mailbox=" Operator@Example.COM ").namespace == namespace_for(MAILBOX)
+
+
+def test_identity_reads_the_profile_endpoint_and_returns_a_namespace():
+    recorder = Recorder(listings=[{"emailAddress": MAILBOX}])
+    drafts = GmailDrafts(credentials(), read=recorder.read)
+    assert drafts.identity() == namespace_for(MAILBOX)
+    assert recorder.reads[0][0] == API_ROOT + "users/me/profile"
+
+
+def test_identity_makes_no_request_shaped_like_a_draft_write():
+    recorder = Recorder(listings=[{"emailAddress": MAILBOX}])
+    drafts = GmailDrafts(credentials(), read=recorder.read)
+    drafts.identity()
+    assert recorder.creates == [], "verifying identity created a draft"
+
+
+def test_identity_refuses_a_response_with_no_email_address():
+    recorder = Recorder(listings=[{}])
+    drafts = GmailDrafts(credentials(), read=recorder.read)
+    with pytest.raises(GmailError, match="did not include an email address"):
+        drafts.identity()
+
+
+@pytest.mark.parametrize(
+    "status,fragment",
+    [(401, "reauthorize"), (403, "profile read"), (429, "rate limited"), (500, "HTTP 500")],
+)
+def test_identity_reports_a_read_specific_failure(status, fragment):
+    recorder = Recorder(status=status)
+    drafts = GmailDrafts(credentials(), read=recorder.read)
+    with pytest.raises(GmailError, match=fragment):
+        drafts.identity()
+
+
+def test_gmail_drafts_declares_its_own_provider_name():
+    assert GmailDrafts(credentials()).provider == "gmail"
 
 
 # --- credentials ----------------------------------------------------------------------

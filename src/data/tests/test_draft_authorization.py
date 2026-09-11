@@ -349,3 +349,134 @@ def test_a_refused_draft_leaves_the_approval_usable(flow, approved):
     assert flow.repository.authorization(approved)["approved"] is True
     flow.repository.record_status(opportunity, "interested", actor="operator", reason="")
     assert flow.repository.claim(approved)["claimed"] is True
+
+
+# --- an approval and an intent bind a provider and a namespace, not only a target -------
+
+
+def test_an_approval_binds_the_default_destination(flow, approved):
+    """Absent any other instruction, an approval binds the same in-memory destination."""
+    bound = flow.repository.authorization(approved)
+    assert bound["bound_provider"] == "controlled"
+    assert bound["bound_provider_namespace"] == "controlled"
+
+
+def test_approved_identity_reads_back_what_was_approved(flow):
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(
+        review,
+        approved=True,
+        actor="operator",
+        provider="gmail",
+        provider_namespace="gmail:alice@example.com",
+    )
+    assert flow.repository.approved_identity(review) == {
+        "provider": "gmail",
+        "provider_namespace": "gmail:alice@example.com",
+    }
+
+
+def test_approved_identity_is_none_with_no_decision_at_all(flow):
+    review = flow.intake("one", body())[0]
+    assert flow.repository.approved_identity(review) is None
+
+
+def test_approved_identity_is_none_for_a_rejection(flow):
+    """A rejection authorizes no destination, not the default one."""
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(review, approved=False, actor="operator")
+    assert flow.repository.approved_identity(review) is None
+
+
+def test_approved_identity_is_none_for_a_legacy_approval(flow, approved):
+    """Rows written before this contract carry no provider binding, and none is guessed."""
+    with store.connection(flow.repository.path) as conn, store.transaction(conn):
+        conn.execute(
+            "UPDATE decisions SET provider='',provider_namespace='' WHERE review_id=?",
+            (approved,),
+        )
+    assert flow.repository.approved_identity(approved) is None
+
+
+def test_a_different_provider_does_not_authorize_the_claim(flow, approved):
+    """An approval for one destination is not discharged by a claim for another."""
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        flow.repository.claim(
+            approved, provider="gmail", provider_namespace="gmail:alice@example.com"
+        )
+    assert flow.repository.intent(approved) is None
+
+
+def test_a_different_namespace_under_the_same_provider_does_not_authorize_the_claim(flow):
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(
+        review,
+        approved=True,
+        actor="operator",
+        provider="gmail",
+        provider_namespace="gmail:alice@example.com",
+    )
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        flow.repository.claim(review, provider="gmail", provider_namespace="gmail:bob@example.com")
+    assert flow.repository.intent(review) is None
+
+
+def test_re_approving_binds_the_new_destination(flow):
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(review, approved=True, actor="operator")
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        flow.repository.claim(
+            review, provider="gmail", provider_namespace="gmail:alice@example.com"
+        )
+    flow.repository.decide(
+        review,
+        approved=True,
+        actor="operator",
+        provider="gmail",
+        provider_namespace="gmail:alice@example.com",
+    )
+    claim = flow.repository.claim(
+        review, provider="gmail", provider_namespace="gmail:alice@example.com"
+    )
+    assert claim["claimed"] is True
+
+
+def test_the_intent_records_the_provider_identity_the_claim_verified(flow):
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(
+        review,
+        approved=True,
+        actor="operator",
+        provider="gmail",
+        provider_namespace="gmail:alice@example.com",
+    )
+    flow.repository.claim(review, provider="gmail", provider_namespace="gmail:alice@example.com")
+    assert flow.repository.intent_identity(review) == {
+        "provider": "gmail",
+        "provider_namespace": "gmail:alice@example.com",
+    }
+
+
+def test_an_approval_bound_to_no_provider_identity_cannot_authorize_an_outward_draft(
+    flow, approved
+):
+    """Rows written before this contract carry no provider binding, and none is guessed."""
+    with store.connection(flow.repository.path) as conn, store.transaction(conn):
+        conn.execute(
+            "UPDATE decisions SET provider='',provider_namespace='' WHERE review_id=?",
+            (approved,),
+        )
+    with pytest.raises(ValueError, match="predates draft authorization binding"):
+        flow.repository.claim(approved)
+    assert flow.repository.intent(approved) is None
+
+
+def test_a_legacy_intent_with_no_provider_identity_never_authorizes_another_write(flow, approved):
+    """An old intent's destination was never recorded. Nothing here invents one for it."""
+    flow.repository.claim(approved)
+    with store.connection(flow.repository.path) as conn, store.transaction(conn):
+        conn.execute(
+            "UPDATE draft_intents SET provider='',provider_namespace='' WHERE review_id=?",
+            (approved,),
+        )
+    assert flow.repository.intent_identity(approved) is None
