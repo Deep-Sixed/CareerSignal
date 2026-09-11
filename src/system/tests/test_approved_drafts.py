@@ -192,6 +192,44 @@ def test_a_hostile_header_is_refused_without_stranding_the_review(tmp_path, kind
     assert recorder.creates == []
 
 
+def test_a_refusal_can_follow_provider_contact(tmp_path):
+    """REFUSED means no draft-create request was sent, never that nothing was contacted.
+
+    #15 established that a read-only identity check can precede a refusal (proving whose
+    mailbox a credential belongs to is a GET, made before anything is claimed or written).
+    This is the regression that guards it: the identity read genuinely happens here, it
+    genuinely fails, and the result is still DraftRefused with the approval untouched --
+    not proof that a refusal implies no provider contact ever occurred.
+    """
+
+    reads = []
+
+    def failing_identity_read(url, headers):
+        reads.append(url)
+        if url.endswith("/profile"):
+            return 500, b"{}"
+        return 200, json.dumps({}).encode()
+
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=failing_identity_read
+    )
+    approve(workflow, review)
+    with pytest.raises(DraftRefused):
+        workflow.draft(review)
+
+    # The point of this test: contact happened even though the outcome was a refusal.
+    assert any(url.endswith("/profile") for url in reads), "identity was never checked"
+    assert recorder.creates == [], "a refused draft must still not create anything"
+    # Nothing was reserved, so there is nothing to unwind and nothing to reconcile --
+    # exactly as certain as a refusal reached without any contact at all.
+    assert workflow.repository.intent(review) is None
+    assert "draft_refused" in workflow.repository.audit(review)
+    assert workflow.repository.authorization(review)["approved"] is True
+
+
 def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
     """Refuse, correct, reevaluate -- proven end to end rather than described."""
     path = tmp_path / "db"

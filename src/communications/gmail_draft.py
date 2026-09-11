@@ -127,14 +127,15 @@ class DraftRefused(PortDraftRefused, GmailError):
 
 
 class ProviderRejected(PortProviderRejected, GmailError):
-    """Gmail was contacted to create the draft, and its response proves it did not.
+    """The draft-create request was sent, and Gmail's response proves it did not succeed.
 
-    Raised only for the status codes in REJECTED_CREATE_STATUSES: the ones Gmail's own
-    API architecture rejects a request for before it is ever routed to the service that
-    would create anything. Every other failure -- a 5xx, an unrecognized status, a
-    malformed success body, a transport error -- is left as a plain GmailError, which is
-    the uncertain path. Carries the port's rejection type so a caller can tell this apart
-    from both a certain local refusal and a genuinely unknown outcome.
+    Raised only for the status codes in REJECTED_CREATE_STATUSES: the ones whose own
+    documented meaning -- not an assumption about Gmail's internal implementation -- is
+    that the request itself was declined rather than acted on. See that set's own comment
+    for exactly what is and is not claimed. Every other failure -- a 5xx, an unrecognized
+    status, a malformed success body, a transport error -- is left as a plain GmailError,
+    which is the uncertain path. Carries the port's rejection type so a caller can tell
+    this apart from both a certain local refusal and a genuinely unknown outcome.
     """
 
 
@@ -398,7 +399,8 @@ def _create_rejected_failure(status: int) -> str:
     if status == 403:
         return (
             "Gmail refused the draft (403); nothing was created; "
-            "the grant may not cover this mailbox"
+            "this can mean the grant is insufficient, a domain policy forbids it, "
+            "or a quota was exceeded"
         )
     if status == 429:
         return "Gmail rate limited the draft request (429); nothing was created"
@@ -406,20 +408,32 @@ def _create_rejected_failure(status: int) -> str:
 
 
 # The narrowest set of Gmail responses to a draft-create request that can be *proven* to
-# mean nothing was created, not merely a status that happens to indicate failure:
+# mean nothing was created, not merely a status that happens to indicate failure. Grounded
+# in what each status is documented to mean generally, never in an assumption about
+# Gmail's internal request-handling implementation, which is not public:
 #
-#   400  the request itself was rejected as invalid -- malformed content, not a write
-#   401  the access token was rejected -- authentication runs before any write is possible
-#   403  the grant was rejected as insufficient -- authorization runs before any write
-#   429  the request was rejected for quota -- enforced before a request is routed to write
+#   400  Bad Request -- HTTP's own definition (RFC 7231 section 6.5.1) is that the server "will
+#        not process" a request it perceives as malformed. A request that will not be
+#        processed cannot have created anything.
+#   401  Unauthorized -- HTTP's own definition (RFC 7235 section 3.1) is that the request lacks
+#        valid authentication credentials for the resource. Gmail's own error guide
+#        documents this status for an invalid or expired access token.
+#   403  Forbidden -- HTTP's own definition (RFC 7231 section 6.5.3) is that the server
+#        "understood the request, but refuses to authorize it". Gmail's own error guide
+#        uses this status for more than one cause -- an insufficient grant, a domain
+#        policy, or (on this API) a quota or rate-limit rejection -- so the message above
+#        does not guess which; every one of those causes is still the server refusing to
+#        authorize the request, not attempting and losing track of the result.
+#   429  Too Many Requests -- HTTP's own definition (RFC 6585 section 4) is the server
+#        "refusing to service" the request under rate limiting.
 #
-# All four are checks Google's API gateway performs before a request ever reaches the
-# service that would create a draft, which is what makes a response provable rather than
-# merely plausible. A 5xx is deliberately excluded: it can mean the service accepted the
-# request and then failed while creating it, so a response existing is not proof nothing
-# did. An unrecognized status is excluded for the same reason -- this adapter does not
-# guess what an unfamiliar code means. Anything not in this set stays an ordinary
-# GmailError, which the caller treats as an unknown outcome, never as a proven rejection.
+# Each of these four is, by the definition above, a request the server declined to carry
+# out at all, not one it attempted and then failed partway through. A 5xx is deliberately
+# excluded: nothing in HTTP's definition of a server error says the request was not
+# carried out, so a response existing there is not proof nothing was. An unrecognized
+# status is excluded for the same reason -- this adapter does not guess what an unfamiliar
+# code means. Anything not in this set stays an ordinary GmailError, which the caller
+# treats as an unknown outcome, never as a proven rejection.
 REJECTED_CREATE_STATUSES = frozenset({400, 401, 403, 429})
 
 

@@ -330,30 +330,43 @@ they drift the first time only one is corrected.
 
 ## Provider rejection vs. an uncertain write
 
-`create()` can fail in three ways, and only two of them were distinguished before this
-work. A local refusal (above) never crosses the write boundary at all. Past that boundary,
-most failures are genuinely unknown -- a timeout, a connection reset, a malformed success
-body all leave open the possibility that Gmail created the draft anyway, so they are
-recorded as `uncertain` and left for reconciliation. But a narrow set of Gmail's own
-responses to the create request *prove*, rather than merely suggest, that nothing was
-created:
+A draft attempt can fail in three ways, and only two of them were distinguished before this
+work. **The dividing line is the draft-create request, not "was anything contacted."** A
+read-only identity check (above) can still happen ahead of a refusal -- it proves whose
+mailbox a credential belongs to, and reserves nothing -- so REFUSED means only that no
+draft-create request was sent by this invocation, never that nothing was contacted at all.
+Past that line, most failures are genuinely unknown -- a timeout, a connection reset, a
+malformed success body all leave open the possibility that Gmail created the draft anyway,
+so they are recorded as `uncertain` and left for reconciliation. But a narrow set of Gmail's
+own responses to the create request *prove*, rather than merely suggest, that it did not
+succeed:
 
 ```
-create()
+attempt to draft
   │
-  ├─ never contacted anything           → DraftRefused          (certain: nothing sent)
-  ├─ contacted; response proves no draft → ProviderRejected      (certain: nothing created)
-  └─ contacted; outcome unknown          → ordinary exception    (uncertain: reconcile)
+  ├─ no draft-create request sent        → DraftRefused       (certain: nothing created;
+  │                                                             a read-only identity check
+  │                                                             may still have happened)
+  ├─ draft-create request sent;
+  │  response proves it failed           → ProviderRejected   (certain: nothing created)
+  └─ draft-create request sent;
+     outcome unknown                     → ordinary exception (uncertain: reconcile)
 ```
 
 **The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403, 429}` in
-`gmail_draft.py`. Each is a check Google's API gateway performs *before* a request is ever
-routed to the service that would create a draft -- malformed request, rejected token,
-insufficient grant, exhausted quota -- which is what makes the response provable rather
-than merely plausible. A 5xx is deliberately excluded: the service may have accepted the
-request and then failed while creating it, so a response existing is not proof nothing did.
-An unrecognized status is excluded for the same reason -- this adapter never guesses what an
-unfamiliar code means. Fewer proven rejections is always the safe direction to be wrong in.
+`gmail_draft.py`, grounded in what each status is documented to mean in general -- never in
+an assumption about Gmail's internal request-handling implementation, which is not public.
+HTTP's own definitions say the server "will not process" a malformed request (400, RFC 7231
+§6.5.1), the request lacks valid credentials (401, RFC 7235 §3.1), the server "refuses to
+authorize" the request (403, RFC 7231 §6.5.3, and on this API documented for more than one
+cause -- an insufficient grant, a domain policy, or a quota/rate-limit rejection), and the
+server is "refusing to service" the request under rate limiting (429, RFC 6585 §4). Each is,
+by that definition, a request the server declined to carry out at all, which is what makes
+the response provable rather than merely plausible. A 5xx is deliberately excluded: nothing
+in HTTP's definition of a server error says the request was not carried out, so a response
+existing there is not proof nothing was. An unrecognized status is excluded for the same
+reason -- this adapter never guesses what an unfamiliar code means. Fewer proven rejections
+is always the safe direction to be wrong in.
 
 **Retry without discarding history.** A proven rejection releases the `draft_intents` row
 the attempt reserved -- `repository.reject()` deletes it, exactly as a local refusal never
@@ -382,9 +395,10 @@ first attempt would be.
 **Reported, not silently retried.** The CLI reports `PROVIDER_REJECTED`, sharing REFUSED's
 exit code (1) and its safety -- nothing was created, and retrying once the cause is fixed
 needs no reconciliation -- but under its own name, because it is a different fact: a refusal
-never contacted the provider, while a rejection is what the provider itself proved once
-contacted. No automatic retry exists or is planned; the operator corrects the cause (a bad
-token, an insufficient grant, exhausted quota) and re-invokes `draft` explicitly.
+means no draft-create request was ever sent, while a rejection means one was sent and the
+provider's own response proved it failed. No automatic retry exists or is planned; the
+operator corrects the cause (a bad token, an insufficient grant, a domain policy, exhausted
+quota) and re-invokes `draft` explicitly.
 
 ## Correcting a source
 

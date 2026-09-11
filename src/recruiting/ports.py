@@ -26,21 +26,25 @@ class DraftRefused(RuntimeError):
 
 
 class ProviderRejected(RuntimeError):
-    """The provider was contacted for this write, and its response proves none was created.
+    """The provider was sent a draft-create request, and its response proves none was made.
 
-    A third outcome, distinct from both of the others `create()` can produce:
+    A third outcome, distinct from both of the others an attempt to draft can produce:
 
-      DraftRefused      never contacted anything; certain by construction.
-      ProviderRejected  contacted, and the response itself proves no draft exists.
-      (anything else)   contacted, and the outcome is genuinely unknown -- uncertain.
+      DraftRefused      no draft-create request was sent by this invocation; certain by
+                         construction. A read-only request made solely to verify identity
+                         may still have happened -- see DraftRefused's own note on this.
+      ProviderRejected  a draft-create request was sent, and the response itself proves
+                         it did not succeed.
+      (anything else)   a draft-create request was sent, and the outcome is genuinely
+                         unknown -- uncertain.
 
     That middle case only exists where a provider's own documented contract guarantees a
     response proves non-creation: an authentication, authorization or request-validation
-    rejection that its API is specified to return before any write is attempted, never
-    merely because *a* response came back with a failing status. A provider that cannot
-    make that case must leave the failure as an ordinary exception and let it fall to the
-    uncertain path -- fewer proven rejections is always the safe direction to be wrong in,
-    for exactly the reason DraftRefused's own certainty matters.
+    rejection that its API is specified to mean the request was declined rather than
+    carried out, never merely because *a* response came back with a failing status. A
+    provider that cannot make that case must leave the failure as an ordinary exception
+    and let it fall to the uncertain path -- fewer proven rejections is always the safe
+    direction to be wrong in, for exactly the reason DraftRefused's own certainty matters.
 
     Nothing here retries automatically. The approval this draft was claimed against is
     unaffected and untouched; what changes is that the durable intent this attempt

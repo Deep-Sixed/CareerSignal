@@ -9,7 +9,7 @@ The commands an operator reads — `opportunities`, `opportunity`, `status`, `ap
 | Reported | Exit | Means |
 |---|---|---|
 | `ACCEPTED` | 0 | The thing asked for happened. |
-| `REFUSED` | 1 | It did not happen, and this machine decided that without ever contacting a provider. This invocation wrote and reserved nothing new; correct what the refusal names and ask again. |
+| `REFUSED` | 1 | This invocation never sent a draft-create request — though a read-only identity check may still have happened — and reserved nothing new. Correct what the refusal names and ask again. |
 | `PROVIDER_REJECTED` | 1 | A provider was contacted, and its own response proves the write did not happen either. Shares REFUSED's exit code and its safety — nothing was created, retrying once the cause is fixed is safe — but is reported under its own name because it is a different fact: the provider was actually asked. |
 | `UNCERTAIN` | 3 | A provider was contacted and the outcome is unknown. Reconcile; never repeat the write. |
 
