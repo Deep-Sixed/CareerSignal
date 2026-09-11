@@ -328,6 +328,87 @@ exactly as before, because past that point the outcome genuinely is unknown.
 same rules a second time. Two implementations of one rule are two sources of truth, and
 they drift the first time only one is corrected.
 
+## Provider rejection vs. an uncertain write
+
+A draft attempt can fail in three ways, and only two of them were distinguished before this
+work. **The dividing line is the draft-create request, not "was anything contacted."** A
+read-only identity check (above) can still happen ahead of a refusal -- it proves whose
+mailbox a credential belongs to, and reserves nothing -- so REFUSED means only that no
+draft-create request was sent by this invocation, never that nothing was contacted at all.
+Past that line, most failures are genuinely unknown -- a timeout, a connection reset, a
+malformed success body all leave open the possibility that Gmail created the draft anyway,
+so they are recorded as `uncertain` and left for reconciliation. But a narrow set of Gmail's
+own responses to the create request *prove*, rather than merely suggest, that it did not
+succeed:
+
+```
+attempt to draft
+  │
+  ├─ no draft-create request sent        → DraftRefused       (certain: nothing created;
+  │                                                             a read-only identity check
+  │                                                             may still have happened)
+  ├─ draft-create request sent;
+  │  response proves it failed           → ProviderRejected   (certain: nothing created)
+  └─ draft-create request sent;
+     outcome unknown                     → ordinary exception (uncertain: reconcile)
+```
+
+**The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403}` in
+`gmail_draft.py`, grounded in what each status is documented to mean in general -- never in
+an assumption about Gmail's internal request-handling implementation, which is not public.
+HTTP's own definitions state non-application directly rather than leaving it to be inferred:
+400 is "the server cannot or will not process the request" due to a perceived client error
+(RFC 7231 §6.5.1); 401 is "the request has not been applied because it lacks valid
+authentication credentials for the target resource" (RFC 7235 §3.1); 403 is "the server
+understood the request but refuses to authorize it" (RFC 7231 §6.5.3, and on this API
+documented for more than one cause -- an insufficient grant, a domain policy, or a
+quota/rate-limit rejection). Each is, by that definition, a request the server declined to
+carry out at all, which is what makes the response provable rather than merely plausible.
+
+429 is deliberately excluded, despite being a candidate for the same reason as the others.
+RFC 6585 §4 says only that "the user has sent too many requests in a given amount of time,"
+optionally with a `Retry-After` header -- it does not say the flagged request was not
+applied or not processed, the way 400 and 401 do. Gmail's own error guide documents 429 as
+resolved by retrying, without an atomic guarantee that a `users.drafts.create` request
+answered with 429 could not have committed before the error was returned. Absent that
+guarantee, 429 stays on the uncertain path alongside a 5xx: nothing in HTTP's definition of
+either says the request was not carried out, so a response existing there is not proof
+nothing was. An unrecognized status is excluded for the same reason -- this adapter never
+guesses what an unfamiliar code means. Fewer proven rejections is always the safe direction
+to be wrong in.
+
+**Retry without discarding history.** A proven rejection releases the `draft_intents` row
+the attempt reserved -- `repository.reject()` deletes it, exactly as a local refusal never
+reserves one -- while the rejection itself is written to the append-only audit log as
+`draft_rejected`, durable evidence distinct from the row that only ever describes the
+current attempt. Deleting the row rather than adding a new state to it needed no schema
+change, and it means an explicit, corrected `draft` invocation can claim again immediately:
+
+```
+approve → claim → create() → 403 → reject() (row deleted, audit kept) → approval untouched
+                                                                              │
+operator corrects the cause, invokes draft again ──────────────────────────┘
+                                                                              │
+                                                                claim() re-checks content,
+                                                                wording, addressing and
+                                                                provider/mailbox binding --
+                                                                exactly as any other claim
+```
+
+Nothing here re-derives claim()'s existing checks: they already refuse a retry whose
+recipient, wording, provider or mailbox moved since the approval, the same guard that
+protects every other retry path. A rejection never loosens the provider/mailbox binding
+from migration 0007 -- a retry against a different destination is refused exactly as a
+first attempt would be.
+
+**Reported, not silently retried.** The CLI reports `PROVIDER_REJECTED`, sharing REFUSED's
+exit code (1) and its safety -- nothing was created, and retrying once the cause is fixed
+needs no reconciliation -- but under its own name, because it is a different fact: a refusal
+means no draft-create request was ever sent, while a rejection means one was sent and the
+provider's own response proved it failed. No automatic retry exists or is planned; the
+operator corrects the cause (a bad token, an insufficient grant, a domain policy, exhausted
+quota) and re-invokes `draft` explicitly.
+
 ## Correcting a source
 
 An opportunity can arrive in more than one message, and replay reuses the review when the

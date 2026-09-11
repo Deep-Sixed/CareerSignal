@@ -6,9 +6,11 @@ The operator commands -- opportunities, opportunity, status, approve, reject, dr
 reconcile -- are read by a person. They print text by default and structured output behind
 `--json`, and the ones that act report an outcome:
 
-    ACCEPTED  (exit 0)  the thing asked for happened
-    REFUSED   (exit 1)  it did not happen, and this machine decided that; reevaluate
-    UNCERTAIN (exit 3)  a provider was contacted and the outcome is unknown; reconcile
+    ACCEPTED          (exit 0)  the thing asked for happened
+    REFUSED           (exit 1)  it did not happen, and this machine decided that; reevaluate
+    PROVIDER_REJECTED (exit 1)  a provider was contacted and its response proves it did not
+                                happen either; correct the cause and retry, same as REFUSED
+    UNCERTAIN         (exit 3)  a provider was contacted and the outcome is unknown; reconcile
 
 Refused and uncertain are never collapsed into one failure. They call for different moves:
 a refusal means this invocation wrote no draft and reserved no new durable intent -- though
@@ -16,6 +18,13 @@ verifying a Gmail identity ahead of a refusal may have read the mailbox's profil
 draft intent from an earlier invocation may already exist and stays exactly as it was -- and
 the operator can correct and try again, while an uncertain result means something may have
 been created and only reconciliation can say.
+
+Provider-rejected shares REFUSED's exit code and its safety -- nothing was created, and
+retrying once the cause is fixed is safe, with no reconciliation needed -- but is reported
+under its own name because it is not the same fact: a refusal never contacted the provider
+at all, while a rejection is what the provider itself proved once contacted. A provider may
+only report this when its response is documented to mean the write never happened; anything
+it cannot prove that way is left as ordinary UNCERTAIN.
 
 Argparse keeps exit 2 for a command that was written wrongly -- a missing argument, an
 unknown id, a filter that cannot mean anything. That is a different thing from the system
@@ -45,14 +54,19 @@ from communications.message import MAX_MESSAGE_BYTES, Message
 from data.repository import Repository
 from data.store import database_path, migrate, verify_contract
 from recruiting.models import Profile
-from recruiting.ports import DraftRefused
+from recruiting.ports import DraftRefused, ProviderRejected
 from recruiting.status import StatusConflict
 from system.demo import golden_workflow
 from system.views import detail, outcome, table
 from system.workflow import Workflow
 
-ACCEPTED, REFUSED, UNCERTAIN = "accepted", "refused", "uncertain"
-CODES = {ACCEPTED: 0, REFUSED: 1, UNCERTAIN: 3}
+ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
+    "accepted",
+    "refused",
+    "provider_rejected",
+    "uncertain",
+)
+CODES = {ACCEPTED: 0, REFUSED: 1, PROVIDER_REJECTED: 1, UNCERTAIN: 3}
 # Written out rather than built from the command name: "reject" + "d" is not a word, and a
 # message the operator reads should not be assembled by string arithmetic.
 DECIDED = {"approve": "approved", "reject": "rejected"}
@@ -152,6 +166,20 @@ def attempted(workflow, repository, args) -> dict:
             "next": "The existing draft intent is unaffected; correct the credential and try again."
             if state
             else "Nothing was created and nothing was sent; the approval still stands.",
+        }
+    except ProviderRejected as exc:
+        # Proven, not merely unknown: the provider was contacted and its own response is
+        # evidence nothing was created. The workflow has already released the durable
+        # intent this attempt reserved and recorded the rejection, so there is nothing
+        # left pending here -- the approval is untouched, and retrying once the cause is
+        # fixed is exactly as safe as after an ordinary refusal, just not the same fact.
+        return {
+            **common,
+            "outcome": PROVIDER_REJECTED,
+            "state": None,
+            "receipt": None,
+            "message": str(exc),
+            "next": "Nothing was created; correct the cause and run draft again.",
         }
     except (ValueError, KeyError) as exc:
         # Raised before any intent is reserved: missing approval, a changed review, a

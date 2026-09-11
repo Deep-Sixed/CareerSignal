@@ -34,6 +34,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from communications.gmail import GMAIL_HOST, HEADER_SAFE, GmailError
 from communications.message import MAX_MESSAGE_BYTES
 from recruiting.ports import DraftRefused as PortDraftRefused
+from recruiting.ports import ProviderRejected as PortProviderRejected
 
 API_ROOT = f"https://{GMAIL_HOST}/gmail/v1/"
 COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
@@ -122,6 +123,19 @@ class DraftRefused(PortDraftRefused, GmailError):
     identity before anything is claimed or looked up. A profile read is not a draft write,
     so a refusal reached after one is exactly as certain as one reached without it --
     nothing was created and nothing was sent.
+    """
+
+
+class ProviderRejected(PortProviderRejected, GmailError):
+    """The draft-create request was sent, and Gmail's response proves it did not succeed.
+
+    Raised only for the status codes in REJECTED_CREATE_STATUSES: the ones whose own
+    documented meaning -- not an assumption about Gmail's internal implementation -- is
+    that the request itself was declined rather than acted on. See that set's own comment
+    for exactly what is and is not claimed. Every other failure -- a 5xx, an unrecognized
+    status, a malformed success body, a transport error -- is left as a plain GmailError,
+    which is the uncertain path. Carries the port's rejection type so a caller can tell
+    this apart from both a certain local refusal and a genuinely unknown outcome.
     """
 
 
@@ -374,6 +388,57 @@ def _failure(status: int) -> str:
     return f"Gmail draft request failed with HTTP {status}"
 
 
+def _create_rejected_failure(status: int) -> str:
+    if status == 400:
+        return "Gmail rejected the draft request as invalid (400); nothing was created"
+    if status == 401:
+        return (
+            "Gmail rejected the access token (401); nothing was created; "
+            "reauthorize with the compose scope"
+        )
+    if status == 403:
+        return (
+            "Gmail refused the draft (403); nothing was created; "
+            "this can mean the grant is insufficient, a domain policy forbids it, "
+            "or a quota was exceeded"
+        )
+    raise AssertionError(f"{status} is not a definite Gmail create rejection")
+
+
+# The narrowest set of Gmail responses to a draft-create request that can be *proven* to
+# mean nothing was created, not merely a status that happens to indicate failure. Grounded
+# in what each status is documented to mean generally, never in an assumption about
+# Gmail's internal request-handling implementation, which is not public:
+#
+#   400  Bad Request -- HTTP's own definition (RFC 7231 section 6.5.1) is that the server
+#        "cannot or will not process the request" due to a perceived client error. A
+#        request that will not be processed cannot have created anything.
+#   401  Unauthorized -- HTTP's own definition (RFC 7235 section 3.1) is that "the request
+#        has not been applied because it lacks valid authentication credentials for the
+#        target resource" -- non-application stated directly, not inferred. Gmail's own
+#        error guide documents this status for an invalid or expired access token.
+#   403  Forbidden -- HTTP's own definition (RFC 7231 section 6.5.3) is that "the server
+#        understood the request but refuses to authorize it". Gmail's own error guide
+#        uses this status for more than one cause -- an insufficient grant, a domain
+#        policy, or (on this API) a quota or rate-limit rejection -- so the message above
+#        does not guess which; every one of those causes is still the server refusing to
+#        authorize the request, not attempting and losing track of the result.
+#
+# 429 Too Many Requests is deliberately excluded, though it was included in an earlier
+# version of this set. RFC 6585 section 4 says only that "the user has sent too many
+# requests in a given amount of time" and may include a Retry-After header -- it does not
+# state that the flagged request was not applied or not processed, the way 400's "will not
+# process" and 401's "has not been applied" do. Gmail's own error guide likewise documents
+# 429 as resolved by retrying, without an atomic guarantee that a users.drafts.create
+# request answered with 429 could not have committed before the error was returned. Absent
+# that guarantee, 429 stays on the uncertain path like a 5xx: nothing in what is publicly
+# documented says the request was not carried out, so a response existing there is not
+# proof nothing was. An unrecognized status is excluded for the same reason -- this adapter
+# does not guess what an unfamiliar code means. Anything not in this set stays an ordinary
+# GmailError, which the caller treats as an unknown outcome, never as a proven rejection.
+REJECTED_CREATE_STATUSES = frozenset({400, 401, 403})
+
+
 def _identity_failure(status: int) -> str:
     if status == 401:
         return (
@@ -492,6 +557,11 @@ class GmailDrafts:
         status, response = self._create(
             url, self._headers(**{"Content-Type": "application/json"}), request_body
         )
+        # Classified before the ordinary success/failure parsing below, and only for the
+        # narrow set of statuses that prove nothing was created: every other status,
+        # success included, still goes through _payload() exactly as before.
+        if status in REJECTED_CREATE_STATUSES:
+            raise ProviderRejected(_create_rejected_failure(status))
         return "gmail-draft:" + self._draft_id(self._payload(status, response))
 
     def _metadata_intent(self, draft_id: str) -> str | None:

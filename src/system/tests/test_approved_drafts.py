@@ -21,7 +21,7 @@ from communications.message import Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from recruiting.ports import DraftRefused
+from recruiting.ports import DraftRefused, ProviderRejected
 from system import cli
 from system.workflow import Workflow
 
@@ -73,15 +73,16 @@ class Recorder:
     say so.
     """
 
-    def __init__(self, created=None, identity=MAILBOX):
+    def __init__(self, created=None, identity=MAILBOX, create_status=200):
         self.created = created or {"id": "draft123"}
         self.identity = identity
+        self.create_status = create_status
         self.creates = []
         self.reads = []
 
     def create(self, url, headers, body):
         self.creates.append((url, body))
-        return 200, json.dumps(self.created).encode()
+        return self.create_status, json.dumps(self.created).encode()
 
     def read(self, url, headers):
         self.reads.append(url)
@@ -189,6 +190,44 @@ def test_a_hostile_header_is_refused_without_stranding_the_review(tmp_path, kind
     with pytest.raises(DraftRefused):
         workflow.draft(review)
     assert recorder.creates == []
+
+
+def test_a_refusal_can_follow_provider_contact(tmp_path):
+    """REFUSED means no draft-create request was sent, never that nothing was contacted.
+
+    #15 established that a read-only identity check can precede a refusal (proving whose
+    mailbox a credential belongs to is a GET, made before anything is claimed or written).
+    This is the regression that guards it: the identity read genuinely happens here, it
+    genuinely fails, and the result is still DraftRefused with the approval untouched --
+    not proof that a refusal implies no provider contact ever occurred.
+    """
+
+    reads = []
+
+    def failing_identity_read(url, headers):
+        reads.append(url)
+        if url.endswith("/profile"):
+            return 500, b"{}"
+        return 200, json.dumps({}).encode()
+
+    path = tmp_path / "db"
+    recorder = Recorder()
+    workflow, review = ingest(path)
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=failing_identity_read
+    )
+    approve(workflow, review)
+    with pytest.raises(DraftRefused):
+        workflow.draft(review)
+
+    # The point of this test: contact happened even though the outcome was a refusal.
+    assert any(url.endswith("/profile") for url in reads), "identity was never checked"
+    assert recorder.creates == [], "a refused draft must still not create anything"
+    # Nothing was reserved, so there is nothing to unwind and nothing to reconcile --
+    # exactly as certain as a refusal reached without any contact at all.
+    assert workflow.repository.intent(review) is None
+    assert "draft_refused" in workflow.repository.audit(review)
+    assert workflow.repository.authorization(review)["approved"] is True
 
 
 def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
@@ -724,3 +763,188 @@ def test_a_changed_review_is_refused_at_the_command_line_with_a_reason(
     with store.connection(path) as conn, store.transaction(conn):
         conn.execute("UPDATE reviews SET draft='different wording' WHERE id=?", (review,))
     assert "approve it again" in refused(monkeypatch, capsys, "draft", review, "--db", str(path))
+
+
+# --- a proven provider rejection is not the same fact as an unknown outcome --------------
+
+
+def test_a_definite_rejection_releases_the_claim_and_a_corrected_retry_succeeds(tmp_path):
+    """The core #16 case: proven non-creation, not uncertainty, and a safe explicit retry."""
+    recorder = Recorder(create_status=403)
+    workflow, review = ingest(path := tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+
+    with pytest.raises(ProviderRejected):
+        workflow.draft(review)
+    assert len(recorder.creates) == 1
+    # Not uncertain: nothing is pending, and there is nothing to reconcile.
+    assert workflow.repository.intent(review) is None
+    assert "draft_rejected" in workflow.repository.audit(review)
+    # The approval survived the rejection untouched.
+    assert workflow.repository.authorization(review)["approved"] is True
+
+    # Corrected (here, simply retried against a provider that now accepts it) and drafted
+    # again, with no new approval and no reconciliation.
+    recorder.create_status = 200
+    receipt = workflow.draft(review)
+    assert receipt == "gmail-draft:draft123"
+    assert len(recorder.creates) == 2
+    assert workflow.repository.intent(review) == ("confirmed", receipt)
+
+
+def test_a_definite_rejection_never_retries_automatically(tmp_path):
+    """One claim, one create, one outcome: reject() never calls the provider again."""
+    recorder = Recorder(create_status=401)
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+    with pytest.raises(ProviderRejected):
+        workflow.draft(review)
+    assert len(recorder.creates) == 1
+
+
+def test_a_definite_rejection_still_needs_reapproval_if_the_target_moved(tmp_path):
+    """Old approval cannot migrate onto material that changed after the rejection."""
+    recorder = Recorder(create_status=403)
+    workflow, review = ingest(tmp_path / "db", sender="jane@example.com")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+    with pytest.raises(ProviderRejected):
+        workflow.draft(review)
+
+    workflow.intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m2",
+            sender="bob@example.com",
+            subject="A role for you",
+            text=JOB_TEXT,
+        )
+    )
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        workflow.draft(review)
+    assert len(recorder.creates) == 1
+
+
+def test_a_definite_rejection_still_refuses_a_different_destination_on_retry(tmp_path):
+    """#15's binding is not loosened by #16: the destination must still match."""
+    recorder = Recorder(create_status=403)
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+    with pytest.raises(ProviderRejected):
+        workflow.draft(review)
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, "someone-else@example.com"),
+        create=recorder.create,
+        read=recorder.read,
+    )
+    with pytest.raises(ValueError, match="does not match the approval"):
+        workflow.draft(review)
+    assert len(recorder.creates) == 1
+
+
+@pytest.mark.parametrize("status", [500, 502, 418])
+def test_an_unproven_create_failure_stays_uncertain_not_rejected(tmp_path, status):
+    """Ambiguous provider errors fail conservative: uncertain, never a proven rejection."""
+    recorder = Recorder(create_status=status)
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+    with pytest.raises(gmail_draft.GmailError) as caught:
+        workflow.draft(review)
+    assert not isinstance(caught.value, ProviderRejected)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+
+def test_a_transport_break_during_create_stays_uncertain_not_rejected(tmp_path):
+    """The request may have already left. Only a response can prove non-creation."""
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    approve(workflow, review)
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+
+def test_the_cli_reports_a_definite_rejection_and_a_corrected_retry_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end through the real CLI path: only the network transport is a double."""
+    path = tmp_path / "db"
+    _, review = ingest(path)
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, TOKEN)
+    create_status = {"value": 403}
+
+    def fake_perform(prepared):
+        if prepared.get_method() == "POST":
+            return create_status["value"], json.dumps({"id": "draft123"}).encode()
+        return 200, json.dumps({"emailAddress": MAILBOX}).encode()
+
+    monkeypatch.setattr(gmail_draft, "_perform", fake_perform)
+    run(
+        monkeypatch,
+        capsys,
+        "approve",
+        review,
+        "--actor",
+        "operator",
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+    out = refused(
+        monkeypatch,
+        capsys,
+        "draft",
+        review,
+        "--provider",
+        "gmail",
+        "--mailbox",
+        MAILBOX,
+        "--db",
+        str(path),
+    )
+    assert out.startswith("PROVIDER_REJECTED")
+    assert Repository(path).intent(review) is None
+    assert "draft_rejected" in Repository(path).audit(review)
+
+    create_status["value"] = 200
+    printed = json.loads(
+        run(
+            monkeypatch,
+            capsys,
+            "draft",
+            review,
+            "--provider",
+            "gmail",
+            "--mailbox",
+            MAILBOX,
+            "--json",
+            "--db",
+            str(path),
+        )
+    )
+    assert printed["outcome"] == "accepted"
+    assert printed["receipt"] == "gmail-draft:draft123"

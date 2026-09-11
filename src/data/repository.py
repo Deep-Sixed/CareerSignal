@@ -250,7 +250,8 @@ class Repository:
         # and audit ids are append-only, so the latest one is the current action state.
         latest = conn.execute(
             "SELECT event FROM audit WHERE review_id=? AND "
-            "event IN ('approved','rejected','draft_refused') ORDER BY id DESC LIMIT 1",
+            "event IN ('approved','rejected','draft_refused','draft_rejected') "
+            "ORDER BY id DESC LIMIT 1",
             (review_id,),
         ).fetchone()
         return {
@@ -277,10 +278,14 @@ class Repository:
                 and decision[4]
                 and decision[5]
             ),
-            # Refused and uncertain are different facts and are never collapsed. A refusal
-            # means nothing was attempted; an intent means something was, and its outcome
-            # is a fact about that attempt. So an intent wins absolutely: the refusal
-            # describes a draft that was never proposed, not the current state.
+            # Refused, rejected and uncertain are three different facts and are never
+            # collapsed. A refusal means nothing was attempted; a rejection means the
+            # provider was contacted and proved nothing was created, which is why
+            # reject() releases the row the same way a settled attempt never reserves one
+            # in the refusal case -- either way there is nothing left pending. An intent
+            # means something is still open, and its outcome is a fact about that attempt,
+            # so an intent wins absolutely over both: they describe a draft that is not
+            # currently proposed, not the current state.
             # Whether a durable intent exists at all, taken from the row rather than
             # inferred from the state name. Once one does, decide() refuses every further
             # decision, so a reader that describes what the operator may do next has to
@@ -288,7 +293,13 @@ class Repository:
             "attempted": intent is not None,
             "draft": intent[0]
             if intent
-            else ("refused" if latest and latest[0] == "draft_refused" else "none"),
+            else (
+                "refused"
+                if latest and latest[0] == "draft_refused"
+                else "rejected"
+                if latest and latest[0] == "draft_rejected"
+                else "none"
+            ),
             "receipt": intent[1] if intent else None,
             # The destination this decision names, straight from the row. Not folded into
             # "binds": a request for a different provider or mailbox is a mismatch that
@@ -689,6 +700,38 @@ class Repository:
             )
             conn.execute(
                 "INSERT INTO audit(review_id,event) VALUES (?,?)", (review_id, "draft_" + state)
+            )
+
+    def reject(self, review_id):
+        """Record that the provider proved this attempt did not create a draft.
+
+        Deletes the draft_intents row this attempt reserved, rather than adding a new
+        state to it. draft_intents already holds only the current attempt, not its
+        history -- finish() mutates the same row's state for exactly that reason -- and
+        the audit event this writes is what makes the rejection durable, the same
+        division `refuse()` already relies on for a local refusal that never reserved a
+        row at all. The decision (the approval) is untouched, so a corrected `draft` can
+        claim again immediately if nothing it bound has changed since, or refuses again
+        through the ordinary path if it has: nothing here re-derives that, claim() already
+        owns it.
+
+        Raises if no attempting intent exists, because this is only ever called from the
+        one place that just reserved one and watched the provider refuse it -- there is
+        nothing to reject otherwise, and silently doing nothing would hide a caller bug.
+        """
+        with connection(self.path) as conn, transaction(conn):
+            prior = conn.execute(
+                "SELECT 1 FROM draft_intents WHERE review_id=? AND state='attempting'",
+                (review_id,),
+            ).fetchone()
+            if not prior:
+                raise ValueError("No attempting draft intent to reject")
+            conn.execute(
+                "DELETE FROM draft_intents WHERE review_id=? AND state='attempting'",
+                (review_id,),
+            )
+            conn.execute(
+                "INSERT INTO audit(review_id,event) VALUES (?, 'draft_rejected')", (review_id,)
             )
 
     def intent(self, review_id):

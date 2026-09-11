@@ -480,3 +480,72 @@ def test_a_legacy_intent_with_no_provider_identity_never_authorizes_another_writ
             (approved,),
         )
     assert flow.repository.intent_identity(approved) is None
+
+
+# --- a proven provider rejection releases the attempt, but not the approval -------------
+
+
+def test_rejecting_releases_the_intent_and_records_it(flow, approved):
+    flow.repository.claim(approved)
+    flow.repository.reject(approved)
+    assert flow.repository.intent(approved) is None
+    assert "draft_rejected" in flow.repository.audit(approved)
+    detail = flow.repository.opportunity(opportunity_of(flow, approved))
+    assert detail["action"]["draft"] == "rejected"
+
+
+def test_rejecting_requires_an_attempting_intent(flow, approved):
+    with pytest.raises(ValueError, match="No attempting draft intent"):
+        flow.repository.reject(approved)
+
+
+@pytest.mark.parametrize(
+    "settle",
+    [lambda r, review: r.finish(review, "controlled-x"), lambda r, review: r.finish(review, None)],
+)
+def test_rejecting_a_settled_intent_is_refused(flow, approved, settle):
+    """reject() is only ever reached from the one place that just watched a claim fail.
+
+    A confirmed or uncertain intent is a fact about an attempt that already finished; there
+    is nothing left "attempting" to prove wrong, and this is not a route to un-confirm one.
+    """
+    flow.repository.claim(approved)
+    settle(flow.repository, approved)
+    with pytest.raises(ValueError, match="No attempting draft intent"):
+        flow.repository.reject(approved)
+
+
+def test_a_rejected_attempt_can_be_claimed_again_without_reapproving(flow, approved):
+    """The approval survives a rejection, so an explicit retry needs no new decision."""
+    flow.repository.claim(approved)
+    flow.repository.reject(approved)
+    claim = flow.repository.claim(approved)
+    assert claim["claimed"] is True
+    assert flow.repository.audit(approved).count("draft_intent") == 2
+
+
+def test_a_rejected_attempt_still_refuses_a_different_destination_on_retry(flow):
+    """#15's binding survives #16 unchanged: a rejection does not loosen it."""
+    review = flow.intake("one", body())[0]
+    flow.repository.decide(
+        review,
+        approved=True,
+        actor="operator",
+        provider="gmail",
+        provider_namespace="gmail:alice@example.com",
+    )
+    flow.repository.claim(review, provider="gmail", provider_namespace="gmail:alice@example.com")
+    flow.repository.reject(review)
+    with pytest.raises(ValueError, match="Approved provider or mailbox changed"):
+        flow.repository.claim(review, provider="gmail", provider_namespace="gmail:bob@example.com")
+
+
+def test_a_rejected_attempt_needs_reapproval_if_addressing_moved_before_the_retry(flow):
+    """Old approval cannot migrate onto material that changed after the rejection."""
+    review = deliver(flow, "m1", "jane@example.com")
+    flow.repository.decide(review, approved=True, actor="operator")
+    flow.repository.claim(review)
+    flow.repository.reject(review)
+    deliver(flow, "m2", "bob@example.com")
+    with pytest.raises(ValueError, match="Addressing changed since approval"):
+        flow.repository.claim(review)

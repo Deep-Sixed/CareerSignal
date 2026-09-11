@@ -5,7 +5,7 @@ from communications.message import Message
 from data.repository import Repository
 from recruiting.extraction import PARSER_VERSION, extract, extract_records
 from recruiting.models import Profile, evaluate, fingerprint
-from recruiting.ports import DraftProvider, DraftRefused
+from recruiting.ports import DraftProvider, DraftRefused, ProviderRejected
 
 
 class Workflow:
@@ -142,6 +142,14 @@ class Workflow:
             )
             self.repository.finish(review_id, receipt)
             return receipt
+        except ProviderRejected:
+            # Proven, not merely unknown: the provider was contacted and its response is
+            # evidence nothing was created, so this is not the uncertain path below. The
+            # intent this claim reserved is released -- durably recorded as a rejection,
+            # not left standing -- so a corrected `draft` can claim again without
+            # touching the approval, which is untouched by this failing.
+            self.repository.reject(review_id)
+            raise
         except BaseException:
             # Past this point the provider might have succeeded, so the outcome genuinely
             # is unknown. Never automatically repeat this write.

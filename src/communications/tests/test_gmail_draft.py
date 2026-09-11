@@ -18,6 +18,7 @@ from communications.gmail_draft import (
     GmailComposeCredentials,
     GmailDrafts,
     GmailError,
+    ProviderRejected,
     compose,
     namespace_for,
     profile_url,
@@ -515,6 +516,67 @@ def test_a_refused_create_never_reports_a_receipt(status):
     with pytest.raises(GmailError) as caught:
         drafts.create(KEY, BODY, to="jane@example.com", subject_line="role")
     assert TOKEN not in str(caught.value)
+
+
+# --- proven rejection vs. a genuinely unknown outcome -----------------------------------
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_a_provable_rejection_status_raises_the_specific_exception(status):
+    """The narrow set: Gmail's response itself proves nothing was created.
+
+    Parametrized on a literal list, not on REJECTED_CREATE_STATUSES itself -- a test
+    that reads the value it is meant to guard would shrink right along with a mutation
+    that narrowed the set, and never notice the narrowing.
+    """
+    recorder = Recorder(status=status)
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    with pytest.raises(ProviderRejected) as caught:
+        drafts.create(KEY, BODY, to="jane@example.com", subject_line="role")
+    assert str(status) in str(caught.value)
+    assert TOKEN not in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [402, 404, 409, 422, 429, 500, 502, 503, 504])
+def test_an_unproven_status_stays_an_ordinary_uncertain_failure(status):
+    """Everything outside the narrow set is left ambiguous, never guessed at.
+
+    A 5xx in particular: Gmail may have accepted the request and then failed while
+    creating the draft, so a response existing here is not proof nothing did. 429 is here
+    too: RFC 6585 says only that too many requests were sent, never that this particular
+    request was not applied, so it is not strong enough to prove non-creation.
+    """
+    recorder = Recorder(status=status)
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    with pytest.raises(GmailError) as caught:
+        drafts.create(KEY, BODY, to="jane@example.com", subject_line="role")
+    assert not isinstance(caught.value, ProviderRejected)
+
+
+def test_a_transport_failure_after_the_request_is_sent_is_never_a_proven_rejection():
+    """The request may have already left. Only a response can prove non-creation.
+
+    No response exists here at all, so there is nothing to classify: this never reaches
+    the point in create() that decides between a proven rejection and an ordinary
+    failure, exactly as it never reaches _payload() either.
+    """
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    drafts = GmailDrafts(credentials(), create=explode, read=Recorder().read)
+    with pytest.raises(OSError) as caught:
+        drafts.create(KEY, BODY, to="jane@example.com", subject_line="role")
+    assert not isinstance(caught.value, ProviderRejected)
+
+
+def test_a_rejected_create_never_posts_more_than_the_one_request():
+    """A provable rejection is still read from the first response, not retried."""
+    recorder = Recorder(status=403)
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    with pytest.raises(ProviderRejected):
+        drafts.create(KEY, BODY, to="jane@example.com", subject_line="role")
+    assert len(recorder.creates) == 1
 
 
 @pytest.mark.parametrize("payload", [{}, {"id": ""}, {"id": "../../messages/send"}, {"id": 7}])

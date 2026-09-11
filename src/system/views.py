@@ -76,6 +76,7 @@ STALE = "stale: does not bind the material below"
 DRAFTS = {
     "none": "not attempted",
     "refused": "refused; nothing was created",
+    "rejected": "provider rejected; nothing was created",
     "attempting": "attempting; no outcome recorded yet",
     "uncertain": "uncertain; reconciliation required",
     "confirmed": "created",
