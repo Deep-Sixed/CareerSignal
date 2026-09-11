@@ -216,7 +216,7 @@ class Repository:
         )
 
     @staticmethod
-    def _action(conn, review_id) -> dict:
+    def _action(conn, review_id, binding) -> dict:
         """What has been decided and attempted for this review, in the operator's terms.
 
         Reporting only. The write paths decide for themselves whether an action is still
@@ -224,9 +224,17 @@ class Repository:
         is what has happened, not a prediction of what would be allowed next.
         """
         if review_id is None:
-            return {"decision": None, "actor": None, "draft": "none", "receipt": None}
+            return {
+                "decision": None,
+                "actor": None,
+                "binds": None,
+                "attempted": False,
+                "draft": "none",
+                "receipt": None,
+            }
         decision = conn.execute(
-            "SELECT approved,actor FROM decisions WHERE review_id=?", (review_id,)
+            "SELECT approved,actor,addressing_digest,draft_digest FROM decisions WHERE review_id=?",
+            (review_id,),
         ).fetchone()
         intent = conn.execute(
             "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
@@ -245,14 +253,60 @@ class Repository:
         return {
             "decision": None if decision is None else ("approved" if decision[0] else "rejected"),
             "actor": decision[1] if decision else None,
+            # Whether the recorded decision binds the material being shown beside it. A
+            # later message can move the recipient and subject without touching anything
+            # else, and the decision row stays exactly as it was recorded -- correctly, it
+            # is the record of what was approved. Reporting it as current next to material
+            # it does not bind would tell the operator they have authorized something they
+            # have not. Compared against the same binding the packet was read from, so the
+            # two describe one moment. A decision predating the addressing binding carries
+            # an empty digest, which no real digest equals, so it reads as not binding.
+            "binds": None
+            if decision is None
+            else (
+                decision[2] == binding["addressing"]["digest"]
+                and decision[3] == binding["draft_digest"]
+            ),
             # Refused and uncertain are different facts and are never collapsed. A refusal
             # means nothing was attempted; an intent means something was, and its outcome
             # is a fact about that attempt. So an intent wins absolutely: the refusal
             # describes a draft that was never proposed, not the current state.
+            # Whether a durable intent exists at all, taken from the row rather than
+            # inferred from the state name. Once one does, decide() refuses every further
+            # decision, so a reader that describes what the operator may do next has to
+            # know this without keeping its own copy of which states imply it.
+            "attempted": intent is not None,
             "draft": intent[0]
             if intent
             else ("refused" if latest and latest[0] == "draft_refused" else "none"),
             "receipt": intent[1] if intent else None,
+        }
+
+    @staticmethod
+    def _bound(review_id, binding) -> dict | None:
+        """Exactly the material an approval binds, read the way the approval reads it.
+
+        Deliberately built from _binding(), the same statement decide() and claim() bind
+        and re-verify from, rather than assembled from separate lookups. The operator has
+        to be shown what will actually be authorized: a view that reconstructed the
+        recipient by its own route could agree with the write path today and drift from it
+        later, and the drift would be invisible precisely where it matters most.
+
+        The wording comes from the reviews.draft column for the same reason. The payload
+        carries a copy of it, written from the same value at intake, but the copy is not
+        what the approval's draft digest is taken over.
+
+        Returns None when the opportunity has no current review, which is also when there
+        is nothing an approval could bind.
+        """
+        if review_id is None:
+            return None
+        return {
+            "review": review_id,
+            "source": binding["addressing"]["source"],
+            "to": binding["addressing"]["to"],
+            "subject": binding["addressing"]["subject"],
+            "wording": binding["draft"],
         }
 
     def opportunity(self, opportunity_id) -> dict:
@@ -270,11 +324,18 @@ class Repository:
                 "WHERE opportunity_id=? ORDER BY id",
                 (opportunity_id,),
             ).fetchall()
-            action = self._action(conn, summary["review"])
+            # One read of the binding, shared by the packet and by the approval state, so
+            # that what is shown and what is said about it describe the same moment.
+            binding = (
+                self._binding(conn, summary["review"]) if summary["review"] is not None else None
+            )
+            action = self._action(conn, summary["review"], binding)
+            bound = self._bound(summary["review"], binding)
         return {
             **summary,
             "packet": json.loads(packet[0]) if packet else None,
             "action": action,
+            "bound": bound,
             "history": [
                 {"status": h[0], "actor": h[1], "reason": h[2], "created_at": h[3], "event": h[4]}
                 for h in history

@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from system.views import CONTROL, MISSING, coverage, detail, safe, safe_lines, table
+from system.views import CONTROL, MISSING, approval, coverage, detail, safe, safe_lines, table
 
 # Every character a terminal may act on, not the handful that came to mind.
 CONTROLS = (
@@ -44,7 +44,21 @@ def row(**overrides):
         "scored": True,
         "actionable": True,
         "status_event": 12,
-        "action": {"decision": None, "actor": None, "draft": "none", "receipt": None},
+        "action": {
+            "decision": None,
+            "actor": None,
+            "binds": None,
+            "attempted": False,
+            "draft": "none",
+            "receipt": None,
+        },
+        "bound": {
+            "review": "review-1",
+            "source": "message-1",
+            "to": "recruiter@example.com",
+            "subject": "A role for you",
+            "wording": "Hello",
+        },
     }
     return {**base, **overrides}
 
@@ -130,7 +144,19 @@ def test_no_attack_sequence_survives_into_a_table(attack):
 @pytest.mark.parametrize("attack", ATTACKS)
 def test_no_attack_sequence_survives_into_a_detail_view(attack):
     record = {
-        **row(title=attack, company=attack, location=attack, url=attack),
+        **row(
+            title=attack,
+            company=attack,
+            location=attack,
+            url=attack,
+            bound={
+                "review": "review-1",
+                "source": attack,
+                "to": attack,
+                "subject": attack,
+                "wording": attack,
+            },
+        ),
         "packet": {"reasons": [attack], "draft": attack},
         "history": [
             {"status": "new", "actor": attack, "reason": attack, "created_at": 1, "event": 1}
@@ -173,7 +199,7 @@ def test_no_attack_sequence_survives_a_multiline_path(attack):
     for line in safe_lines(attack):
         assert not CONTROL.search(line), (attack, repr(line))
     record = {
-        **row(),
+        **row(bound={**row()["bound"], "wording": f"first\n{attack}\nlast"}),
         "packet": {"reasons": ["ok"], "draft": f"first\n{attack}\nlast"},
         "history": [
             {
@@ -195,7 +221,7 @@ def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
     """\\r would return the cursor and let later text overwrite what was already printed."""
     assert safe_lines("visible\rhidden") == ["visible\\x0dhidden"]
     record = {
-        **row(),
+        **row(bound={**row()["bound"], "wording": "visible\rhidden"}),
         "packet": {"reasons": ["ok"], "draft": "visible\rhidden"},
         "history": [
             {
@@ -214,7 +240,7 @@ def test_a_bare_carriage_return_cannot_overwrite_a_rendered_line():
 
 def test_a_multi_line_operator_reason_is_still_readable():
     record = {
-        **row(),
+        **row(bound=None),
         "packet": None,
         "history": [
             {
@@ -278,9 +304,71 @@ def test_the_detail_view_survives_an_opportunity_with_no_review():
             eligible=None,
             advances=None,
             status=None,
+            bound=None,
         ),
         "packet": None,
         "history": [],
     }
     rendered = detail(record)
     assert "no current review" in rendered
+
+
+APPROVED = {
+    "decision": "approved",
+    "actor": "operator",
+    "attempted": False,
+    "draft": "none",
+    "receipt": None,
+}
+
+
+def test_an_approval_that_still_binds_reads_plainly():
+    assert approval({**APPROVED, "binds": True}) == "approved by operator"
+
+
+def test_an_approval_that_no_longer_binds_says_so():
+    """The words would otherwise be true about the past and misleading about the present."""
+    stale = approval({**APPROVED, "binds": False})
+    assert stale.startswith("approved by operator")
+    assert "stale" in stale and "reapprove" in stale
+
+
+def test_a_rejection_is_never_called_stale():
+    """A rejection authorizes nothing, so there is nothing for it to have stopped binding."""
+    rejected = {**APPROVED, "decision": "rejected"}
+    assert approval({**rejected, "binds": False}) == "rejected by operator"
+
+
+def test_a_stale_approvals_actor_is_still_escaped():
+    hostile = approval({**APPROVED, "actor": f"oper{chr(0x1B)}[2Jator", "binds": False})
+    assert not CONTROL.search(hostile)
+    assert "\\x1b" in hostile
+
+
+@pytest.mark.parametrize("state", ["attempting", "uncertain", "confirmed"])
+def test_a_stale_approval_never_asks_for_a_reapproval_that_cannot_happen(state):
+    """decide() locks the decision once an intent exists, so reapproval is not available."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": state})
+    assert "stale" in stale
+    assert "reapprove" not in stale
+
+
+@pytest.mark.parametrize("state", ["attempting", "uncertain"])
+def test_an_unsettled_attempt_points_at_reconciliation(state):
+    """Reconciliation is the only route out of an attempt whose outcome is unrecorded."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": state})
+    assert "reconcile" in stale
+    assert "do not retry" in stale
+
+
+def test_a_confirmed_attempt_is_reported_as_authoritative_rather_than_recoverable():
+    """There is nothing to reconcile: the draft exists and its receipt is recorded."""
+    stale = approval({**APPROVED, "binds": False, "attempted": True, "draft": "confirmed"})
+    assert "the earlier draft stands" in stale
+    assert "reconcile" not in stale
+
+
+def test_a_stale_approval_after_a_refusal_still_asks_for_reapproval():
+    """A refusal reserves no intent, so the decision is not locked and reapproval works."""
+    stale = approval({**APPROVED, "binds": False, "attempted": False, "draft": "refused"})
+    assert "reapprove" in stale
