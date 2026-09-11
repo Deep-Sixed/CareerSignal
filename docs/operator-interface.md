@@ -9,14 +9,14 @@ The commands an operator reads — `opportunities`, `opportunity`, `status`, `ap
 | Reported | Exit | Means |
 |---|---|---|
 | `ACCEPTED` | 0 | The thing asked for happened. |
-| `REFUSED` | 1 | It did not happen, and this machine decided that. Nothing left the machine; correct what the refusal names and ask again. |
+| `REFUSED` | 1 | It did not happen, and this machine decided that. This invocation wrote and reserved nothing new; correct what the refusal names and ask again. |
 | `UNCERTAIN` | 3 | A provider was contacted and the outcome is unknown. Reconcile; never repeat the write. |
 
 Argparse keeps exit 2 for a command that was written wrongly — a missing argument, an unknown id, a filter that cannot mean anything — and writes it to stderr. An outcome goes to stdout, because it is the answer rather than a diagnostic.
 
 An id that names nothing is a mistyped command, so every command that takes one refuses it that way: an unknown opportunity id for `opportunity` and `status`, an unknown review id for `approve`, `reject`, `draft` and `reconcile`. A review that **exists** but cannot be acted on — approved and then changed, already attempted, an ended opportunity — is a refusal, exit 1, because that is the system deciding rather than the operator mistyping.
 
-**Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means nothing was created, the operator's approval survives, and correcting the cause and retrying is safe. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
+**Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means this invocation created nothing and reserved no new intent, and correcting the cause and retrying is safe — for a fresh `draft`, that means the approval survives untouched; for `reconcile` against an intent that already exists (an identity check that failed before the lookup, say), that existing intent is what survives untouched instead. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
 
 `UNCERTAIN` is therefore reserved for exactly what it says: **a provider was contacted and the outcome is unknown.** `attempting` means something different: a durable draft intent exists and CareerSignal has no recorded outcome for it. The provider may or may not have been contacted, and the write must not be retried. So running `draft` against one is `REFUSED` — this invocation reserved nothing, contacted nothing and wrote nothing, because a claim already stood. `reconcile` is the exception and stays exit 3 on an unsettled intent: it does contact the provider to look, and its answer is about what the lookup found. Refusing it would close the one route out of `attempting`.
 
@@ -43,6 +43,8 @@ Example Corp - IAM Architect
   eligible   yes
   advances   yes
   approval   approved by operator
+  provider   controlled
+  namespace  controlled
   draft      not attempted
   review     b6435bf9f264c545cc268f317d7f4516a8e1d1b308bf3bee0b37efc4b10b7443
   source     message:75aba036cfaa92ecc20d2a4f7f332335369220dc33cfcf682c4be58ee54f70f2
@@ -77,6 +79,8 @@ It holds because all of it is read from **one place**: `Repository._bound()` is 
 
 The equality is established when the approval is recorded. It does not survive on its own: a later message can move the recipient and subject without touching the decision, and then the packet on screen is no longer the packet the approval binds. **The view says so rather than letting the equality quietly lapse** — see below.
 
+`provider` and `namespace` are the destination this decision names — `controlled`, or `gmail` and a mailbox such as `gmail:alice@example.com` — read straight from the decision row, the same one `claim()` re-checks. They are shown next to `approval` rather than folded into the stale/reapprove logic below: a request for a different destination is a mismatch `Workflow.draft` refuses outright, not a drift in the review's own material that this approval could still be shown as authorizing. A decision recorded before migration 0007 shows `-` for both, exactly like a missing recipient or subject. See [provider identity](approved-drafts.md#provider-identity) for the binding and verification this reports on.
+
 The wording is read from the `reviews.draft` column rather than from the copy inside the review payload. Both are written from the same value at intake, so either would look right; only the column is what the approval's draft digest is taken over.
 
 `source` names the message the addressing came from. It is **provenance, not an authorization gate** — the same recipient and subject arriving in a second message is not a materially different outward action, so it does not force reapproval. See [approved drafts](approved-drafts.md).
@@ -93,9 +97,9 @@ When the opportunity has no current review there is nothing an approval could bi
   approval   approved by operator (stale: does not bind the material below; reapprove)
 ```
 
-That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording.
+That is reported by comparing the decision's recorded digests against the **same binding the packet above was read from**, so the two describe one moment rather than two reads that might disagree. Both halves of what the packet shows are covered: the recipient and subject, and the wording — and, since migration 0007, the provider and namespace too. An approval whose `provider`/`namespace` line reads `-` predates that binding and authorizes no destination at all, so it is reported stale on that basis alone even when the recipient, subject and wording all still match: `claim()` already refuses such a row, and the view says so rather than showing an approval as current that cannot actually be acted on.
 
-The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, which no real digest equals, so it reads as not binding — the same conclusion `claim()` reaches.
+The record of who approved is never erased — it is the true history of what was approved. Only the claim that it authorizes *this* material is withdrawn. A rejection is never called stale, because it authorizes nothing for drift to invalidate. A decision recorded before migration 0006 carries an empty addressing digest, and one recorded before migration 0007 carries an empty provider and namespace; neither empty value equals a real one, so both read as not binding — the same conclusion `claim()` reaches.
 
 What to do about a stale approval depends on whether a draft has been attempted, and the line says only what is actually available:
 
@@ -153,13 +157,15 @@ Recording a status is not an outward action and builds no provider. It creates n
 ## Approving and drafting
 
 ```sh
-careersignal approve <review-id> --actor operator
+careersignal approve <review-id> --actor operator                # controlled, the default
+careersignal approve <review-id> --actor operator \
+  --provider gmail --mailbox operator@example.com                # names a destination too
 careersignal draft <review-id>                                   # controlled, on this machine
 careersignal draft <review-id> --provider gmail --mailbox operator@example.com
 careersignal reconcile <review-id>
 ```
 
-These call the existing machinery described in [approved drafts](approved-drafts.md), unchanged. The controlled provider remains the default and Gmail must be named explicitly, with its own credential in the environment.
+These call the existing machinery described in [approved drafts](approved-drafts.md), unchanged. The controlled provider remains the default and Gmail must be named explicitly, with its own credential in the environment. `approve` takes `--provider`/`--mailbox` too, and needs no credential to do it: naming a destination at approval time is a declaration, checked later against what `draft` actually contacts.
 
 An approval the decision rules refuse — an ineligible review, a review that predates stated skill coverage, an opportunity already ended, a review whose draft was already attempted — is `REFUSED` with the reason, not a usage error. The operator can act on what it names. A review id that does not exist at all is exit 2 instead, as above.
 

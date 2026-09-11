@@ -165,6 +165,8 @@ def detail(record) -> str:
         f"  eligible   {cell(record, 'eligible')}",
         f"  advances   {cell(record, 'advances')}",
         f"  approval   {approval(record['action'])}",
+        f"  provider   {cell(record['action'], 'provider')}",
+        f"  namespace  {cell(record['action'], 'provider_namespace')}",
         f"  draft      {attempt(record['action'])}",
     ]
     # Both are keyed on the opportunity's current review, so they are present together

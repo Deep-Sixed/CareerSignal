@@ -64,8 +64,18 @@ def ingest(path, *, sender="recruiter@example.com", subject="A role for you"):
 
 
 class Recorder:
-    def __init__(self, created=None):
+    """Answers both kinds of Gmail read this suite exercises: identity and reconciliation.
+
+    A profile URL gets the configured identity; anything else -- the drafts listing used by
+    lookup() -- gets an empty page, exactly as before this provider had an identity check at
+    all. Defaulting identity to MAILBOX means every pre-existing test, which approves and
+    then drafts through the same declared mailbox, verifies without anyone here having to
+    say so.
+    """
+
+    def __init__(self, created=None, identity=MAILBOX):
         self.created = created or {"id": "draft123"}
+        self.identity = identity
         self.creates = []
         self.reads = []
 
@@ -75,7 +85,29 @@ class Recorder:
 
     def read(self, url, headers):
         self.reads.append(url)
+        if url.endswith("/profile"):
+            return 200, json.dumps({"emailAddress": self.identity}).encode()
         return 200, json.dumps({}).encode()
+
+
+def approve(workflow, review, *, actor="operator", mailbox=None):
+    """Approve for whichever destination `workflow.provider` currently declares.
+
+    A raw `decide()` call now needs a provider identity to authorize anything a Gmail
+    provider will later request, and that identity has to match what the provider in the
+    test actually is -- not a value chosen independently of it, which is exactly the bug
+    this contract exists to close. `mailbox` overrides the namespace the approval binds,
+    for tests that deliberately approve for one destination and request another.
+    """
+    provider = workflow.provider
+    namespace = gmail_draft.namespace_for(mailbox) if mailbox else provider.namespace
+    workflow.repository.decide(
+        review,
+        approved=True,
+        actor=actor,
+        provider=provider.provider,
+        provider_namespace=namespace,
+    )
 
 
 def run(monkeypatch, capsys, *arguments):
@@ -141,7 +173,7 @@ def test_a_hostile_header_is_refused_without_stranding_the_review(tmp_path, kind
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     with pytest.raises(DraftRefused):
         workflow.draft(review)
 
@@ -167,7 +199,7 @@ def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(refused, approved=True, actor="operator")
+    approve(workflow, refused)
     with pytest.raises(DraftRefused):
         workflow.draft(refused)
 
@@ -198,7 +230,7 @@ def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
     assert recorder.creates == []
     assert workflow.repository.intent(corrected) is None
 
-    workflow.repository.decide(corrected, approved=True, actor="operator")
+    approve(workflow, corrected)
     receipt = workflow.draft(corrected)
     assert receipt == "gmail-draft:draft123"
     assert len(recorder.creates) == 1
@@ -220,12 +252,12 @@ def test_a_source_arriving_after_the_claim_cannot_move_the_target(tmp_path, monk
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
 
     original = workflow.repository.claim
 
-    def claim_then_race(review_id):
-        claimed = original(review_id)
+    def claim_then_race(review_id, **kwargs):
+        claimed = original(review_id, **kwargs)
         # A later message about the same job, from somebody else, lands right here.
         workflow.intake_message(
             Message(
@@ -280,7 +312,7 @@ def test_a_confirmed_draft_still_replays_after_a_later_hostile_source(tmp_path, 
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     receipt = workflow.draft(review)
     assert workflow.repository.intent(review) == ("confirmed", receipt)
 
@@ -304,7 +336,7 @@ def test_an_uncertain_draft_stays_reconcilable_after_a_later_hostile_source(tmp_
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=reader
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     with pytest.raises(OSError):
         workflow.draft(review)
     assert workflow.repository.intent(review)[0] == "uncertain"
@@ -338,6 +370,9 @@ def test_an_intent_settled_during_the_preflight_still_wins(tmp_path, receipt, ex
 
     class Racing:
         """Settles the intent, then lands hostile data, then refuses -- inside the preflight."""
+
+        provider = "controlled"
+        namespace = "controlled"
 
         def refusal(self, key, body, *, to="", subject_line=""):
             workflow.repository.claim(review)
@@ -373,7 +408,7 @@ def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     with pytest.raises(OSError):
         workflow.draft(review)
     assert workflow.repository.intent(review)[0] == "uncertain"
@@ -401,7 +436,7 @@ def test_an_ended_opportunity_never_reaches_the_provider(tmp_path):
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     with store.connection(path) as conn:
         opportunity = conn.execute(
             "SELECT opportunity_id FROM reviews WHERE id=?", (review,)
@@ -422,7 +457,7 @@ def test_an_approved_draft_is_created_once_and_addressed_to_the_recruiter(tmp_pa
     workflow.provider = GmailDrafts(
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
-    workflow.repository.decide(review, approved=True, actor="operator")
+    approve(workflow, review)
     receipt = workflow.draft(review)
     assert receipt == "gmail-draft:draft123"
     assert len(recorder.creates) == 1
@@ -432,6 +467,169 @@ def test_an_approved_draft_is_created_once_and_addressed_to_the_recruiter(tmp_pa
     # Replay does not write again: the confirmed receipt is returned from the record.
     assert workflow.draft(review) == receipt
     assert len(recorder.creates) == 1
+
+
+# --- an approval and an intent bind the destination too -----------------------------------
+
+
+def test_a_controlled_intent_refuses_a_later_gmail_request(tmp_path):
+    """One review, one intent. A different provider does not get a second attempt."""
+    workflow, review = ingest(tmp_path / "db")
+    approve(workflow, review)
+    receipt = workflow.draft(review)
+    assert receipt.startswith("controlled-")
+
+    recorder = Recorder()
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    with pytest.raises(ValueError, match="does not match the draft intent"):
+        workflow.draft(review)
+
+    assert recorder.creates == [] and recorder.reads == [], "a mismatch contacted Gmail"
+    assert workflow.repository.intent(review) == ("confirmed", receipt)
+
+
+def test_a_gmail_approval_refuses_a_request_for_a_different_mailbox(tmp_path):
+    """The declared mismatch is free: it is refused before anything is contacted."""
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(GmailComposeCredentials(TOKEN, MAILBOX))
+    approve(workflow, review)
+
+    recorder = Recorder()
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, "bob@example.com"),
+        create=recorder.create,
+        read=recorder.read,
+    )
+    with pytest.raises(ValueError, match="does not match the approval"):
+        workflow.draft(review)
+
+    assert recorder.reads == [], "the mismatch was declared and needed no profile read"
+    assert recorder.creates == []
+    assert workflow.repository.intent(review) is None
+
+
+def test_a_verified_mailbox_mismatch_is_refused_after_the_profile_read(tmp_path):
+    """The declared mailbox matched; the credential behind it did not.
+
+    A profile read is allowed here -- it is how the mismatch is discovered -- but no draft
+    is posted and nothing is reserved once it is.
+    """
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(GmailComposeCredentials(TOKEN, MAILBOX))
+    approve(workflow, review)
+
+    recorder = Recorder(identity="someone-else@example.com")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    with pytest.raises(ValueError, match="Verified provider identity does not match"):
+        workflow.draft(review)
+
+    assert any(url.endswith("/profile") for url in recorder.reads), "identity was never checked"
+    assert recorder.creates == [], "a verified mismatch still posted a draft"
+    assert workflow.repository.intent(review) is None
+
+
+def test_a_verified_gmail_identity_authorizes_exactly_one_draft(tmp_path):
+    """The success path: declared, verified and bound all agree, once."""
+    recorder = Recorder()
+    workflow, review = ingest(tmp_path / "db")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    approve(workflow, review)
+    receipt = workflow.draft(review)
+
+    assert receipt == "gmail-draft:draft123"
+    assert len(recorder.creates) == 1
+    assert workflow.repository.intent_identity(review) == {
+        "provider": "gmail",
+        "provider_namespace": gmail_draft.namespace_for(MAILBOX),
+    }
+
+
+def test_reconciling_an_uncertain_gmail_intent_with_the_wrong_mailbox_is_refused(tmp_path):
+    """An uncertain attempt belongs to one destination and cannot be read for another."""
+    workflow, review = ingest(tmp_path / "db")
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    approve(workflow, review)
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+    recorder = Recorder()
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, "bob@example.com"),
+        create=recorder.create,
+        read=recorder.read,
+    )
+    with pytest.raises(ValueError, match="does not match the draft intent"):
+        workflow.reconcile(review)
+    assert recorder.reads == [], "reconciliation looked up drafts in the wrong mailbox"
+
+
+def test_reconciling_an_uncertain_gmail_intent_with_the_verified_mailbox_proceeds(tmp_path):
+    """The matching destination is unaffected: reconciliation proceeds as before."""
+    workflow, review = ingest(tmp_path / "db")
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    approve(workflow, review)
+    with pytest.raises(OSError):
+        workflow.draft(review)
+
+    recorder = Recorder()
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+    assert workflow.reconcile(review) is None
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+
+def test_reconciling_refuses_a_credential_that_verifies_as_someone_else(tmp_path, monkeypatch):
+    """The declared mailbox matched the intent; the credential behind it did not.
+
+    A declared match is not proof: Gmail's own lookup does not care what --mailbox was
+    typed, only what the credential can reach. Without this check, reconciliation would
+    silently search a mailbox this attempt was never made against.
+    """
+    workflow, review = ingest(tmp_path / "db")
+
+    def explode(url, headers, body):
+        raise OSError("connection reset after the request was sent")
+
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
+    )
+    approve(workflow, review)
+    with pytest.raises(OSError):
+        workflow.draft(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
+
+    recorder = Recorder(identity="someone-else@example.com")
+    workflow.provider = GmailDrafts(
+        GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
+    )
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("looked up drafts with a credential that verified as someone else")
+
+    monkeypatch.setattr(workflow.provider, "lookup", unreachable)
+    with pytest.raises(ValueError, match="Verified provider identity does not match"):
+        workflow.reconcile(review)
+    assert workflow.repository.intent(review)[0] == "uncertain"
 
 
 # --- the read grant is not a write grant ---------------------------------------------------

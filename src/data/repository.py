@@ -231,9 +231,12 @@ class Repository:
                 "attempted": False,
                 "draft": "none",
                 "receipt": None,
+                "provider": None,
+                "provider_namespace": None,
             }
         decision = conn.execute(
-            "SELECT approved,actor,addressing_digest,draft_digest FROM decisions WHERE review_id=?",
+            "SELECT approved,actor,addressing_digest,draft_digest,provider,provider_namespace "
+            "FROM decisions WHERE review_id=?",
             (review_id,),
         ).fetchone()
         intent = conn.execute(
@@ -263,9 +266,16 @@ class Repository:
             # an empty digest, which no real digest equals, so it reads as not binding.
             "binds": None
             if decision is None
-            else (
+            else bool(
                 decision[2] == binding["addressing"]["digest"]
                 and decision[3] == binding["draft_digest"]
+                # A decision predating migration 0007 carries an empty provider and
+                # namespace, which claim() already refuses to authorize -- the same
+                # "cannot match a real value" fail-closed rule the addressing and draft
+                # digests use above. Reporting it as currently binding would tell the
+                # operator they can act on an approval that authorizes no destination.
+                and decision[4]
+                and decision[5]
             ),
             # Refused and uncertain are different facts and are never collapsed. A refusal
             # means nothing was attempted; an intent means something was, and its outcome
@@ -280,6 +290,14 @@ class Repository:
             if intent
             else ("refused" if latest and latest[0] == "draft_refused" else "none"),
             "receipt": intent[1] if intent else None,
+            # The destination this decision names, straight from the row. Not folded into
+            # "binds": a request for a different provider or mailbox is a mismatch that
+            # workflow.draft() refuses outright, not a drift in the review's own material
+            # that this approval could still be shown as authorizing. An empty value here
+            # is a decision that predates this binding, and is shown as none rather than
+            # guessed at.
+            "provider": decision[4] or None if decision else None,
+            "provider_namespace": decision[5] or None if decision else None,
         }
 
     @staticmethod
@@ -485,9 +503,19 @@ class Repository:
             "draft": draft,
         }
 
-    def decide(self, review_id, *, approved: bool, actor: str):
+    def decide(
+        self,
+        review_id,
+        *,
+        approved: bool,
+        actor: str,
+        provider: str = "controlled",
+        provider_namespace: str = "controlled",
+    ):
         if type(approved) is not bool or not actor.strip():
             raise ValueError("Explicit boolean decision and actor are required")
+        if not provider.strip() or not provider_namespace.strip():
+            raise ValueError("A provider and a provider namespace are required")
         with connection(self.path) as conn, transaction(conn):
             advances = self._current(conn, review_id)
             if approved and not advances:
@@ -506,13 +534,15 @@ class Repository:
                 raise ValueError("Draft already attempted; decision is locked for reconciliation")
             conn.execute(
                 "INSERT INTO decisions(review_id,approved,actor,content_digest,draft_digest,"
-                "status_event_id,addressing_digest,source_message_id) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(review_id) DO UPDATE SET "
+                "status_event_id,addressing_digest,source_message_id,provider,"
+                "provider_namespace) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(review_id) DO UPDATE SET "
                 "approved=excluded.approved,actor=excluded.actor,"
                 "content_digest=excluded.content_digest,draft_digest=excluded.draft_digest,"
                 "status_event_id=excluded.status_event_id,"
                 "addressing_digest=excluded.addressing_digest,"
-                "source_message_id=excluded.source_message_id",
+                "source_message_id=excluded.source_message_id,"
+                "provider=excluded.provider,provider_namespace=excluded.provider_namespace",
                 (
                     review_id,
                     int(approved),
@@ -522,6 +552,8 @@ class Repository:
                     binding["status_event_id"],
                     binding["addressing"]["digest"],
                     binding["addressing"]["source"] or None,
+                    provider.strip(),
+                    provider_namespace.strip(),
                 ),
             )
             conn.execute(
@@ -529,12 +561,34 @@ class Repository:
                 (review_id, "approved" if approved else "rejected"),
             )
 
-    def claim(self, review_id):
+    def approved_identity(self, review_id):
+        """The provider and namespace the current approval binds, or None.
+
+        A request naming a different destination can be refused here, before any local
+        composition check or external identity call is made -- the same economy claim()
+        already gives the content and addressing bindings by re-verifying them, not
+        re-deriving them, only at the moment they matter. None is returned for a review
+        with no decision, a rejection, or an approval that predates this binding: none of
+        those authorize an outward draft to any destination, and the caller's existing
+        approval-required refusal is what should say so.
+        """
+        with connection(self.path) as conn:
+            row = conn.execute(
+                "SELECT approved,provider,provider_namespace FROM decisions WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+        if not row or row[0] != 1 or not row[1] or not row[2]:
+            return None
+        return {"provider": row[1], "provider_namespace": row[2]}
+
+    def claim(
+        self, review_id, *, provider: str = "controlled", provider_namespace: str = "controlled"
+    ):
         with connection(self.path) as conn, transaction(conn):
             self._current(conn, review_id)
             decision = conn.execute(
-                "SELECT approved,content_digest,draft_digest,addressing_digest "
-                "FROM decisions WHERE review_id=?",
+                "SELECT approved,content_digest,draft_digest,addressing_digest,provider,"
+                "provider_namespace FROM decisions WHERE review_id=?",
                 (review_id,),
             ).fetchone()
             if not decision or decision[0] != 1:
@@ -554,7 +608,7 @@ class Repository:
             # last moment the authorization can be decided against a state that cannot move
             # underneath it.
             binding = self._binding(conn, review_id)
-            if not decision[1] or not decision[2] or not decision[3]:
+            if not all(decision[index] for index in (1, 2, 3, 4, 5)):
                 raise ValueError(
                     "Approval predates draft authorization binding and cannot authorize an "
                     "outward draft; approve this review again"
@@ -578,13 +632,23 @@ class Repository:
             # from the same query the approval was bound from.
             if decision[3] != binding["addressing"]["digest"]:
                 raise ValueError("Addressing changed since approval; review and approve again")
+            # The identity verified before this transaction is the identity that must still
+            # be approved once inside it. A re-approval for a different destination landing
+            # in between must not let the write it authorized be attributed to this one.
+            if (decision[4], decision[5]) != (provider, provider_namespace):
+                raise ValueError(
+                    "Approved provider or mailbox changed since approval; approve this "
+                    "review again for the intended destination"
+                )
             conn.execute(
-                "INSERT INTO draft_intents(review_id,state,status_event_id,source_message_id) "
-                "VALUES (?, 'attempting', ?, ?)",
+                "INSERT INTO draft_intents(review_id,state,status_event_id,source_message_id,"
+                "provider,provider_namespace) VALUES (?, 'attempting', ?, ?, ?, ?)",
                 (
                     review_id,
                     binding["status_event_id"],
                     binding["addressing"]["source"] or None,
+                    provider,
+                    provider_namespace,
                 ),
             )
             conn.execute(
@@ -632,6 +696,25 @@ class Repository:
             return conn.execute(
                 "SELECT state,receipt FROM draft_intents WHERE review_id=?", (review_id,)
             ).fetchone()
+
+    def intent_identity(self, review_id):
+        """The provider and namespace bound to this review's draft intent, or None.
+
+        None means either there is no intent at all, or -- for an intent written before
+        this binding existed -- that nothing records which provider or mailbox it was for.
+        Both cases must refuse a request naming any destination, rather than assume one:
+        this is the fact a settled attempt is compared against before it is ever replayed
+        or reconciled, and inventing what a legacy row was for would be exactly the
+        fabrication the surrounding contract refuses to do.
+        """
+        with connection(self.path) as conn:
+            row = conn.execute(
+                "SELECT provider,provider_namespace FROM draft_intents WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return {"provider": row[0], "provider_namespace": row[1]}
 
     @staticmethod
     def _addressing(conn, review_id):
@@ -720,7 +803,8 @@ class Repository:
         with connection(self.path) as conn:
             decision = conn.execute(
                 "SELECT approved,actor,content_digest,draft_digest,status_event_id,"
-                "addressing_digest,source_message_id FROM decisions WHERE review_id=?",
+                "addressing_digest,source_message_id,provider,provider_namespace "
+                "FROM decisions WHERE review_id=?",
                 (review_id,),
             ).fetchone()
             binding = self._binding(conn, review_id)
@@ -732,6 +816,8 @@ class Repository:
                 "bound_event": decision[4] if decision else None,
                 "bound_addressing": decision[5] if decision else None,
                 "bound_source": decision[6] if decision else None,
+                "bound_provider": decision[7] if decision else None,
+                "bound_provider_namespace": decision[8] if decision else None,
                 "addressing_digest": binding["addressing"]["digest"],
                 "source": binding["addressing"]["source"],
                 "content_digest": binding["content_digest"],
