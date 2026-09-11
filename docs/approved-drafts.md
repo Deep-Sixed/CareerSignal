@@ -212,19 +212,24 @@ originally for from the receipt string or from today's CLI flags: that would man
 provenance CareerSignal never recorded.
 
 **Wording note.** A refusal here can still follow a read: proving whose mailbox a
-credential belongs to is a GET, made solely to verify identity before anything is claimed.
-"REFUSE means nothing left this machine" is now slightly too strong for this one path.
-What stays true is narrower and still absolute: REFUSE means no draft was written or
-created, and no durable draft intent was reserved. A profile read is not a draft write.
+credential belongs to is a GET, made solely to verify identity before anything is claimed
+or looked up. "REFUSE means nothing left this machine" is now slightly too strong for this
+one path. What stays true has to be stated **per invocation, not per review**: REFUSE means
+this invocation wrote no draft and reserved no new durable intent. A profile read is not a
+draft write. That is absolute for a fresh `draft()`, where nothing was ever reserved. It is
+not the same claim for `reconcile()` against an already-unsettled intent -- there, a durable
+intent plainly does exist, reserved by an earlier attempt, and REFUSE says only that this
+reconciliation attempt did not touch it.
 
 This applies to the read itself failing, not only to what it finds. A 401, a malformed
 profile response, or a transport failure from `identity()` is caught in both `draft()` and
 `reconcile()` and reported as a refusal, never as an uncaught fault and never as
-`UNCERTAIN`: nothing was reserved by asking, so there is nothing ambiguous about the write
-to report. In `draft()` this carries the same atomic guard as the local composition
-refusal, since it too runs before `claim()`. In `reconcile()` the intent already exists and
-is untouched either way, so the CLI reports the outcome as a refusal while still showing
-the intent's actual, unaffected state rather than claiming there is none to show.
+`UNCERTAIN`: nothing was reserved *by this attempt*, so there is nothing ambiguous about
+the write to report. In `draft()` this carries the same atomic guard as the local
+composition refusal, since it too runs before `claim()` and there truly is no intent yet.
+In `reconcile()` the intent already exists and is untouched either way, so the CLI reports
+the outcome as a refusal while still showing the intent's actual, unaffected state rather
+than claiming there is none to show.
 
 ## Concurrency
 

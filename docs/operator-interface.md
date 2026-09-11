@@ -9,14 +9,14 @@ The commands an operator reads — `opportunities`, `opportunity`, `status`, `ap
 | Reported | Exit | Means |
 |---|---|---|
 | `ACCEPTED` | 0 | The thing asked for happened. |
-| `REFUSED` | 1 | It did not happen, and this machine decided that. Nothing left the machine; correct what the refusal names and ask again. |
+| `REFUSED` | 1 | It did not happen, and this machine decided that. This invocation wrote and reserved nothing new; correct what the refusal names and ask again. |
 | `UNCERTAIN` | 3 | A provider was contacted and the outcome is unknown. Reconcile; never repeat the write. |
 
 Argparse keeps exit 2 for a command that was written wrongly — a missing argument, an unknown id, a filter that cannot mean anything — and writes it to stderr. An outcome goes to stdout, because it is the answer rather than a diagnostic.
 
 An id that names nothing is a mistyped command, so every command that takes one refuses it that way: an unknown opportunity id for `opportunity` and `status`, an unknown review id for `approve`, `reject`, `draft` and `reconcile`. A review that **exists** but cannot be acted on — approved and then changed, already attempted, an ended opportunity — is a refusal, exit 1, because that is the system deciding rather than the operator mistyping.
 
-**Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means nothing was created, the operator's approval survives, and correcting the cause and retrying is safe. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
+**Refused and uncertain are never collapsed into one failure.** They call for different moves. A refusal means this invocation created nothing and reserved no new intent, and correcting the cause and retrying is safe — for a fresh `draft`, that means the approval survives untouched; for `reconcile` against an intent that already exists (an identity check that failed before the lookup, say), that existing intent is what survives untouched instead. An uncertain result means a draft may exist in the mailbox already, and only reconciliation can say. A script that treated them alike would either abandon something merely refused or duplicate something that already exists.
 
 `UNCERTAIN` is therefore reserved for exactly what it says: **a provider was contacted and the outcome is unknown.** `attempting` means something different: a durable draft intent exists and CareerSignal has no recorded outcome for it. The provider may or may not have been contacted, and the write must not be retried. So running `draft` against one is `REFUSED` — this invocation reserved nothing, contacted nothing and wrote nothing, because a claim already stood. `reconcile` is the exception and stays exit 3 on an unsettled intent: it does contact the provider to look, and its answer is about what the lookup found. Refusing it would close the one route out of `attempting`.
 

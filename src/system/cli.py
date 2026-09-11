@@ -11,10 +11,11 @@ reconcile -- are read by a person. They print text by default and structured out
     UNCERTAIN (exit 3)  a provider was contacted and the outcome is unknown; reconcile
 
 Refused and uncertain are never collapsed into one failure. They call for different moves:
-a refusal means no draft was written or created and no durable intent was reserved -- though
-verifying a Gmail identity ahead of a refusal may have read the mailbox's profile -- and the
-operator can correct and try again, while an uncertain result means something may have been
-created and only reconciliation can say.
+a refusal means this invocation wrote no draft and reserved no new durable intent -- though
+verifying a Gmail identity ahead of a refusal may have read the mailbox's profile, and a
+draft intent from an earlier invocation may already exist and stays exactly as it was -- and
+the operator can correct and try again, while an uncertain result means something may have
+been created and only reconciliation can say.
 
 Argparse keeps exit 2 for a command that was written wrongly -- a missing argument, an
 unknown id, a filter that cannot mean anything. That is a different thing from the system

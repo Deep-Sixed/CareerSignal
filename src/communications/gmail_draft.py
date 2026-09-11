@@ -107,19 +107,21 @@ def namespace_for(mailbox: str) -> str:
 
 
 class DraftRefused(PortDraftRefused, GmailError):
-    """No draft was written or created, and no durable draft intent was reserved.
+    """This invocation wrote no draft and reserved no new durable intent.
 
-    The offending value is retained: refusing is not discarding, and the evidence that
-    caused the refusal is untouched in storage, so the operator can correct the source and
-    reevaluate. It also carries the port's refusal type, so a caller can tell a refusal
-    apart from a failure that may have happened after Gmail was contacted -- the two call
-    for opposite handling.
+    Raised from a fresh draft attempt, the offending value is retained: refusing is not
+    discarding, and the evidence that caused the refusal is untouched in storage, so the
+    operator can correct the source and reevaluate. Raised while reconciling an
+    already-unsettled intent, that intent is untouched instead -- this says what the
+    reconciliation attempt did, not that nothing was ever reserved. It also carries the
+    port's refusal type, so a caller can tell a refusal apart from a failure that may have
+    happened after Gmail was contacted -- the two call for opposite handling.
 
-    This can be raised after a read: verifying whose mailbox a compose credential belongs
-    to is a GET against Gmail's profile endpoint, made solely to prove identity before
-    anything is claimed. A profile read is not a draft write, so a refusal reached after
-    one is exactly as certain as one reached without it -- nothing was created and nothing
-    was sent.
+    This can be raised after a read either way: verifying whose mailbox a compose
+    credential belongs to is a GET against Gmail's profile endpoint, made solely to prove
+    identity before anything is claimed or looked up. A profile read is not a draft write,
+    so a refusal reached after one is exactly as certain as one reached without it --
+    nothing was created and nothing was sent.
     """
 
 

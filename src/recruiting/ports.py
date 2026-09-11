@@ -4,17 +4,24 @@ from typing import Protocol
 
 
 class DraftRefused(RuntimeError):
-    """No draft was written or created, and no durable draft intent was reserved.
+    """This invocation wrote no draft and reserved no new durable intent.
 
     Distinct from a failure that may have happened after the provider was contacted. A
     refusal is certain: it is not an unknown external result, so it must not be recorded
-    as one. The evidence that caused it is retained unchanged and the operator's approval
-    survives, so a corrected source can be drafted later.
+    as one.
 
-    This can still follow a read. Proving which destination a credential belongs to is a
-    read-only request, made solely to verify identity before anything is claimed, and it is
-    not a draft write. A refusal reached after one is exactly as certain as one reached
-    without it.
+    Stated per invocation rather than per review, because the two differ once an intent can
+    already exist: raised from a fresh `draft()`, nothing was ever reserved, the evidence
+    that caused the refusal is retained unchanged, and the operator's approval survives so a
+    corrected source can be drafted later. Raised from `reconcile()` against an
+    already-unsettled intent, that intent is untouched and remains exactly as authoritative
+    as it was -- this refusal is about what this attempt to resolve it did, not about
+    whether one exists.
+
+    This can still follow a read either way. Proving which destination a credential belongs
+    to is a read-only request, made solely to verify identity before anything is claimed or
+    looked up, and it is not a draft write. A refusal reached after one is exactly as
+    certain as one reached without it.
     """
 
 
