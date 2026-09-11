@@ -402,8 +402,6 @@ def _create_rejected_failure(status: int) -> str:
             "this can mean the grant is insufficient, a domain policy forbids it, "
             "or a quota was exceeded"
         )
-    if status == 429:
-        return "Gmail rate limited the draft request (429); nothing was created"
     raise AssertionError(f"{status} is not a definite Gmail create rejection")
 
 
@@ -412,29 +410,33 @@ def _create_rejected_failure(status: int) -> str:
 # in what each status is documented to mean generally, never in an assumption about
 # Gmail's internal request-handling implementation, which is not public:
 #
-#   400  Bad Request -- HTTP's own definition (RFC 7231 section 6.5.1) is that the server "will
-#        not process" a request it perceives as malformed. A request that will not be
-#        processed cannot have created anything.
-#   401  Unauthorized -- HTTP's own definition (RFC 7235 section 3.1) is that the request lacks
-#        valid authentication credentials for the resource. Gmail's own error guide
-#        documents this status for an invalid or expired access token.
-#   403  Forbidden -- HTTP's own definition (RFC 7231 section 6.5.3) is that the server
-#        "understood the request, but refuses to authorize it". Gmail's own error guide
+#   400  Bad Request -- HTTP's own definition (RFC 7231 section 6.5.1) is that the server
+#        "cannot or will not process the request" due to a perceived client error. A
+#        request that will not be processed cannot have created anything.
+#   401  Unauthorized -- HTTP's own definition (RFC 7235 section 3.1) is that "the request
+#        has not been applied because it lacks valid authentication credentials for the
+#        target resource" -- non-application stated directly, not inferred. Gmail's own
+#        error guide documents this status for an invalid or expired access token.
+#   403  Forbidden -- HTTP's own definition (RFC 7231 section 6.5.3) is that "the server
+#        understood the request but refuses to authorize it". Gmail's own error guide
 #        uses this status for more than one cause -- an insufficient grant, a domain
 #        policy, or (on this API) a quota or rate-limit rejection -- so the message above
 #        does not guess which; every one of those causes is still the server refusing to
 #        authorize the request, not attempting and losing track of the result.
-#   429  Too Many Requests -- HTTP's own definition (RFC 6585 section 4) is the server
-#        "refusing to service" the request under rate limiting.
 #
-# Each of these four is, by the definition above, a request the server declined to carry
-# out at all, not one it attempted and then failed partway through. A 5xx is deliberately
-# excluded: nothing in HTTP's definition of a server error says the request was not
-# carried out, so a response existing there is not proof nothing was. An unrecognized
-# status is excluded for the same reason -- this adapter does not guess what an unfamiliar
-# code means. Anything not in this set stays an ordinary GmailError, which the caller
-# treats as an unknown outcome, never as a proven rejection.
-REJECTED_CREATE_STATUSES = frozenset({400, 401, 403, 429})
+# 429 Too Many Requests is deliberately excluded, though it was included in an earlier
+# version of this set. RFC 6585 section 4 says only that "the user has sent too many
+# requests in a given amount of time" and may include a Retry-After header -- it does not
+# state that the flagged request was not applied or not processed, the way 400's "will not
+# process" and 401's "has not been applied" do. Gmail's own error guide likewise documents
+# 429 as resolved by retrying, without an atomic guarantee that a users.drafts.create
+# request answered with 429 could not have committed before the error was returned. Absent
+# that guarantee, 429 stays on the uncertain path like a 5xx: nothing in what is publicly
+# documented says the request was not carried out, so a response existing there is not
+# proof nothing was. An unrecognized status is excluded for the same reason -- this adapter
+# does not guess what an unfamiliar code means. Anything not in this set stays an ordinary
+# GmailError, which the caller treats as an unknown outcome, never as a proven rejection.
+REJECTED_CREATE_STATUSES = frozenset({400, 401, 403})
 
 
 def _identity_failure(status: int) -> str:

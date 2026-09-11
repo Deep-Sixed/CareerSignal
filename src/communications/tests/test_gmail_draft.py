@@ -521,7 +521,7 @@ def test_a_refused_create_never_reports_a_receipt(status):
 # --- proven rejection vs. a genuinely unknown outcome -----------------------------------
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 429])
+@pytest.mark.parametrize("status", [400, 401, 403])
 def test_a_provable_rejection_status_raises_the_specific_exception(status):
     """The narrow set: Gmail's response itself proves nothing was created.
 
@@ -537,12 +537,14 @@ def test_a_provable_rejection_status_raises_the_specific_exception(status):
     assert TOKEN not in str(caught.value)
 
 
-@pytest.mark.parametrize("status", [402, 404, 409, 422, 500, 502, 503, 504])
+@pytest.mark.parametrize("status", [402, 404, 409, 422, 429, 500, 502, 503, 504])
 def test_an_unproven_status_stays_an_ordinary_uncertain_failure(status):
     """Everything outside the narrow set is left ambiguous, never guessed at.
 
     A 5xx in particular: Gmail may have accepted the request and then failed while
-    creating the draft, so a response existing here is not proof nothing did.
+    creating the draft, so a response existing here is not proof nothing did. 429 is here
+    too: RFC 6585 says only that too many requests were sent, never that this particular
+    request was not applied, so it is not strong enough to prove non-creation.
     """
     recorder = Recorder(status=status)
     drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)

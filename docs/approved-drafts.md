@@ -353,20 +353,29 @@ attempt to draft
      outcome unknown                     → ordinary exception (uncertain: reconcile)
 ```
 
-**The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403, 429}` in
+**The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403}` in
 `gmail_draft.py`, grounded in what each status is documented to mean in general -- never in
 an assumption about Gmail's internal request-handling implementation, which is not public.
-HTTP's own definitions say the server "will not process" a malformed request (400, RFC 7231
-§6.5.1), the request lacks valid credentials (401, RFC 7235 §3.1), the server "refuses to
-authorize" the request (403, RFC 7231 §6.5.3, and on this API documented for more than one
-cause -- an insufficient grant, a domain policy, or a quota/rate-limit rejection), and the
-server is "refusing to service" the request under rate limiting (429, RFC 6585 §4). Each is,
-by that definition, a request the server declined to carry out at all, which is what makes
-the response provable rather than merely plausible. A 5xx is deliberately excluded: nothing
-in HTTP's definition of a server error says the request was not carried out, so a response
-existing there is not proof nothing was. An unrecognized status is excluded for the same
-reason -- this adapter never guesses what an unfamiliar code means. Fewer proven rejections
-is always the safe direction to be wrong in.
+HTTP's own definitions state non-application directly rather than leaving it to be inferred:
+400 is "the server cannot or will not process the request" due to a perceived client error
+(RFC 7231 §6.5.1); 401 is "the request has not been applied because it lacks valid
+authentication credentials for the target resource" (RFC 7235 §3.1); 403 is "the server
+understood the request but refuses to authorize it" (RFC 7231 §6.5.3, and on this API
+documented for more than one cause -- an insufficient grant, a domain policy, or a
+quota/rate-limit rejection). Each is, by that definition, a request the server declined to
+carry out at all, which is what makes the response provable rather than merely plausible.
+
+429 is deliberately excluded, despite being a candidate for the same reason as the others.
+RFC 6585 §4 says only that "the user has sent too many requests in a given amount of time,"
+optionally with a `Retry-After` header -- it does not say the flagged request was not
+applied or not processed, the way 400 and 401 do. Gmail's own error guide documents 429 as
+resolved by retrying, without an atomic guarantee that a `users.drafts.create` request
+answered with 429 could not have committed before the error was returned. Absent that
+guarantee, 429 stays on the uncertain path alongside a 5xx: nothing in HTTP's definition of
+either says the request was not carried out, so a response existing there is not proof
+nothing was. An unrecognized status is excluded for the same reason -- this adapter never
+guesses what an unfamiliar code means. Fewer proven rejections is always the safe direction
+to be wrong in.
 
 **Retry without discarding history.** A proven rejection releases the `draft_intents` row
 the attempt reserved -- `repository.reject()` deletes it, exactly as a local refusal never
