@@ -21,10 +21,10 @@ been created and only reconciliation can say.
 
 Provider-rejected shares REFUSED's exit code and its safety -- nothing was created, and
 retrying once the cause is fixed is safe, with no reconciliation needed -- but is reported
-under its own name because it is not the same fact: a refusal never contacted the provider
-at all, while a rejection is what the provider itself proved once contacted. A provider may
-only report this when its response is documented to mean the write never happened; anything
-it cannot prove that way is left as ordinary UNCERTAIN.
+under its own name because it is not the same fact: a refusal means no draft-create request
+was ever sent, while a rejection means one was sent and the provider's own response proved
+it failed. A provider may only report this when its response is documented to mean the
+write never happened; anything it cannot prove that way is left as ordinary UNCERTAIN.
 
 Argparse keeps exit 2 for a command that was written wrongly -- a missing argument, an
 unknown id, a filter that cannot mean anything. That is a different thing from the system

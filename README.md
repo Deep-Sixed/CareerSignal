@@ -65,13 +65,18 @@ uv run careersignal draft <review-id> --provider gmail \
 The compose credential is separate from the read credential in every respect: its own
 environment variable, its own scope, its own adapter and its own path allowlist. The
 adapter defines no send operation and refuses the Gmail send endpoint by path. An approval
-binds to the review, its exact wording and the status it was read in, and all three are
-rechecked before the write; a recruiter-supplied address carrying a control character is
-refused rather than repaired. See [approved drafts](docs/approved-drafts.md).
+binds to the review and its exact wording, both rechecked before the write, and records the
+status event that was current when the operator decided, kept as audit evidence rather than
+rechecked for equality: draft creation instead re-evaluates the opportunity's current
+actionable state, so moving between non-terminal statuses does not by itself invalidate an
+otherwise unchanged approval, while a current status of `rejected`, `withdrawn` or `closed`
+refuses the draft. Addressing and the provider/mailbox destination are independently bound
+and rechecked by their own rules; a recruiter-supplied address carrying a control character
+is refused rather than repaired. See [approved drafts](docs/approved-drafts.md).
 
 An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. An operator-facing write is a compare-and-append: it names the event it was decided against and refuses if the opportunity has moved since. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
 
-The commands an operator reads print text by default, take `--json` for anything else, and report an outcome: `ACCEPTED` (exit 0), `REFUSED` (exit 1, nothing left this machine, correct it and ask again) or `UNCERTAIN` (exit 3, a provider was contacted and only reconciliation can say). A command written wrongly stays exit 2 on stderr, because that is a different thing from the system refusing.
+The commands an operator reads print text by default, take `--json` for anything else, and report an outcome: `ACCEPTED` (exit 0), `REFUSED` (exit 1, no draft-create request was sent by this invocation; correct it and ask again), `PROVIDER_REJECTED` (exit 1, a draft-create request was sent and the provider's own response proves it did not succeed; correct the cause and retry, same safety as `REFUSED`) or `UNCERTAIN` (exit 3, a draft-create request was sent and the outcome is unknown; only reconciliation can say). A command written wrongly stays exit 2 on stderr, because that is a different thing from the system refusing.
 
 Relative database paths resolve from the current working directory. Set `CAREERSIGNAL_DB_PATH` to override the default `var/careersignal.db`; explicit `--db` takes precedence. Keep personal runtime data outside the source tree or under ignored `var`.
 
