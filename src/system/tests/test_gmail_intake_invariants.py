@@ -62,7 +62,9 @@ def reader(shape):
     messages = {f"id{n}": raw(kind) for n, kind in enumerate(shape)}
 
     def transport(url, headers):
-        if "/messages/" in url:
+        if url.endswith("/profile"):
+            payload = {"emailAddress": MAILBOX}
+        elif "/messages/" in url:
             identifier = url.split("/messages/", 1)[1].split("?", 1)[0]
             payload = {
                 "id": identifier,

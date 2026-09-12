@@ -137,8 +137,13 @@ def https_get(url: str, headers: dict) -> tuple[int, bytes]:
     return status, body
 
 
-def readable_url(url: str) -> str:
-    """Refuse anything but an allowlisted Gmail read URL, before a token is attached."""
+def _validated_host(url: str):
+    """Scheme, credential and host hygiene shared by every URL this adapter can request.
+
+    Neither allowlist below is complete on its own: each still checks its own path against
+    its own pattern. This only closes the parts a hostile URL could get wrong before either
+    allowlist looks at a path at all.
+    """
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise GmailError("Refused a Gmail URL that is not HTTPS")
@@ -150,6 +155,12 @@ def readable_url(url: str) -> str:
         raise GmailError("Refused a Gmail URL with an unreadable port") from exc
     if parts.hostname != GMAIL_HOST or port not in (None, 443):
         raise GmailError(f"Refused a request to a host other than {GMAIL_HOST}")
+    return parts
+
+
+def readable_url(url: str) -> str:
+    """Refuse anything but an allowlisted Gmail read URL, before a token is attached."""
+    parts = _validated_host(url)
     match = READ_PATH.match(parts.path)
     if not match:
         raise GmailError("Refused a path outside the Gmail read allowlist")
@@ -158,6 +169,36 @@ def readable_url(url: str) -> str:
     if match[1] and match[1].casefold() in RESERVED_SEGMENTS:
         raise GmailError("Refused a reserved Gmail endpoint")
     return url
+
+
+# The exact identity-read endpoint, and nothing shaped like it. Kept apart from READ_PATH
+# rather than folded into it: the messages allowlist exists to keep this adapter from
+# reaching anything but the messages collection, and admitting /profile there would widen a
+# boundary built for a different purpose to cover one it was never meant to.
+PROFILE_PATH = "/gmail/v1/users/me/profile"
+
+
+def profile_url(url: str) -> str:
+    """Refuse anything but the one read used to prove whose mailbox a credential is."""
+    parts = _validated_host(url)
+    if parts.path != PROFILE_PATH or parts.query or parts.fragment:
+        raise GmailError("Refused a path outside the Gmail profile identity endpoint")
+    return url
+
+
+def namespace_for(mailbox: str) -> str:
+    """The stable destination name one mailbox is known by, normalized the same way once.
+
+    A pure function rather than a method, so an operator's declared --mailbox and a
+    verified emailAddress from Gmail's own profile response are turned into the same shape
+    by the same code and can be compared for equality rather than merely similarity.
+    """
+    if not isinstance(mailbox, str):
+        raise TypeError("A mailbox identifier is required")
+    normalized = " ".join(mailbox.split()).casefold()
+    if not normalized:
+        raise ValueError("A mailbox identifier is required")
+    return "gmail:" + normalized
 
 
 def _url(path: str, parameters=()) -> str:
@@ -184,6 +225,19 @@ def _failure(status: int) -> str:
     return f"Gmail read failed with HTTP {status}"
 
 
+def _identity_failure(status: int) -> str:
+    if status == 401:
+        return (
+            "Gmail rejected the access token (401) while verifying mailbox identity; "
+            "reauthorize with the read scope"
+        )
+    if status == 403:
+        return "Gmail refused the profile read (403) while verifying mailbox identity"
+    if status == 429:
+        return "Gmail rate limited the profile read (429); retry later"
+    return f"Gmail profile read failed with HTTP {status}"
+
+
 class GmailReader:
     """Reads authorized Gmail messages. It cannot create, send or alter anything."""
 
@@ -192,12 +246,16 @@ class GmailReader:
             raise TypeError("GmailCredentials are required")
         self._credentials = credentials
         self._transport = transport
+        # Set once verify_identity() succeeds, so a batch of N messages costs one profile
+        # read rather than N. Never reset: the credential this reader was built for cannot
+        # change underneath it, since GmailCredentials is frozen.
+        self._identity_verified = False
 
     @property
     def namespace(self) -> str:
         return self._credentials.namespace
 
-    def _read(self, url: str) -> dict:
+    def _read(self, url: str, *, failure=_failure) -> dict:
         status, body = self._transport(
             url,
             {
@@ -206,7 +264,7 @@ class GmailReader:
             },
         )
         if status != 200:
-            raise GmailError(_failure(status))
+            raise GmailError(failure(status))
         try:
             value = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -215,11 +273,58 @@ class GmailReader:
             raise GmailError("Gmail returned an unexpected payload")
         return value
 
+    def identity(self) -> str:
+        """Prove whose mailbox this credential belongs to, with one read-only request.
+
+        `--mailbox` is an operator's typed expectation, not evidence. Google documents
+        `users.me/profile` as readable under the same gmail.readonly grant this adapter
+        already holds -- no additional scope -- so one GET turns that expectation into a
+        fact. It is the only request this adapter makes that neither lists nor fetches a
+        message, and it reserves nothing.
+
+        This proves the fact only, uncached and unenforced: calling it twice makes two
+        requests, and a mismatch against the declared mailbox is left for the caller to
+        act on. `verify_identity()`, not this method, is what every message-read entry
+        point on this class actually relies on to fail closed.
+        """
+        url = profile_url(API_ROOT + "users/me/profile")
+        payload = self._read(url, failure=_identity_failure)
+        address = payload.get("emailAddress")
+        if not isinstance(address, str) or not address.strip():
+            raise GmailError("Gmail profile response did not include an email address")
+        return namespace_for(address)
+
+    def verify_identity(self) -> str:
+        """Prove and enforce that this credential's mailbox is the one it was declared for.
+
+        `identifiers()` and `fetch()` each call this before making their own request (so
+        `messages()`, which calls both, is covered too), meaning a mismatched token cannot
+        be used to read one mailbox while this reader's declared namespace is what the
+        result gets recorded under -- whether or not a caller remembers to check first.
+        Verified once per reader and cached: reading a batch of N messages costs one
+        profile read, not N. Returns the declared namespace, which this call has now
+        proven the credential actually matches, so a caller that wants the check to run
+        before doing anything else of its own -- gmail-ingest, before it constructs
+        Repository/Workflow -- can invoke this directly without paying for a second
+        profile read once this reader's own entry points run.
+        """
+        if not self._identity_verified:
+            verified = self.identity()
+            if verified != self.namespace:
+                raise GmailError(
+                    f"Gmail token belongs to {verified}, not the declared mailbox "
+                    f"({self.namespace}); provide a token for that mailbox or correct "
+                    "the declared mailbox"
+                )
+            self._identity_verified = True
+        return self.namespace
+
     def identifiers(self, *, query: str = "", label_ids=(), limit: int = MAX_RESULTS) -> tuple:
         if type(limit) is not int or limit < 1:
             raise ValueError("A positive result limit is required")
         if isinstance(label_ids, str):
             raise ValueError("Label identifiers must be a sequence, not a single string")
+        self.verify_identity()
         # A mailbox is not a snapshot, so one identifier can appear on two pages. Unique
         # identifiers are counted toward the limit as they are seen, because letting a repeat
         # spend the budget would silently drop a distinct message that was still to come.
@@ -251,6 +356,7 @@ class GmailReader:
 
     def fetch(self, message_id) -> Message:
         identifier = _identifier(message_id)
+        self.verify_identity()
         path = "users/me/messages/" + quote(identifier, safe="")
         payload = self._read(_url(path, [("format", "raw")]))
         if payload.get("id") != identifier:

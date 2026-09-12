@@ -7,6 +7,7 @@ outcomes that call for different moves -- a refusal, where nothing left this mac
 an uncertain result, where something may have.
 """
 
+import base64
 import json
 import pathlib
 import re
@@ -465,6 +466,112 @@ def test_the_detail_view_says_where_an_opportunity_stands(tmp_path, monkeypatch,
     run(monkeypatch, capsys, "draft", review, "--db", str(path))
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
     assert "draft      created; receipt controlled-" in printed
+
+
+# --- gmail-ingest verifies the token's mailbox before reading anything ---------------------
+
+
+class GmailIngestOpener:
+    """Below the transport seam, like the fakes in the adapter's own invariant suite.
+
+    Serves the profile identity read and the message listing/fetch reads a real gmail-ingest
+    invocation makes, and records every URL requested so a test can prove a listing was
+    never reached.
+    """
+
+    class Response:
+        def __init__(self, payload):
+            self.payload, self.status = payload, 200
+
+        def read(self, size):
+            return self.payload[:size]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def __init__(self, email_address, messages=None):
+        self.email_address = email_address
+        self.messages = dict(messages or {})
+        self.requests = []
+
+    def open(self, fullurl, data=None, timeout=None):
+        url = fullurl.full_url
+        self.requests.append(url)
+        if url.endswith("/profile"):
+            payload = {"emailAddress": self.email_address}
+        elif "/messages/" in url:
+            identifier = url.split("/messages/", 1)[1].split("?", 1)[0]
+            payload = self.messages[identifier]
+        else:
+            payload = {"messages": [{"id": i} for i in self.messages]}
+        return self.Response(json.dumps(payload).encode())
+
+
+def test_gmail_ingest_refuses_a_mailbox_mismatch_before_any_listing(tmp_path, monkeypatch, capsys):
+    """The token's own verified mailbox governs provenance, not the declared --mailbox."""
+    path = tmp_path / "db"
+    run(monkeypatch, capsys, "init", "--db", str(path))
+    monkeypatch.setenv(gmail.TOKEN_VARIABLE, TOKEN)
+    opener = GmailIngestOpener("someone-else@example.com", {"aaa1": {"id": "aaa1"}})
+    monkeypatch.setattr(gmail, "_OPENER", opener)
+    with pytest.raises(gmail.GmailError, match="someone-else@example.com"):
+        run(
+            monkeypatch,
+            capsys,
+            "gmail-ingest",
+            "--mailbox",
+            MAILBOX,
+            "--skill",
+            "python",
+            "--db",
+            str(path),
+        )
+    assert opener.requests == [gmail.API_ROOT + "users/me/profile"], (
+        "a mismatch must be caught before any message listing is even requested"
+    )
+    after = snapshot(path)
+    assert {t: rows for t, rows in after.items() if t != "schema_migrations"} == {
+        t: [] for t in TABLES if t != "schema_migrations"
+    }
+
+
+def test_gmail_ingest_reads_normally_once_the_token_matches_the_declared_mailbox(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "db"
+    monkeypatch.setenv(gmail.TOKEN_VARIABLE, TOKEN)
+    raw = (
+        f"From: alerts@example.com\r\nTo: {MAILBOX}\r\nSubject: Job alert\r\n"
+        "Message-ID: <alert@example.com>\r\nMIME-Version: 1.0\r\n"
+        'Content-Type: text/plain; charset="utf-8"\r\n\r\n'
+        f"{JOB_TEXT}"
+    ).encode()
+    encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    opener = GmailIngestOpener(MAILBOX, {"aaa1": {"id": "aaa1", "raw": encoded}})
+    monkeypatch.setattr(gmail, "_OPENER", opener)
+    out = run(
+        monkeypatch,
+        capsys,
+        "gmail-ingest",
+        "--mailbox",
+        MAILBOX,
+        "--skill",
+        "python",
+        "--skill",
+        "sql",
+        "--db",
+        str(path),
+    )
+    result = json.loads(out)
+    assert result["mailbox"] == "gmail:operator@example.com"
+    assert result["read"] == 1
+    assert len(result["messages"][0]["reviews"]) == 1
+    assert opener.requests[0] == gmail.API_ROOT + "users/me/profile", (
+        "identity must be verified before any message is listed or fetched"
+    )
 
 
 @pytest.mark.parametrize(

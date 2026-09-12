@@ -8,11 +8,14 @@ import pytest
 
 from communications import gmail
 from communications.gmail import (
+    API_ROOT,
     GMAIL_HOST,
     READONLY_SCOPE,
     GmailCredentials,
     GmailError,
     GmailReader,
+    namespace_for,
+    profile_url,
     readable_url,
 )
 
@@ -50,18 +53,27 @@ def encoded(raw: bytes) -> str:
 
 
 class Recorder:
-    """Serves recorded synthetic Gmail payloads and records every request it is given."""
+    """Serves recorded synthetic Gmail payloads and records every request it is given.
 
-    def __init__(self, pages=(), bodies=None, status=200):
+    Answers the profile identity check with `mailbox` -- the reader's own declared mailbox
+    by default -- so a test that is not about identity verification is not forced to know
+    about it: the check passes transparently, exactly as it would against a real Gmail
+    account whose token matches what it was configured for.
+    """
+
+    def __init__(self, pages=(), bodies=None, status=200, mailbox=None):
         self.pages = list(pages)
         self.bodies = dict(bodies or {})
         self.status = status
+        self.mailbox = MAILBOX if mailbox is None else mailbox
         self.requests = []
 
     def __call__(self, url, headers):
         self.requests.append((url, dict(headers)))
         if self.status != 200:
             return self.status, b'{"error": {"message": "synthetic failure"}}'
+        if url.endswith("/profile"):
+            return 200, json.dumps({"emailAddress": self.mailbox}).encode()
         if "/messages/" in url:
             identifier = url.split("/messages/", 1)[1].split("?", 1)[0]
             payload = self.bodies.get(identifier)
@@ -73,7 +85,7 @@ class Recorder:
 
 
 def reader(pages=(), bodies=None, **overrides):
-    transport = Recorder(pages, bodies)
+    transport = Recorder(pages, bodies, mailbox=overrides.get("mailbox", MAILBOX))
     return GmailReader(credentials(**overrides), transport=transport), transport
 
 
@@ -307,14 +319,16 @@ def test_the_mailbox_names_the_namespace_and_is_case_folded():
     assert credentials(mailbox=" Operator@Example.COM ").namespace == credentials().namespace
     plain, _ = reader(*one_message())
     mixed = GmailReader(
-        credentials(mailbox="Operator@Example.com"), transport=Recorder(*one_message())
+        credentials(mailbox="Operator@Example.com"),
+        transport=Recorder(*one_message(), mailbox="Operator@Example.com"),
     )
     assert plain.messages()[0].key == mixed.messages()[0].key
 
 
 def test_a_different_mailbox_keeps_an_identical_message_distinct():
     other = GmailReader(
-        credentials(mailbox="second@example.com"), transport=Recorder(*one_message())
+        credentials(mailbox="second@example.com"),
+        transport=Recorder(*one_message(), mailbox="second@example.com"),
     )
     client, _ = reader(*one_message())
     assert client.messages()[0].key != other.messages()[0].key
@@ -409,7 +423,7 @@ def test_the_limit_bounds_the_read_and_stops_paging():
     ]
     transport = Recorder(pages)
     assert GmailReader(credentials(), transport=transport).identifiers(limit=1) == ("aaa1",)
-    assert len(transport.requests) == 1
+    assert len(transport.requests) == 2, "one identity check, then exactly one listing page"
 
 
 def test_a_duplicate_across_pages_does_not_consume_the_limit():
@@ -431,7 +445,7 @@ def test_a_page_of_only_duplicates_keeps_paging():
     transport = Recorder(pages)
     client = GmailReader(credentials(), transport=transport)
     assert client.identifiers(limit=3) == ("aaa1", "bbb2", "ccc3")
-    assert len(transport.requests) == 3
+    assert len(transport.requests) == 4, "one identity check, then exactly three listing pages"
 
 
 def test_unique_identifiers_keep_first_seen_order_across_pages():
@@ -461,7 +475,7 @@ def test_the_query_and_labels_are_encoded_into_the_request():
     GmailReader(credentials(), transport=transport).identifiers(
         query="from:alerts@example.com subject:job", label_ids=("Label_1", "Label_2")
     )
-    url = transport.requests[0][0]
+    url = transport.requests[-1][0]  # the listing request; [0] is the identity check
     assert "q=from%3Aalerts%40example.com+subject%3Ajob" in url
     assert "labelIds=Label_1" in url and "labelIds=Label_2" in url
 
@@ -540,3 +554,216 @@ def test_a_single_label_string_is_refused_rather_than_read_character_by_characte
 def test_a_transport_must_be_supplied_with_real_credentials():
     with pytest.raises(TypeError):
         GmailReader("not-credentials")
+
+
+# --- the profile identity endpoint is a second, narrower allowlist --------------------
+
+
+def test_the_exact_profile_endpoint_is_admitted():
+    url = API_ROOT + "users/me/profile"
+    assert profile_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "users/me/messages",
+        "users/me/profile/",
+        "users/me/profile?fields=emailAddress",
+        "users/me/profileX",
+        "users/me/messages/profile",
+        "users/me/drafts/profile",
+    ],
+)
+def test_every_path_but_the_exact_profile_endpoint_is_refused(path):
+    with pytest.raises(GmailError):
+        profile_url(API_ROOT + path)
+
+
+def test_readable_url_does_not_admit_the_profile_endpoint():
+    """The identity check gets its own allowlist rather than widening the messages one."""
+    with pytest.raises(GmailError):
+        readable_url(API_ROOT + "users/me/profile")
+
+
+def test_the_profile_endpoint_refuses_the_same_hostile_hosts_the_read_allowlist_does():
+    """Both allowlists share _validated_host(), so a host refused there is refused here too."""
+    with pytest.raises(GmailError):
+        profile_url("http://" + GMAIL_HOST + "/gmail/v1/users/me/profile")
+    with pytest.raises(GmailError):
+        profile_url("https://evil.example.com/gmail/v1/users/me/profile")
+
+
+# --- proving whose mailbox a credential belongs to -------------------------------------
+
+
+def test_namespace_for_normalizes_case_and_whitespace():
+    assert namespace_for(" Operator@Example.COM ") == "gmail:operator@example.com"
+
+
+def test_namespace_for_refuses_an_empty_mailbox():
+    with pytest.raises(ValueError):
+        namespace_for("   ")
+
+
+def test_namespace_for_refuses_a_non_string_mailbox():
+    with pytest.raises(TypeError):
+        namespace_for(None)
+
+
+def test_a_credentials_namespace_and_an_identity_response_normalize_the_same_way():
+    """Comparing the two compares one against the other; both must be built by one function."""
+    assert credentials(mailbox=" Operator@Example.COM ").namespace == namespace_for(MAILBOX)
+
+
+class IdentityTransport:
+    """Serves one recorded profile response and records every request it is given."""
+
+    def __init__(self, payload=None, status=200):
+        self.payload = {} if payload is None else payload
+        self.status = status
+        self.requests = []
+
+    def __call__(self, url, headers):
+        self.requests.append((url, dict(headers)))
+        if self.status != 200:
+            return self.status, b'{"error": {"message": "synthetic failure"}}'
+        return 200, json.dumps(self.payload).encode()
+
+
+def test_identity_reads_the_profile_endpoint_and_returns_a_namespace():
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() == namespace_for(MAILBOX)
+    assert transport.requests[0][0] == API_ROOT + "users/me/profile"
+
+
+def test_identity_normalizes_case_the_same_way_as_the_declared_mailbox():
+    transport = IdentityTransport({"emailAddress": "Operator@Example.COM"})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() == credentials().namespace
+
+
+def test_identity_makes_no_request_shaped_like_a_message_read():
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    client.identity()
+    assert all("/messages" not in url for url, _ in transport.requests)
+
+
+def test_identity_reserves_nothing_and_reads_nothing_beyond_the_one_profile_request():
+    """identity() alone must not be usable to smuggle a listing through the profile path."""
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    client.identity()
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"emailAddress": ""},
+        {"emailAddress": "   "},
+        {"emailAddress": None},
+        {"emailAddress": 17},
+    ],
+)
+def test_identity_refuses_a_response_with_no_usable_email_address(payload):
+    transport = IdentityTransport(payload)
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="did not include an email address"):
+        client.identity()
+
+
+@pytest.mark.parametrize(
+    "status,fragment",
+    [(401, "reauthorize"), (403, "profile read"), (429, "rate limited"), (500, "HTTP 500")],
+)
+def test_identity_reports_a_read_specific_failure_and_never_echoes_the_token(status, fragment):
+    transport = IdentityTransport(status=status)
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match=fragment) as failure:
+        client.identity()
+    assert TOKEN not in str(failure.value)
+
+
+def test_a_verified_mailbox_differing_from_the_declared_one_is_a_different_namespace():
+    """identity() only proves the fact; verify_identity() is what acts on a mismatch."""
+    transport = IdentityTransport({"emailAddress": "someone-else@example.com"})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() != client.namespace
+
+
+# --- verify_identity() gates every message-read entry point, not just a caller that checks --
+
+
+def test_verify_identity_returns_the_declared_namespace_on_a_match():
+    client, _ = reader(*one_message())
+    assert client.verify_identity() == client.namespace
+
+
+def test_verify_identity_raises_and_names_both_namespaces_on_a_mismatch():
+    transport = Recorder(mailbox="someone-else@example.com")
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="someone-else@example.com") as failure:
+        client.verify_identity()
+    assert credentials().namespace in str(failure.value)
+
+
+def test_messages_fails_closed_on_a_mismatched_identity_before_any_listing():
+    """The direct API is safe on its own: a caller does not need to know a special
+    call-sequence to be protected from a mismatched credential."""
+    transport = Recorder([{"messages": [{"id": "aaa1"}]}], mailbox="someone-else@example.com")
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="someone-else@example.com"):
+        client.messages()
+    assert [url for url, _ in transport.requests] == [API_ROOT + "users/me/profile"]
+
+
+def test_identifiers_fails_closed_on_a_mismatched_identity_before_any_listing():
+    transport = Recorder([{"messages": [{"id": "aaa1"}]}], mailbox="someone-else@example.com")
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="someone-else@example.com"):
+        client.identifiers()
+    assert [url for url, _ in transport.requests] == [API_ROOT + "users/me/profile"]
+
+
+def test_fetch_fails_closed_on_a_mismatched_identity_before_any_message_read():
+    transport = Recorder(
+        bodies={"1111aaaa2222bbbb": {"id": "1111aaaa2222bbbb", "raw": "x"}},
+        mailbox="someone-else@example.com",
+    )
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="someone-else@example.com"):
+        client.fetch("1111aaaa2222bbbb")
+    assert [url for url, _ in transport.requests] == [API_ROOT + "users/me/profile"]
+
+
+def test_a_matching_identity_never_blocks_the_direct_api():
+    """The other half of the guarantee: a correctly matched token reads normally."""
+    client, transport = reader(*one_message())
+    assert len(client.messages()) == 1
+    assert any(url.endswith("/profile") for url, _ in transport.requests)
+
+
+def test_verify_identity_is_cached_across_a_batch_so_n_messages_cost_one_profile_read():
+    pages = [{"messages": [{"id": "aaa1"}, {"id": "bbb2"}]}]
+    bodies = {
+        "aaa1": {"id": "aaa1", "raw": encoded(raw_bytes())},
+        "bbb2": {"id": "bbb2", "raw": encoded(raw_bytes(subject="Second"))},
+    }
+    client, transport = reader(pages, bodies)
+    assert len(client.messages()) == 2
+    profile_requests = [url for url, _ in transport.requests if url.endswith("/profile")]
+    assert len(profile_requests) == 1, (
+        "one profile read must cover the whole batch, not one per message"
+    )
+
+
+def test_an_explicit_verify_identity_call_primes_the_cache_for_later_reads():
+    client, transport = reader(*one_message())
+    client.verify_identity()
+    client.messages()
+    profile_requests = [url for url, _ in transport.requests if url.endswith("/profile")]
+    assert len(profile_requests) == 1

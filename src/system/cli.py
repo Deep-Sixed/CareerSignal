@@ -451,6 +451,11 @@ def main():
         if not args.mailbox or not args.skill:
             parser.error("gmail-ingest requires --mailbox and at least one --skill")
         reader = GmailReader(GmailCredentials(token, args.mailbox))
+        # reader.identifiers()/fetch()/messages() already refuse to run against an
+        # unverified or mismatched mailbox identity on their own; this call is the same
+        # adapter-owned guarantee, invoked early so a mismatch is caught before Repository
+        # or Workflow are even constructed rather than merely before the first message.
+        reader.verify_identity()
         repository = Repository(path)
         workflow = Workflow(
             repository,
