@@ -8,11 +8,14 @@ import pytest
 
 from communications import gmail
 from communications.gmail import (
+    API_ROOT,
     GMAIL_HOST,
     READONLY_SCOPE,
     GmailCredentials,
     GmailError,
     GmailReader,
+    namespace_for,
+    profile_url,
     readable_url,
 )
 
@@ -540,3 +543,143 @@ def test_a_single_label_string_is_refused_rather_than_read_character_by_characte
 def test_a_transport_must_be_supplied_with_real_credentials():
     with pytest.raises(TypeError):
         GmailReader("not-credentials")
+
+
+# --- the profile identity endpoint is a second, narrower allowlist --------------------
+
+
+def test_the_exact_profile_endpoint_is_admitted():
+    url = API_ROOT + "users/me/profile"
+    assert profile_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "users/me/messages",
+        "users/me/profile/",
+        "users/me/profile?fields=emailAddress",
+        "users/me/profileX",
+        "users/me/messages/profile",
+        "users/me/drafts/profile",
+    ],
+)
+def test_every_path_but_the_exact_profile_endpoint_is_refused(path):
+    with pytest.raises(GmailError):
+        profile_url(API_ROOT + path)
+
+
+def test_readable_url_does_not_admit_the_profile_endpoint():
+    """The identity check gets its own allowlist rather than widening the messages one."""
+    with pytest.raises(GmailError):
+        readable_url(API_ROOT + "users/me/profile")
+
+
+def test_the_profile_endpoint_refuses_the_same_hostile_hosts_the_read_allowlist_does():
+    """Both allowlists share _validated_host(), so a host refused there is refused here too."""
+    with pytest.raises(GmailError):
+        profile_url("http://" + GMAIL_HOST + "/gmail/v1/users/me/profile")
+    with pytest.raises(GmailError):
+        profile_url("https://evil.example.com/gmail/v1/users/me/profile")
+
+
+# --- proving whose mailbox a credential belongs to -------------------------------------
+
+
+def test_namespace_for_normalizes_case_and_whitespace():
+    assert namespace_for(" Operator@Example.COM ") == "gmail:operator@example.com"
+
+
+def test_namespace_for_refuses_an_empty_mailbox():
+    with pytest.raises(ValueError):
+        namespace_for("   ")
+
+
+def test_namespace_for_refuses_a_non_string_mailbox():
+    with pytest.raises(TypeError):
+        namespace_for(None)
+
+
+def test_a_credentials_namespace_and_an_identity_response_normalize_the_same_way():
+    """Comparing the two compares one against the other; both must be built by one function."""
+    assert credentials(mailbox=" Operator@Example.COM ").namespace == namespace_for(MAILBOX)
+
+
+class IdentityTransport:
+    """Serves one recorded profile response and records every request it is given."""
+
+    def __init__(self, payload=None, status=200):
+        self.payload = {} if payload is None else payload
+        self.status = status
+        self.requests = []
+
+    def __call__(self, url, headers):
+        self.requests.append((url, dict(headers)))
+        if self.status != 200:
+            return self.status, b'{"error": {"message": "synthetic failure"}}'
+        return 200, json.dumps(self.payload).encode()
+
+
+def test_identity_reads_the_profile_endpoint_and_returns_a_namespace():
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() == namespace_for(MAILBOX)
+    assert transport.requests[0][0] == API_ROOT + "users/me/profile"
+
+
+def test_identity_normalizes_case_the_same_way_as_the_declared_mailbox():
+    transport = IdentityTransport({"emailAddress": "Operator@Example.COM"})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() == credentials().namespace
+
+
+def test_identity_makes_no_request_shaped_like_a_message_read():
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    client.identity()
+    assert all("/messages" not in url for url, _ in transport.requests)
+
+
+def test_identity_reserves_nothing_and_reads_nothing_beyond_the_one_profile_request():
+    """identity() alone must not be usable to smuggle a listing through the profile path."""
+    transport = IdentityTransport({"emailAddress": MAILBOX})
+    client = GmailReader(credentials(), transport=transport)
+    client.identity()
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"emailAddress": ""},
+        {"emailAddress": "   "},
+        {"emailAddress": None},
+        {"emailAddress": 17},
+    ],
+)
+def test_identity_refuses_a_response_with_no_usable_email_address(payload):
+    transport = IdentityTransport(payload)
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match="did not include an email address"):
+        client.identity()
+
+
+@pytest.mark.parametrize(
+    "status,fragment",
+    [(401, "reauthorize"), (403, "profile read"), (429, "rate limited"), (500, "HTTP 500")],
+)
+def test_identity_reports_a_read_specific_failure_and_never_echoes_the_token(status, fragment):
+    transport = IdentityTransport(status=status)
+    client = GmailReader(credentials(), transport=transport)
+    with pytest.raises(GmailError, match=fragment) as failure:
+        client.identity()
+    assert TOKEN not in str(failure.value)
+
+
+def test_a_verified_mailbox_differing_from_the_declared_one_is_a_different_namespace():
+    """identity() only proves what the credential is; the caller decides a mismatch fails
+    closed, exactly as workflow.draft() does on the compose side."""
+    transport = IdentityTransport({"emailAddress": "someone-else@example.com"})
+    client = GmailReader(credentials(), transport=transport)
+    assert client.identity() != client.namespace

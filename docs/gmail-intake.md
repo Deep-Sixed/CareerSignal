@@ -6,7 +6,7 @@ CareerSignal does create Gmail drafts, from an explicitly approved review only, 
 
 ## What the adapter may address
 
-Two URLs exist for this adapter, both on one fixed host:
+Two URLs exist for reading messages, both on one fixed host:
 
 ```text
 https://gmail.googleapis.com/gmail/v1/users/me/messages
@@ -14,6 +14,14 @@ https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=raw
 ```
 
 `readable_url` refuses everything else before a bearer token is attached: a different host, a look-alike host, plain HTTP, a non-default port, userinfo in the URL, any path outside the allowlist, and any path whose final segment names a Gmail operation or collection rather than a message (`send`, `drafts`, `modify`, `trash`, `batchDelete`, `settings`, and the rest). Message identifiers are separately validated against `[0-9A-Za-z_-]{1,128}` and the same reserved list, so neither a malformed identifier nor one Gmail itself returned can be spelled into a mutation URL.
+
+A third URL exists only to prove whose mailbox the token belongs to, and it is the only other endpoint this adapter can reach:
+
+```text
+https://gmail.googleapis.com/gmail/v1/users/me/profile
+```
+
+It has its own allowlist, `profile_url`, deliberately kept apart from `readable_url` rather than folded into it — admitting `/profile` into the messages allowlist would widen a boundary built for a different purpose. Neither allowlist accepts the other's endpoint. See [Mailbox identity](#mailbox-identity) below for what this URL is used for.
 
 Redirects are refused rather than followed. Following one would re-send the bearer token to whatever host the response named.
 
@@ -26,6 +34,18 @@ The access token is read from the `CAREERSIGNAL_GMAIL_TOKEN` environment variabl
 The token appears only in an `Authorization` header. It is never placed in a URL or query string, never included in an error message, and `GmailCredentials` redacts it from its own representation so it cannot reach a log line, a traceback frame dump, or a captured test report.
 
 Because the token is only ever used as a header value, a token that could not legally sit in one — anything outside visible ASCII, including a stray newline, a space or a NUL — is refused when the credentials are constructed. It is refused rather than trimmed: `http.client` rejects an illegal header by quoting the whole value, which would put the token in a traceback, and silently trimming would authenticate with a credential you did not supply. The error says what is wrong without repeating the value. If your token arrives from a file, strip the trailing newline yourself so the credential you intend is the credential that is used.
+
+## Mailbox identity
+
+`--mailbox` is what the operator typed, not evidence of what the token can actually read. Gmail's `users.me/messages` endpoint serves whatever mailbox the bearer token belongs to, regardless of this flag, so a token for one mailbox combined with a different declared `--mailbox` would otherwise read one mailbox while every message it returned was recorded under another mailbox's namespace — a provenance and audit-attribution defect, though not an authorization one: the token, not the flag, still governs what can actually be read.
+
+Before any message is listed or fetched, `GmailReader.identity()` makes one GET against `users.me/profile` — readable under the same `gmail.readonly` grant already held, no additional scope required — and reads back the token's own `emailAddress`. That value is normalized the same way the declared mailbox is (case-folded, whitespace-collapsed) and compared against it. `gmail-ingest` refuses to proceed if they differ, before `Repository` or `Workflow` are even constructed and before any message is listed:
+
+```text
+Gmail token belongs to gmail:<verified>, not the declared --mailbox (gmail:<declared>); provide a token for that mailbox or correct --mailbox
+```
+
+Nothing is rewritten to make the two agree: a mismatch is a configuration error, not something CareerSignal silently repairs. Correct whichever one is wrong — the token or the flag — and run the command again. Only once the two match does `gmail:<mailbox>` become the namespace under which any message from that run is stored, so provenance rests on what the token proved, not merely on what the flag declared.
 
 ## Provenance
 
@@ -56,7 +76,7 @@ uv run careersignal gmail-ingest \
   --db /path/to/private.db
 ```
 
-The command prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox)).messages(...)` followed by `Workflow.intake_message` per message.
+The command verifies the token's mailbox identity before reading anything — see [Mailbox identity](#mailbox-identity) — then prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox))`, with `.identity()` checked against `.namespace` by the caller before `.messages(...)` is called, followed by `Workflow.intake_message` per message.
 
 ## Limitations
 

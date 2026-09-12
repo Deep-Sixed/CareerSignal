@@ -602,7 +602,58 @@ def test_a_different_mailbox_always_changes_identity():
     assert not failures, report(failures, len(DISTINCT_MAILBOXES))
 
 
-# --- Invariant 10: the families are not silently empty -----------------------------------
+# --- Invariant 10: the profile identity endpoint is isolated from the message allowlist --
+
+PROFILE_URL = f"https://{GMAIL_HOST}/gmail/v1/users/me/profile"
+PROFILE_LOOKALIKES = [
+    PROFILE_URL + "/",
+    PROFILE_URL + "extra",
+    PROFILE_URL + "?fields=emailAddress",
+    PROFILE_URL + "#frag",
+    f"https://{GMAIL_HOST}/gmail/v1/users/me/profile/extra",
+    f"https://{GMAIL_HOST}/gmail/v1/users/me/Profile",
+    f"https://{GMAIL_HOST}/gmail/v1/users/me/messages",
+    f"https://{GMAIL_HOST}/gmail/v1/users/me/drafts",
+    f"https://{GMAIL_HOST}/gmail/v2/users/me/profile",
+    "https://evil.example.com/gmail/v1/users/me/profile",
+    f"https://{GMAIL_HOST}.evil.example.com/gmail/v1/users/me/profile",
+    f"http://{GMAIL_HOST}/gmail/v1/users/me/profile",
+    f"https://{GMAIL_HOST}:8443/gmail/v1/users/me/profile",
+    f"https://{GMAIL_HOST}/upload/gmail/v1/users/me/profile",
+]
+
+
+def test_only_the_exact_profile_endpoint_survives_the_identity_guard():
+    failures, refused = [], 0
+    for url in PROFILE_LOOKALIKES:
+        try:
+            gmail.profile_url(url)
+        except GmailError:
+            refused += 1
+            continue
+        failures.append(url)
+    assert not failures, report(failures, len(PROFILE_LOOKALIKES))
+    assert refused == len(PROFILE_LOOKALIKES), (
+        f"only {refused} of {len(PROFILE_LOOKALIKES)} refused"
+    )
+
+
+def test_the_exact_profile_endpoint_survives_its_own_guard():
+    assert gmail.profile_url(PROFILE_URL) == PROFILE_URL
+
+
+def test_neither_allowlist_admits_the_others_endpoint():
+    """The message and identity allowlists are kept apart on purpose: neither widens to cover
+    what the other exists to reach."""
+    with pytest.raises(GmailError):
+        gmail.readable_url(PROFILE_URL)
+    with pytest.raises(GmailError):
+        gmail.profile_url(LIST_URL)
+    with pytest.raises(GmailError):
+        gmail.profile_url(f"{GET_PREFIX}aaa1")
+
+
+# --- Invariant 11: the families are not silently empty -----------------------------------
 
 
 def test_the_generated_families_are_large_enough_to_be_worth_running():
@@ -618,6 +669,7 @@ def test_the_generated_families_are_large_enough_to_be_worth_running():
         "distinct mailboxes": len(DISTINCT_MAILBOXES),
         "urls": len(URL_CASES),
         "echoed identities": len(ECHO_CASES),
+        "profile lookalikes": len(PROFILE_LOOKALIKES),
     }
     assert all(count > 3 for count in sizes.values()), sizes
     assert sum(sizes.values()) > 300, sizes

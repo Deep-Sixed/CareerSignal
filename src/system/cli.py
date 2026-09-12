@@ -43,7 +43,7 @@ import json
 import os
 
 from communications.controlled import ControlledDrafts
-from communications.gmail import TOKEN_VARIABLE, GmailCredentials, GmailReader
+from communications.gmail import TOKEN_VARIABLE, GmailCredentials, GmailError, GmailReader
 from communications.gmail_draft import (
     COMPOSE_TOKEN_VARIABLE,
     GmailComposeCredentials,
@@ -451,6 +451,18 @@ def main():
         if not args.mailbox or not args.skill:
             parser.error("gmail-ingest requires --mailbox and at least one --skill")
         reader = GmailReader(GmailCredentials(token, args.mailbox))
+        # --mailbox is what the operator typed, not evidence of what the token can read:
+        # Google chooses the real mailbox from the bearer token regardless of this flag.
+        # Proving the two agree, before anything is listed, fetched or written under the
+        # declared name, is what keeps a mismatched token from reading one mailbox while
+        # this program records the result under another's identity. Mirrors the ordering
+        # identity() enforces on the compose side before a draft is claimed.
+        verified_namespace = reader.identity()
+        if verified_namespace != reader.namespace:
+            raise GmailError(
+                f"Gmail token belongs to {verified_namespace}, not the declared --mailbox "
+                f"({reader.namespace}); provide a token for that mailbox or correct --mailbox"
+            )
         repository = Repository(path)
         workflow = Workflow(
             repository,
