@@ -47,9 +47,10 @@ BODY = (
     "Title: Application Engineer\r\nCompany: Example Company\r\n"
     "Location: remote\r\nSkills: Python, SQL\r\nURL: https://jobs.example.com/roles/1\r\n"
 ).encode()
-# The two shapes the adapter is allowed to address, and nothing else.
+# The three shapes the adapter is allowed to address, and nothing else.
 LIST_URL = f"https://{GMAIL_HOST}/gmail/v1/users/me/messages"
 GET_PREFIX = f"{LIST_URL}/"
+PROFILE_URL = f"https://{GMAIL_HOST}/gmail/v1/users/me/profile"
 
 
 def credentials(**overrides):
@@ -115,7 +116,12 @@ class Opener:
             }
         )
         url = fullurl.full_url
-        if url.startswith(GET_PREFIX):
+        if url.endswith("/profile"):
+            # Answers the identity check with the reader's own declared mailbox, so a
+            # family that is not about identity verification is not forced to know about
+            # it: the check passes transparently.
+            payload = {"emailAddress": MAILBOX}
+        elif url.startswith(GET_PREFIX):
             identifier = url[len(GET_PREFIX) :].split("?", 1)[0]
             payload = self.bodies.get(identifier, {"id": identifier, "raw": encoded(BODY)})
         else:
@@ -244,6 +250,22 @@ def unique_in(layout):
     return tuple(dict.fromkeys(i for page in layout for i in page))
 
 
+def paginated_transport(layout):
+    """A transport serving one identity check, then the given listing pages in order.
+
+    The identity check is answered out of band, before the pages iterator is touched, so
+    it cannot consume a page a pagination family depends on being offered in sequence.
+    """
+    pages = iter(pages_for(layout))
+
+    def transport(url, headers):
+        if url.endswith("/profile"):
+            return 200, json.dumps({"emailAddress": MAILBOX}).encode()
+        return 200, json.dumps(next(pages, {})).encode()
+
+    return transport
+
+
 # --- Invariants 1 and 2: every request is a GET that carries no body ---------------------
 
 
@@ -274,7 +296,8 @@ def test_every_generated_request_addresses_only_an_allowlisted_read(opener):
         r["url"]
         for r in opener.requests
         if not (
-            r["url"] == LIST_URL
+            r["url"] == PROFILE_URL
+            or r["url"] == LIST_URL
             or r["url"].startswith(f"{LIST_URL}?")
             or (
                 r["url"].startswith(GET_PREFIX)
@@ -283,6 +306,9 @@ def test_every_generated_request_addresses_only_an_allowlisted_read(opener):
         )
     ]
     assert not failures, report(failures, len(opener.requests))
+    assert any(r["url"] == PROFILE_URL for r in opener.requests), (
+        "no identity check was made; the allowlist check would pass vacuously for it"
+    )
 
 
 # --- Invariants 3 and 4: pagination neither over- nor under-reads -------------------------
@@ -293,10 +319,7 @@ def test_a_duplicate_entry_never_consumes_the_unique_message_limit():
     for layout, limit in PAGINATION_CASES:
         reader = GmailReader(
             credentials(),
-            transport=lambda url, headers, p=iter(pages_for(layout)): (
-                200,
-                json.dumps(next(p, {})).encode(),
-            ),
+            transport=paginated_transport(layout),
         )
         found = reader.identifiers(limit=limit)
         expected = unique_in(layout)[:limit]
@@ -311,10 +334,7 @@ def test_every_unique_message_offered_within_the_page_budget_is_returned():
     for layout in PAGE_LAYOUTS:
         reader = GmailReader(
             credentials(),
-            transport=lambda url, headers, p=iter(pages_for(layout)): (
-                200,
-                json.dumps(next(p, {})).encode(),
-            ),
+            transport=paginated_transport(layout),
         )
         found = reader.identifiers(limit=gmail.MAX_RESULTS)
         if found != unique_in(layout):
@@ -327,10 +347,7 @@ def test_a_returned_listing_never_repeats_and_never_exceeds_its_limit():
     for layout, limit in PAGINATION_CASES:
         reader = GmailReader(
             credentials(),
-            transport=lambda url, headers, p=iter(pages_for(layout)): (
-                200,
-                json.dumps(next(p, {})).encode(),
-            ),
+            transport=paginated_transport(layout),
         )
         found = reader.identifiers(limit=limit)
         offered = unique_in(layout)
@@ -551,13 +568,16 @@ def message_for(identifier, header_id="<alert@example.com>", subject="Job alert"
     raw = BODY.replace(b"<alert@example.com>", header_id.encode()).replace(
         b"Subject: Job alert", f"Subject: {subject}".encode()
     )
-    reader = GmailReader(
-        credentials(mailbox=mailbox),
-        transport=lambda url, headers: (
-            200,
-            json.dumps({"id": identifier, "raw": encoded(raw)}).encode(),
-        ),
-    )
+
+    def transport(url, headers):
+        if url.endswith("/profile"):
+            # Echoes the same mailbox the reader was declared for, so identity
+            # verification passes transparently: this family is about provenance
+            # identity from the message, not about a mismatched credential.
+            return 200, json.dumps({"emailAddress": mailbox}).encode()
+        return 200, json.dumps({"id": identifier, "raw": encoded(raw)}).encode()
+
+    reader = GmailReader(credentials(mailbox=mailbox), transport=transport)
     return reader.fetch(identifier)
 
 
@@ -604,7 +624,6 @@ def test_a_different_mailbox_always_changes_identity():
 
 # --- Invariant 10: the profile identity endpoint is isolated from the message allowlist --
 
-PROFILE_URL = f"https://{GMAIL_HOST}/gmail/v1/users/me/profile"
 PROFILE_LOOKALIKES = [
     PROFILE_URL + "/",
     PROFILE_URL + "extra",

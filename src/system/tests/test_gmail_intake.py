@@ -41,6 +41,8 @@ class Mailbox:
     def __call__(self, url, headers):
         if self.on_request:
             self.on_request()
+        if url.endswith("/profile"):
+            return 200, json.dumps({"emailAddress": MAILBOX}).encode()
         if "/messages/" in url:
             identifier = url.split("/messages/", 1)[1].split("?", 1)[0]
             body = self.messages[identifier]

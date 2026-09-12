@@ -39,13 +39,15 @@ Because the token is only ever used as a header value, a token that could not le
 
 `--mailbox` is what the operator typed, not evidence of what the token can actually read. Gmail's `users.me/messages` endpoint serves whatever mailbox the bearer token belongs to, regardless of this flag, so a token for one mailbox combined with a different declared `--mailbox` would otherwise read one mailbox while every message it returned was recorded under another mailbox's namespace — a provenance and audit-attribution defect, though not an authorization one: the token, not the flag, still governs what can actually be read.
 
-Before any message is listed or fetched, `GmailReader.identity()` makes one GET against `users.me/profile` — readable under the same `gmail.readonly` grant already held, no additional scope required — and reads back the token's own `emailAddress`. That value is normalized the same way the declared mailbox is (case-folded, whitespace-collapsed) and compared against it. `gmail-ingest` refuses to proceed if they differ, before `Repository` or `Workflow` are even constructed and before any message is listed:
+`GmailReader` owns this guarantee itself. Its `identifiers()` and `fetch()` methods (and so `messages()`, which calls both) each call `verify_identity()` before making their own request — a caller does not need to know a special call sequence to be protected from a mismatched credential, because `reader.messages()` alone is already safe. `verify_identity()` makes one GET against `users.me/profile` — readable under the same `gmail.readonly` grant already held, no additional scope required — reads back the token's own `emailAddress`, normalizes it the same way the declared mailbox is (case-folded, whitespace-collapsed), and compares it against the declared namespace. It fails closed before any message is listed or fetched if they differ:
 
 ```text
-Gmail token belongs to gmail:<verified>, not the declared --mailbox (gmail:<declared>); provide a token for that mailbox or correct --mailbox
+Gmail token belongs to gmail:<verified>, not the declared mailbox (gmail:<declared>); provide a token for that mailbox or correct the declared mailbox
 ```
 
-Nothing is rewritten to make the two agree: a mismatch is a configuration error, not something CareerSignal silently repairs. Correct whichever one is wrong — the token or the flag — and run the command again. Only once the two match does `gmail:<mailbox>` become the namespace under which any message from that run is stored, so provenance rests on what the token proved, not merely on what the flag declared.
+Verification runs once per `GmailReader` instance and is cached, so a batch of many messages costs one profile read, not one per message. `gmail-ingest` also calls `reader.verify_identity()` explicitly, before `Repository` or `Workflow` are even constructed — an early invocation of the same adapter-owned guarantee, not a separate check the command has to get right on its own, and it costs no extra request: the reader's own entry points see the check already cached.
+
+Nothing is rewritten to make the two agree: a mismatch is a configuration error, not something CareerSignal silently repairs. Correct whichever one is wrong — the token or the declared mailbox — and try again. Only once the two match does `gmail:<mailbox>` become the namespace under which any message from that reader is stored, so provenance rests on what the token proved, not merely on what was declared.
 
 ## Provenance
 
@@ -76,7 +78,7 @@ uv run careersignal gmail-ingest \
   --db /path/to/private.db
 ```
 
-The command verifies the token's mailbox identity before reading anything — see [Mailbox identity](#mailbox-identity) — then prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox))`, with `.identity()` checked against `.namespace` by the caller before `.messages(...)` is called, followed by `Workflow.intake_message` per message.
+The command verifies the token's mailbox identity before reading anything — see [Mailbox identity](#mailbox-identity) — then prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox)).messages(...)` followed by `Workflow.intake_message` per message; `.messages()` verifies identity on its own, so no separate check is required to use it safely.
 
 ## Limitations
 
