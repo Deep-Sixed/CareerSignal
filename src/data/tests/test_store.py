@@ -1,11 +1,11 @@
 import json
+import sqlite3
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
-import libsql
 import pytest
 
 from data import store
@@ -111,47 +111,49 @@ def test_concurrent_initializers(tmp_path):
     assert sorted(len(r) for r in results) == [0, len(store.migration_files())]
 
 
+def _locked_database(path, locked, release):
+    """Own the SQLite connection on the thread that later releases its lock."""
+    holder = sqlite3.connect(str(path), isolation_level=None)
+    holder.execute("CREATE TABLE IF NOT EXISTS placeholder (id INTEGER)")
+    holder.execute("BEGIN EXCLUSIVE")
+    locked.set()
+    assert release.wait(5)
+    holder.rollback()
+    holder.close()
+
+
 def test_first_start_waits_out_a_contended_journal_mode(tmp_path):
     """A fresh database is not yet in WAL, so switching it can genuinely be locked out."""
     path = tmp_path / "contended.db"
-    holder = libsql.connect(str(path), isolation_level=None)
-    holder.execute("CREATE TABLE placeholder (id INTEGER)")
-    assert holder.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"
-    holder.execute("BEGIN EXCLUSIVE")
-    released = Event()
-
-    def release():
-        time.sleep(0.3)
-        holder.rollback()
-        released.set()
-
-    # Timed from before the releaser starts, so a slow scheduler cannot shorten the wait.
+    locked, release = Event(), Event()
     started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(release)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(_locked_database, path, locked, release)
+        assert locked.wait(2)
+        pool.submit(lambda: (time.sleep(0.3), release.set()))
         with store.connection(path) as conn:
             waited = time.monotonic() - started
             assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-            # The reservation policy transaction() relies on is restored for the caller.
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == store.BUSY_TIMEOUT_MS
-    assert released.is_set() and 0.3 <= waited < store.STARTUP_TIMEOUT
-    holder.close()
+        holder.result(timeout=3)
+    assert release.is_set() and 0.3 <= waited < store.STARTUP_TIMEOUT
 
 
 def test_contended_journal_mode_gives_up_within_its_budget(tmp_path, monkeypatch):
     """Contention that never clears must still fail, not hang."""
     monkeypatch.setattr(store, "STARTUP_TIMEOUT", 0.3)
     path = tmp_path / "blocked.db"
-    holder = libsql.connect(str(path), isolation_level=None)
-    holder.execute("CREATE TABLE placeholder (id INTEGER)")
-    holder.execute("BEGIN EXCLUSIVE")
-    started = time.monotonic()
-    with pytest.raises(RuntimeError, match="WAL unavailable"):
-        with store.connection(path):
-            pass
-    assert 0.3 <= time.monotonic() - started < 3
-    holder.rollback()
-    holder.close()
+    locked, release = Event(), Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(_locked_database, path, locked, release)
+        assert locked.wait(2)
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="WAL unavailable"):
+            with store.connection(path):
+                pass
+        assert 0.3 <= time.monotonic() - started < 3
+        release.set()
+        holder.result(timeout=3)
 
 
 def test_concurrent_first_start_of_a_fresh_database(tmp_path):
@@ -170,14 +172,14 @@ def test_concurrent_first_start_of_a_fresh_database(tmp_path):
             timeout=120,
         )
 
-    def release():
+    def release_workers():
         limit = time.monotonic() + 60
         while len(list(gate.iterdir())) < workers and time.monotonic() < limit:
             time.sleep(0.001)
         go.write_text("go", encoding="utf-8")
 
     with ThreadPoolExecutor(max_workers=workers + 1) as pool:
-        releaser = pool.submit(release)
+        releaser = pool.submit(release_workers)
         finished = list(pool.map(start, range(workers)))
         releaser.result(timeout=90)
     for done in finished:
@@ -186,7 +188,6 @@ def test_concurrent_first_start_of_a_fresh_database(tmp_path):
 
     assert [r for r in results if "error" not in r] == results
     assert {r["journal_mode"] for r in results} == {"wal"}
-    # Every worker observes the schema; exactly one is the writer that applied it.
     applied = sorted(len(r["applied"]) for r in results)
     assert applied == [0] * (workers - 1) + [len(store.migration_files())]
 

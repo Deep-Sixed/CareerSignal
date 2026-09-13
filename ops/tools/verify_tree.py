@@ -13,6 +13,8 @@ ALLOWED_IMPORTS = {
     "data": {"recruiting"},
     "system": OWNERS,
 }
+DATABASE_ENGINES = {"sqlite3", "libsql", "turso", "pysqlite3"}
+DATABASE_OWNER = "src/data/store.py"
 EXCLUDED = {".git", ".venv", ".pytest_cache", ".ruff_cache", "__pycache__", "dist", "build", "var"}
 ROOT_FILES = {"README.md", "AGENTS.md", "pyproject.toml", "uv.lock", ".gitignore"}
 
@@ -83,6 +85,10 @@ def inspect():
                     errors.append(f"Forbidden dependency: {name} -> {target}")
                 if ".tests" in target:
                     errors.append(f"Runtime depends on tests: {name}")
+                if top in DATABASE_ENGINES and name != DATABASE_OWNER:
+                    errors.append(
+                        f"Database engine import outside {DATABASE_OWNER}: {name} -> {target}"
+                    )
     if errors:
         raise SystemExit("\n".join(sorted(set(errors))))
     print(f"PASS: {count} publishable text files; ownership, imports, artifacts, identity checks")

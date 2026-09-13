@@ -8,10 +8,10 @@ version = "0.1.0"
 description = "Local, human-approved recruiting workflow"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
-dependencies = ["libsql==0.1.11"]
+dependencies = []
 
 [project.scripts]
-careersignal = "system.cli:main"
+careersignal = "system.entrypoint:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<9", "ruff>=0.11,<1", "build>=1.2,<2", "detect-secrets==1.5.0"]
