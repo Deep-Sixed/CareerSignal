@@ -83,11 +83,19 @@ Statuses are `new`, `reviewing`, `interested`, `applied`, `interviewing`, `offer
 ```sh
 uv run careersignal approve <review-id> --actor operator --db var/private.db
 uv run careersignal draft <review-id> --db var/private.db            # in-memory provider
-
-export CAREERSIGNAL_GMAIL_COMPOSE_TOKEN=...
-uv run careersignal draft <review-id> --provider gmail \
-  --mailbox operator@example.com --db var/private.db                 # a real Gmail draft
 ```
+
+An approval binds one destination, so a real Gmail draft is approved for that mailbox by name:
+
+```sh
+export CAREERSIGNAL_GMAIL_COMPOSE_TOKEN=...
+uv run careersignal approve <review-id> --actor operator --provider gmail \
+  --mailbox operator@example.com --db var/private.db
+uv run careersignal draft <review-id> --provider gmail \
+  --mailbox operator@example.com --db var/private.db
+```
+
+The two blocks are alternatives, not a sequence. A review holds one draft attempt: once one exists the decision is locked for reconciliation, so rehearsing with the in-memory provider spends the review rather than warming up for the real one.
 
 The compose token is a second credential with its own scope, adapter, and path allowlist; the adapter refuses the Gmail send endpoint by path. Before writing, the draft is rechecked against everything the approval bound. If the outcome of the write is unknown, nothing is retried:
 
