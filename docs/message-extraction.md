@@ -7,7 +7,7 @@ PR #1 adds supplied-message ingestion. It does not connect to Gmail or introduce
 Plain-text recruiter messages and multi-job alerts use explicit fields, with one `Title:`, `Role:`, or `Job title:` starting each job:
 
 ```text
-Hello candidate
+Hello candidate,
 Role: Application Engineer
 Company: Example Company
 Location: remote
