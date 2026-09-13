@@ -450,7 +450,7 @@ def test_an_approval_the_rules_refuse_is_an_outcome_not_a_usage_error(
 
 
 def test_the_detail_view_says_where_an_opportunity_stands(tmp_path, monkeypatch, capsys):
-    """The operator should not have to open libSQL to know whether they can act."""
+    """The operator should not have to open the database to know whether they can act."""
     path = tmp_path / "db"
     workflow, review, opportunity = ingest(path)
     printed = run(monkeypatch, capsys, "opportunity", opportunity, "--db", str(path))
