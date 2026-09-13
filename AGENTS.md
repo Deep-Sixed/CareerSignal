@@ -11,7 +11,7 @@ The authoritative build contract is [docs/build-contract.md](docs/build-contract
 - Add folders when they contain required work. Do not build placeholder hierarchies, generic frameworks, compatibility aliases, or a catch-all `utils` package.
 - Public fixtures must be synthetic. Personal resumes, messages, account identifiers, credentials, databases, and host configuration stay outside tracked source.
 - Preserve human approval before draft creation. Sending email or submitting applications is outside the baseline scope.
-- Use Python `>=3.11,<3.15` and `libsql==0.1.11`. No PostgreSQL, psycopg, pg0, pg_jsonschema, or external database server in the new runtime.
+- Use Python `>=3.11,<3.15` and the standard library's `sqlite3` module (SQLite 3.38 or newer at runtime). No runtime database dependency: no libSQL, PostgreSQL, psycopg, pg0, pg_jsonschema, or external database server. `src/data/store.py` is the only module that imports the engine.
 - Validate the installed wheel outside the checkout with dependencies and no source-path assistance. Include migrations; exclude tests and fixtures.
 - Keep the synthetic golden workflow passing as functionality grows. Report exactly which gates passed and which remain incomplete.
 - Reuse old code only after documenting the product requirement, new owner, dependencies, privacy review, and behavioral checks. No wholesale tree copy.

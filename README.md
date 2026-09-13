@@ -1,21 +1,55 @@
 # CareerSignal
 
-CareerSignal is a local recruiting application foundation: deduplicate opportunities, explain eligibility and fit, require explicit approval, and record controlled drafts and their audit trail in libSQL.
+A local, human-approved recruiting workflow. CareerSignal reads recruiting messages, deduplicates the opportunities in them, scores each against the skills and locations you configure, explains the score, and keeps an append-only record of what you decided and what was drafted on your behalf. Nothing leaves your machine without an explicit approval bound to exactly what you read.
 
-The application accepts structured opportunities, supplied text/HTML recruiting messages with explicit job fields, and messages read from an authorized Gmail mailbox. It creates Gmail drafts only from an explicitly approved review, under a separate compose credential, and does not send email, parse arbitrary alert layouts, or submit applications. See [message extraction](docs/message-extraction.md) for supported formats, local email-file ingestion, provenance, and limitations, and [Gmail intake](docs/gmail-intake.md) for the read-only mailbox adapter.
+## What it does and does not do
 
-## Run locally
+CareerSignal will:
 
-Use Python 3.11–3.14 (Windows: 3.11–3.13 with libSQL 0.1.11) and uv:
+- ingest structured job records, local `.eml` files, and messages read from a Gmail label under a read-only token;
+- extract explicitly labeled jobs (`Title:`, `Company:`, `URL:`, `Location:`, `Skills:`) and refuse to guess at anything else;
+- deduplicate by canonical job URL, so the same posting in three alerts is one opportunity;
+- score stated-skill coverage and location eligibility, and record the reasons alongside the score;
+- track each opportunity through a fixed status vocabulary with a full history of who changed it and why;
+- create a Gmail *draft* replying to a recruiter, but only from a review you approved, under a separate compose token, and never twice.
+
+CareerSignal will not:
+
+- send email, submit applications, or click anything;
+- parse arbitrary job-board layouts or infer fields that were not stated;
+- retry an external write whose outcome is unknown;
+- act on an approval whose review, wording, recipient, or destination has changed since you gave it.
+
+It is a command-line tool with no server, no accounts, no runtime dependencies, and a single SQLite file for state. The design notes in [docs/](docs/) explain each guarantee and the tests that hold it.
+
+## Requirements
+
+Python 3.11–3.14 and [uv](https://docs.astral.sh/uv/). Storage is the interpreter's own SQLite through the standard library; SQLite 3.38 or newer is required and an older runtime is refused with its version named. There are no other runtime dependencies. Linux, macOS, and Windows are all covered by CI.
+
+## Quick start
 
 ```sh
 uv sync --locked
+uv run careersignal version                      # what this interpreter provides
 uv run careersignal init --db var/careersignal.db
 uv run careersignal verify --db var/careersignal.db
-uv run careersignal demo --db var/synthetic.db
+uv run careersignal demo --db var/synthetic.db   # synthetic end-to-end run, no network
 ```
 
-Reading a mailbox is a separate, explicitly authorized command:
+`version` opens no database. It prints the package, Python and SQLite versions, the SQLite floor, and whether the runtime carries SQLite's WAL-reset fix; it is the first thing to include in a bug report. `demo` is a certification scenario with a simulated approval and an in-memory draft provider; keep it in its own database.
+
+Relative database paths resolve from the current directory. `CAREERSIGNAL_DB_PATH` sets the default; `--db` overrides it. Keep real data under the ignored `var/` directory or outside the tree.
+
+## A search, end to end
+
+**1. Bring opportunities in.** From a saved message file, naming the source and your skills:
+
+```sh
+uv run careersignal ingest --message alert.eml --namespace personal-inbox \
+  --skill python --skill sql --location remote --db var/private.db
+```
+
+Or from a Gmail label, with a read-only token in the environment (never on the command line):
 
 ```sh
 export CAREERSIGNAL_GMAIL_TOKEN=...
@@ -23,62 +57,64 @@ uv run careersignal gmail-ingest --mailbox operator@example.com --label Label_Jo
   --skill python --skill sql --db var/private.db
 ```
 
-The Gmail *intake* adapter is read-only by construction: it defines no send, draft or modify operation, addresses one fixed host and two read URLs, refuses redirects, and takes its token from the environment rather than a flag. It creates no drafts and approves nothing, and it cannot address the drafts collection at all. Creating a draft is a separate adapter under a separate credential, described below. The token's scope is configured, not verified, and the tests drive recorded synthetic payloads rather than a live mailbox — see [Gmail intake](docs/gmail-intake.md) for exactly what is and is not established.
+The intake adapter can address only two Gmail read endpoints on one fixed host, refuses redirects, and verifies that the token belongs to the mailbox you named before it reads anything. It cannot create, modify, or send. See [Gmail intake](docs/gmail-intake.md) and [message extraction](docs/message-extraction.md) for the supported formats and their limits.
 
-`demo` is an explicitly synthetic certification scenario, including a simulated operator approval. Use a separate demo database. Repeating it proves persisted receipt replay without creating another controlled draft. The provider is in-memory: a process restart loses its unrecorded drafts; unresolved attempts stay uncertain rather than being retried blindly.
-
-Outside the demo, call `Workflow.intake`, inspect `Repository.review`, record a decision with `Repository.decide`, then call `Workflow.draft`. These are local trusted-caller APIs, not authenticated public endpoints. A changed review needs a new approval. A review recorded before stated skill coverage is not actionable after upgrading; re-ingest its opportunity under a new message ID to score it again. Incoming message IDs are immutable: reusing an ID with different content fails, while repeating the same message returns its original review references. Re-evaluation requires a new intake event.
-
-Read what has accumulated with the operator views:
+**2. See what you have.** Read-only views, as a table or `--json`:
 
 ```sh
 uv run careersignal opportunities --db var/private.db
-uv run careersignal opportunities --db var/private.db --active --min-coverage 70
+uv run careersignal opportunities --active --min-coverage 70 --db var/private.db
 uv run careersignal opportunity <id> --db var/private.db
-uv run careersignal opportunities --db var/private.db --json
 ```
 
-These are read-only: they record no status, decide no review, create no draft and contact no mailbox. A table is printed by default and `--json` gives the same query result structured for other tools. The detail view also says whether an opportunity has been approved and whether a draft was refused, attempted, left uncertain or created, and shows the exact material an approval binds — review id, source message, recipient, subject and wording — so an outward draft is never approved unseen. See [operator views](docs/operator-views.md) and [the approval packet](docs/operator-interface.md#the-approval-packet).
+The detail view shows the score and its reasons, the status history, whether a draft was attempted, and the exact material an approval would bind: review id, source message, recipient, subject, and wording. See [operator views](docs/operator-views.md).
 
-Moving an opportunity through the search is one command, and it names the state it was decided against:
+**3. Move it along.** Each status change names the event you read it against, and is refused if the opportunity moved in between:
 
 ```sh
-uv run careersignal opportunity <id> --db var/private.db            # read the status event
 uv run careersignal status <id> --to applied --expect 12 \
   --actor operator --reason "Sent CV" --db var/private.db
 ```
 
-If the opportunity moved since that event, nothing is written and the command says what it found. See [the operator interface](docs/operator-interface.md) for the whole command surface, and [status history](docs/status-history.md#compare-and-append) for the rule.
+Statuses are `new`, `reviewing`, `interested`, `applied`, `interviewing`, `offer`, `rejected`, `withdrawn`, `closed`. History is append-only; the current status is derived from it. See [status history](docs/status-history.md).
 
-An approved review can become a real draft in an authorized mailbox. This is the only
-capability that writes outside this machine, so it is never implicit:
+**4. Approve and draft.** Drafting is the only thing that writes outside this machine, so it takes two explicit steps:
 
 ```sh
 uv run careersignal approve <review-id> --actor operator --db var/private.db
-uv run careersignal draft <review-id> --db var/private.db          # in-memory provider
+uv run careersignal draft <review-id> --db var/private.db            # in-memory provider
 
 export CAREERSIGNAL_GMAIL_COMPOSE_TOKEN=...
 uv run careersignal draft <review-id> --provider gmail \
-  --mailbox operator@example.com --db var/private.db               # a real Gmail draft
+  --mailbox operator@example.com --db var/private.db                 # a real Gmail draft
 ```
 
-The compose credential is separate from the read credential in every respect: its own
-environment variable, its own scope, its own adapter and its own path allowlist. The
-adapter defines no send operation and refuses the Gmail send endpoint by path. An approval
-binds to the review and its exact wording, both rechecked before the write, and records the
-status event that was current when the operator decided, kept as audit evidence rather than
-rechecked for equality: draft creation instead re-evaluates the opportunity's current
-actionable state, so moving between non-terminal statuses does not by itself invalidate an
-otherwise unchanged approval, while a current status of `rejected`, `withdrawn` or `closed`
-refuses the draft. Addressing and the provider/mailbox destination are independently bound
-and rechecked by their own rules; a recruiter-supplied address carrying a control character
-is refused rather than repaired. See [approved drafts](docs/approved-drafts.md).
+The compose token is a second credential with its own scope, adapter, and path allowlist; the adapter refuses the Gmail send endpoint by path. Before writing, the draft is rechecked against everything the approval bound. If the outcome of the write is unknown, nothing is retried:
 
-An opportunity also carries an operator-controlled status: `Repository.record_status`, `Repository.status` and `Repository.status_history`. The history is append-only and the current status is derived from it, never stored. An operator-facing write is a compare-and-append: it names the event it was decided against and refuses if the opportunity has moved since. See [status history](docs/status-history.md) for the vocabulary, what a status does not authorize, and the upgrade backfill.
+```sh
+uv run careersignal reconcile <review-id> --provider gmail --mailbox operator@example.com --db var/private.db
+```
 
-The commands an operator reads print text by default, take `--json` for anything else, and report an outcome: `ACCEPTED` (exit 0), `REFUSED` (exit 1, no draft-create request was sent by this invocation; correct it and ask again), `PROVIDER_REJECTED` (exit 1, a draft-create request was sent and the provider's own response proves it did not succeed; correct the cause and retry, same safety as `REFUSED`) or `UNCERTAIN` (exit 3, a draft-create request was sent and the outcome is unknown; only reconciliation can say). A command written wrongly stays exit 2 on stderr, because that is a different thing from the system refusing.
+See [approved drafts](docs/approved-drafts.md) for what an approval binds and how reconciliation finds a draft without creating another.
 
-Relative database paths resolve from the current working directory. Set `CAREERSIGNAL_DB_PATH` to override the default `var/careersignal.db`; explicit `--db` takes precedence. Keep personal runtime data outside the source tree or under ignored `var`.
+## What a command tells you
+
+Commands an operator runs print text by default and `--json` on request, and end with one of four outcomes:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `ACCEPTED` | 0 | It happened. |
+| `REFUSED` | 1 | Nothing was sent; this machine declined. Correct the cause and ask again. |
+| `PROVIDER_REJECTED` | 1 | A request was sent and the provider's response proves nothing was created. Same safety as refused. |
+| `UNCERTAIN` | 3 | A request was sent and the outcome is unknown. Only `reconcile` can say. |
+
+A command written wrongly is exit 2 on stderr, because a mistyped command is not the system refusing. See [the operator interface](docs/operator-interface.md).
+
+## Guarantees, briefly
+
+Message IDs are immutable: the same ID with different content is refused, the same message twice returns the original reviews. A changed review needs a new approval. An approval binds the review's content digest, the exact draft wording, the recipient and subject, and the provider and mailbox, and every one is rechecked inside the transaction that reserves the draft; the status event current when you approved is recorded as evidence, while the draft is judged against the opportunity's status now. A review holds at most one draft attempt at a time: a proven provider rejection releases it, an uncertain outcome locks it until reconciled. Terminal statuses (`rejected`, `withdrawn`, `closed`) refuse a draft. Recruiter-supplied addresses carrying control characters are refused, not repaired. The audit and status-history tables cannot be updated or deleted. Text from recruiters is escaped at the terminal so a job title cannot retitle your window.
+
+The `Repository` and `Workflow` classes under `src/` are local trusted-caller APIs, not authenticated endpoints.
 
 ## Verify
 
@@ -91,8 +127,10 @@ uv run python ops/tools/verify_secrets.py
 uv run python ops/tools/verify_wheel.py
 ```
 
-The wheel verifier builds an artifact, installs it with dependencies into an empty temporary environment, checks imports and migration resources, and runs the synthetic workflow outside the checkout. See [verification evidence](docs/verification.md) for the tested scope and limitations.
+The wheel verifier builds a pure-Python wheel, proves it declares no runtime dependency, installs it into an empty environment, and runs the synthetic workflow from there. Hosted CI repeats every gate on Linux, macOS, and Windows for Python 3.11–3.14. See [verification evidence](docs/verification.md).
 
-Read [the build contract](docs/build-contract.md) for folder ownership, dependency rules, privacy requirements, and the gates before the first public commit. Coding agents must also follow [AGENTS.md](AGENTS.md).
+## Contributing
 
-The historical private repository is a reference for proven behavior. Its repository structure, runtime artifacts, and Git history do not belong in this new project.
+Read [the build contract](docs/build-contract.md) for folder ownership, dependency direction, privacy rules, and the gates a change must pass. Coding agents must also follow [AGENTS.md](AGENTS.md). Public fixtures are synthetic; personal messages, credentials, and databases never enter the tree.
+
+The historical private repository is a reference for proven behavior only. Its structure, runtime artifacts, and history do not belong here.
