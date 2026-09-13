@@ -28,6 +28,10 @@ ATTRIBUTION_DOMAIN = "users.noreply.github.com"
 # runtime. Deliberately narrow -- one exact directory, one suffix, no nesting -- because the
 # rule being relaxed is "no unreviewed binaries", not "no binaries under docs".
 RENDER_DIRECTORY = ("docs", "ui-design", "renders")
+# The exception is for a reviewed PNG render, so the file must actually be one. A name is
+# not evidence: without this, any binary at all renamed to .png would inherit the
+# allowance, which is precisely the thing the "no unreviewed binaries" rule exists to stop.
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def synthetic_domain(domain: str) -> bool:
@@ -38,14 +42,25 @@ def synthetic_domain(domain: str) -> bool:
     return any(value == name or value.endswith("." + name) for name in RESERVED_DOMAINS)
 
 
-def reviewed_render(rel) -> bool:
-    """Whether this path is one of the reviewed design renders, and nothing like one."""
+def reviewed_render(rel, path) -> bool:
+    """Whether this is one of the reviewed design renders, and nothing merely like one.
+
+    Both halves are required: the path must be exactly where a reviewed render lives, and
+    the bytes must actually begin a PNG. Either alone would admit something the argument
+    for this exception never covered.
+    """
     parts = tuple(rel.parts)
-    return (
-        len(parts) == len(RENDER_DIRECTORY) + 1
-        and parts[: len(RENDER_DIRECTORY)] == RENDER_DIRECTORY
-        and rel.suffix.lower() == ".png"
-    )
+    if (
+        len(parts) != len(RENDER_DIRECTORY) + 1
+        or parts[: len(RENDER_DIRECTORY)] != RENDER_DIRECTORY
+        or rel.suffix.lower() != ".png"
+    ):
+        return False
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(len(PNG_SIGNATURE)) == PNG_SIGNATURE
+    except OSError:
+        return False
 
 
 def files():
@@ -87,7 +102,7 @@ def inspect():
         except UnicodeDecodeError:
             # A reviewed render is the only binary that passes here. Everything else still
             # stops the gate, including another binary sitting in the same directory.
-            if reviewed_render(rel):
+            if reviewed_render(rel, path):
                 renders += 1
             else:
                 errors.append(f"Non-text artifact requires review: {name}")

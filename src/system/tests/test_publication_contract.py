@@ -7,7 +7,8 @@ argued for is the failure worth testing against:
   * a synthetic email domain is RFC 2606 reserved, which includes subdomains of the
     reserved names and the reserved `.example` top-level domain -- not only the three
     apex names the rule originally listed;
-  * a binary artifact is refused everywhere except one exact directory of design renders.
+  * a binary artifact is refused everywhere except a real PNG in one exact directory of
+    design renders -- the name alone is never the evidence.
 
 Both are exercised as pure predicates and again end to end against a temporary tree, so a
 future edit that widens either rule fails here rather than in review.
@@ -35,6 +36,11 @@ def load():
 @pytest.fixture
 def gate():
     return load()
+
+
+# A real PNG signature followed by bytes that are not valid UTF-8, which is the pair of
+# facts the gate tests: undecodable as text, and genuinely a PNG.
+BINARY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00binary"
 
 
 @pytest.mark.parametrize(
@@ -79,12 +85,20 @@ def test_real_domains_are_not_synthetic(gate, domain):
     assert not gate.synthetic_domain(domain)
 
 
+def written(root, name, payload):
+    """Place one file and return the (relative, absolute) pair the gate is asked about."""
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return Path(name), path
+
+
 @pytest.mark.parametrize(
     "name",
     ["docs/ui-design/renders/dashboard.png", "docs/ui-design/renders/INBOX.PNG"],
 )
-def test_design_renders_are_reviewed(gate, name):
-    assert gate.reviewed_render(Path(name))
+def test_design_renders_are_reviewed(gate, tmp_path, name):
+    assert gate.reviewed_render(*written(tmp_path, name, BINARY))
 
 
 @pytest.mark.parametrize(
@@ -102,8 +116,34 @@ def test_design_renders_are_reviewed(gate, name):
         "docs/ui-design/renders/private.db",
     ],
 )
-def test_everything_else_is_not_a_reviewed_render(gate, name):
-    assert not gate.reviewed_render(Path(name))
+def test_everything_else_is_not_a_reviewed_render(gate, tmp_path, name):
+    # Written with a genuine PNG signature, so the refusal is about the path and nothing else.
+    assert not gate.reviewed_render(*written(tmp_path, name, BINARY))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # A JPEG, a PDF, a zip and an ELF binary, each renamed to .png.
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00",
+        b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
+        b"PK\x03\x04\x14\x00\x00\x00\x08\x00",
+        b"\x7fELF\x02\x01\x01\x00\x00",
+        # Truncated: the right first bytes, but not the whole signature.
+        b"\x89PNG\r\n",
+        b"",
+    ],
+)
+def test_a_renamed_binary_is_not_a_reviewed_render(gate, tmp_path, payload):
+    relative, path = written(tmp_path, "docs/ui-design/renders/dashboard.png", payload)
+    assert not gate.reviewed_render(relative, path)
+
+
+def test_a_render_that_cannot_be_read_is_not_reviewed(gate, tmp_path):
+    """A path with no file behind it is refused rather than raising out of the gate."""
+    assert not gate.reviewed_render(
+        Path("docs/ui-design/renders/dashboard.png"), tmp_path / "absent.png"
+    )
 
 
 def tree(root, files):
@@ -123,10 +163,6 @@ def inspect(gate, root, monkeypatch):
     return ""
 
 
-# Not a PNG, but the bytes are undecodable, which is what the gate actually tests.
-BINARY = b"\x89PNG\r\n\x1a\n\xff\xfe\x00binary"
-
-
 def test_reviewed_render_publishes_and_is_counted(gate, tmp_path, monkeypatch, capsys):
     tree(tmp_path, {"docs/ui-design/renders/dashboard.png": BINARY})
     assert inspect(gate, tmp_path, monkeypatch) == ""
@@ -141,6 +177,11 @@ def test_binary_outside_the_render_directory_is_still_refused(gate, tmp_path, mo
 def test_other_binary_inside_the_render_directory_is_still_refused(gate, tmp_path, monkeypatch):
     tree(tmp_path, {"docs/ui-design/renders/screens.zip": BINARY})
     assert "Private/binary artifact requires review" in inspect(gate, tmp_path, monkeypatch)
+
+
+def test_renamed_binary_in_the_render_directory_is_still_refused(gate, tmp_path, monkeypatch):
+    tree(tmp_path, {"docs/ui-design/renders/dashboard.png": b"\xff\xd8\xff\xe0JFIF\x00\xfe"})
+    assert "Non-text artifact requires review" in inspect(gate, tmp_path, monkeypatch)
 
 
 def test_reserved_subdomain_publishes(gate, tmp_path, monkeypatch):
@@ -200,6 +241,12 @@ def test_synthetic_identifiers_in_frozen_artifacts_are_reviewed(scanner, path):
         ("README.md", HEX),
         # A suffix that merely ends in .html is not a design export.
         ("docs/ui-design/notes.html", HEX),
+        # The allowance names three reviewed artifacts, not a shape. A fourth export
+        # dropped beside them inherits nothing until someone adds it deliberately.
+        ("docs/ui-design/CareerSignal-Sketch.dc.html", HEX),
+        ("docs/ui-design/CareerSignal-Mock-v2.dc.html", HEX),
+        ("docs/ui-design/CareerSignal-Mock.dc.html.bak", HEX),
+        ("docs/ui-design/careersignal-mock.dc.html", HEX),
     ],
 )
 def test_everything_else_still_stops_the_secret_gate(scanner, path, detector):

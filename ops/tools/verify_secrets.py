@@ -14,22 +14,24 @@ from verify_tree import ROOT, files
 # synthetic credential URL, because the artifacts are frozen design exports and editing
 # them would make the committed file differ from what Design accepted.
 #
-# The allowance is therefore narrow in three directions at once: one directory, one suffix,
-# and one detector. A Base64 finding, an AWS key, a private key header, or anything at all
-# in another file still stops the gate -- including in these same artifacts.
-REVIEWED_DESIGN_DIRECTORY = ("docs", "ui-design")
-REVIEWED_DESIGN_SUFFIX = ".dc.html"
+# The allowance names the three artifacts themselves rather than a shape they share. These
+# three were reviewed; "any file called .dc.html under docs/ui-design" was not, and a
+# pattern would silently extend the exception to the next export dropped beside them. A
+# fourth frozen artifact is a deliberate edit here, which is the point.
+REVIEWED_DESIGN_ARTIFACTS = frozenset(
+    {
+        "docs/ui-design/CareerSignal-Mock.dc.html",
+        "docs/ui-design/CareerSignal-Handoff.dc.html",
+        "docs/ui-design/CareerSignal-UI-Review.dc.html",
+    }
+)
 REVIEWED_DESIGN_DETECTOR = "Hex High Entropy String"
 
 
 def reviewed_design_finding(path: str, detector: str) -> bool:
     """Whether one finding is a known-synthetic identifier in a frozen design artifact."""
-    parts = tuple(PurePosixPath(path).parts)
-    return (
-        detector == REVIEWED_DESIGN_DETECTOR
-        and len(parts) == len(REVIEWED_DESIGN_DIRECTORY) + 1
-        and parts[: len(REVIEWED_DESIGN_DIRECTORY)] == REVIEWED_DESIGN_DIRECTORY
-        and parts[-1].endswith(REVIEWED_DESIGN_SUFFIX)
+    return detector == REVIEWED_DESIGN_DETECTOR and (
+        PurePosixPath(path).as_posix() in REVIEWED_DESIGN_ARTIFACTS
     )
 
 
