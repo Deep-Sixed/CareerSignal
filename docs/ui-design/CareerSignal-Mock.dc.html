@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/styles.css">
+  <script src="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/_ds_bundle.js"></script>
+  <style>
+    html,body{height:100%;margin:0}
+    a{color:var(--color-accent)} a:hover{color:var(--color-accent-700)}
+    .navbtn:hover{background:color-mix(in srgb,var(--color-text) 6%,transparent)}
+    .row:hover{background:color-mix(in srgb,var(--color-text) 4%,transparent)}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  </style>
+</helmet>
+<div data-screen-label="CareerSignal" style="display:grid;grid-template-columns:180px 320px minmax(0,1fr);height:100vh;min-width:880px;font-family:var(--font-body);color:var(--color-text);background:var(--color-bg)">
+
+  <!-- ── Pane 1: navigation ───────────────────────────── -->
+  <nav style="display:flex;flex-direction:column;border-right:1px solid var(--color-divider);padding:var(--space-4) var(--space-3);gap:var(--space-2)">
+    <div style="font-family:var(--font-heading);font-weight:600;font-size:20px;letter-spacing:-0.01em;padding:0 var(--space-2) var(--space-3)">CareerSignal <span class="text-muted" style="font-family:var(--font-body);font-size:11px;font-weight:400;letter-spacing:.08em;text-transform:uppercase;margin-left:6px">Mock</span></div>
+    <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="5">
+      <button class="navbtn" onClick="{{ n.go }}" style="display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;padding:8px var(--space-2);border:0;border-left:2px solid {{ n.edge }};background:{{ n.bg }};color:var(--color-text);font:inherit;font-size:14px;cursor:pointer">
+        <span>{{ n.label }}</span>
+        <span class="mono" style="color:var(--color-neutral-600)">{{ n.count }}</span>
+      </button>
+    </sc-for>
+    <div style="flex:1"></div>
+    <div class="blueprint" style="padding:var(--space-3);font-size:12px;line-height:1.5">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:4px">Session</div>
+      <div>db&nbsp;<span class="mono">var/private.db</span></div>
+      <div>read token <span class="mono">present</span></div>
+      <div>compose token <span class="mono">present</span></div>
+      <div>mailbox <span class="mono">operator@example.com</span></div>
+      <div style="margin-top:6px;color:var(--color-neutral-700)">Sending is not a capability of this application.</div>
+    </div>
+  </nav>
+
+  <!-- ── Pane 2: list / work queue ─────────────────────── -->
+  <section style="display:flex;flex-direction:column;border-right:1px solid var(--color-divider);min-height:0">
+    <div style="padding:var(--space-4) var(--space-4) var(--space-3);border-bottom:1px solid var(--color-divider)">
+      <h3 style="margin:0 0 2px">{{ listTitle }}</h3>
+      <div class="text-muted" style="font-size:12px">{{ listSubtitle }}</div>
+      <sc-if value="{{ isOpps }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;gap:var(--space-2);margin-top:var(--space-3);flex-wrap:wrap;align-items:center">
+          <input class="input" placeholder="Search company or title" value="{{ filters.q }}" onChange="{{ setQuery }}" style="flex:1;min-width:120px;min-height:32px">
+          <label class="seg" style="cursor:pointer">
+            <span class="seg-opt" style="background:{{ activeBg }};color:{{ activeFg }}" onClick="{{ toggleActive }}">Active only</span>
+          </label>
+          <select class="input" style="width:auto;min-height:32px" value="{{ filters.minCov }}" onChange="{{ setMinCov }}">
+            <option value="0">Any coverage</option>
+            <option value="70">≥ 70%</option>
+            <option value="100">100%</option>
+          </select>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- Dashboard queues -->
+    <sc-if value="{{ isDash }}" hint-placeholder-val="{{ true }}">
+      <div style="overflow:auto;padding:var(--space-3)">
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-2);margin-bottom:var(--space-4)">
+          <sc-for list="{{ statusCounts }}" as="c" hint-placeholder-count="9">
+            <div class="blueprint" style="padding:8px 10px">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div style="font-family:var(--font-heading);font-size:22px;line-height:1">{{ c.n }}</div>
+              <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-neutral-700)">{{ c.status }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin:0 4px 6px">Work queues</div>
+        <sc-for list="{{ queues }}" as="q" hint-placeholder-count="5">
+          <button class="row" onClick="{{ q.go }}" style="display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 8px;border:0;border-bottom:1px solid color-mix(in srgb,var(--color-text) 8%,transparent);background:transparent;font:inherit;cursor:pointer;color:inherit">
+            <span style="font-family:var(--font-heading);font-size:22px;min-width:28px;line-height:1;color:{{ q.color }}">{{ q.n }}</span>
+            <span style="flex:1"><span style="display:block;font-size:14px">{{ q.label }}</span><span class="text-muted" style="display:block;font-size:12px">{{ q.hint }}</span></span>
+            <span class="text-muted">›</span>
+          </button>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <!-- Opportunity-style rows (Opportunities, Approvals) -->
+    <sc-if value="{{ isOppList }}" hint-placeholder-val="{{ false }}">
+      <div style="overflow:auto;flex:1">
+        <sc-if value="{{ listEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:var(--space-8) var(--space-4);text-align:center;color:var(--color-neutral-700);font-size:14px">{{ emptyText }}</div>
+        </sc-if>
+        <sc-for list="{{ rows }}" as="r" hint-placeholder-count="6">
+          <button class="row" onClick="{{ r.go }}" style="display:block;width:100%;text-align:left;padding:10px var(--space-4);border:0;border-left:3px solid {{ r.edge }};border-bottom:1px solid color-mix(in srgb,var(--color-text) 8%,transparent);background:{{ r.bg }};font:inherit;cursor:pointer;color:inherit">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+              <span style="font-family:var(--font-heading);font-weight:600;font-size:16px;line-height:1.2">{{ r.company }}</span>
+              <span class="mono" style="color:var(--color-neutral-700)">{{ r.coverageText }}</span>
+            </div>
+            <div style="font-size:14px;line-height:1.3;margin-top:1px">{{ r.titleSafe }}</div>
+            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">
+              <span class="tag tag-accent">{{ r.status }}</span>
+              <span class="tag {{ r.queueTagClass }}">{{ r.queueLabel }}</span>
+              <span class="text-muted" style="font-size:11px;margin-left:auto">{{ r.when }}</span>
+            </div>
+          </button>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <!-- Inbox rows -->
+    <sc-if value="{{ isInbox }}" hint-placeholder-val="{{ false }}">
+      <div style="overflow:auto;flex:1">
+        <sc-for list="{{ msgRows }}" as="m" hint-placeholder-count="5">
+          <button class="row" onClick="{{ m.go }}" style="display:block;width:100%;text-align:left;padding:10px var(--space-4);border:0;border-left:3px solid {{ m.edge }};border-bottom:1px solid color-mix(in srgb,var(--color-text) 8%,transparent);background:{{ m.bg }};font:inherit;cursor:pointer;color:inherit">
+            <div style="display:flex;justify-content:space-between;gap:8px">
+              <span style="font-family:var(--font-heading);font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.senderSafe }}</span>
+              <span class="text-muted" style="font-size:11px;white-space:nowrap">{{ m.namespace }}</span>
+            </div>
+            <div style="font-size:14px;line-height:1.3">{{ m.subjectSafe }}</div>
+            <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+              <span class="tag tag-neutral">{{ m.okCount }}&nbsp;extracted</span>
+              <sc-if value="{{ m.hasFailures }}" hint-placeholder-val="{{ false }}"><span class="tag tag-outline">{{ m.failCount }}&nbsp;not extracted</span></sc-if>
+              <span class="text-muted mono" style="margin-left:auto">{{ m.format }}</span>
+            </div>
+          </button>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <!-- Activity rows -->
+    <sc-if value="{{ isActivity }}" hint-placeholder-val="{{ false }}">
+      <div style="overflow:auto;flex:1">
+        <sc-for list="{{ timeline }}" as="e" hint-placeholder-count="8">
+          <button class="row" onClick="{{ e.go }}" style="display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;width:100%;text-align:left;padding:8px var(--space-4);border:0;border-bottom:1px solid color-mix(in srgb,var(--color-text) 8%,transparent);background:{{ e.bg }};font:inherit;cursor:pointer;color:inherit">
+            <span class="mono" style="color:var(--color-neutral-600);padding-top:2px">{{ e.when }}</span>
+            <span>
+              <span style="display:block;font-size:14px"><span class="tag {{ e.tagClass }}" style="margin-right:6px">{{ e.kind }}</span>&nbsp;{{ e.text }}</span>
+              <span class="text-muted" style="display:block;font-size:12px;margin-top:2px">{{ e.sub }}</span>
+            </span>
+          </button>
+        </sc-for>
+      </div>
+    </sc-if>
+  </section>
+
+  <!-- ── Pane 3: detail ────────────────────────────────── -->
+  <main style="overflow:auto;min-height:0;position:relative">
+    <sc-if value="{{ banner }}" hint-placeholder-val="{{ false }}">
+      <div style="position:sticky;top:0;z-index:2;display:flex;gap:10px;align-items:flex-start;padding:10px var(--space-6);background:{{ bannerBg }};color:var(--color-bg);font-size:14px">
+        <span class="mono" style="font-weight:700;letter-spacing:.06em;padding-top:2px;min-width:150px">{{ bannerOutcome }}</span>
+        <span style="flex:1"><span style="display:block">{{ bannerMsg }}</span><span style="display:block;opacity:.85;font-size:13px">{{ bannerNext }}</span></span>
+        <button onClick="{{ dismissBanner }}" style="border:0;background:transparent;color:inherit;font:inherit;cursor:pointer">✕</button>
+      </div>
+    </sc-if>
+
+    <!-- Empty detail -->
+    <sc-if value="{{ noSelection }}" hint-placeholder-val="{{ false }}">
+      <div style="height:100%;display:grid;place-items:center;color:var(--color-neutral-700);text-align:center;padding:var(--space-8)">
+        <div><div style="font-family:var(--font-heading);font-size:22px;margin-bottom:6px">{{ emptyDetailTitle }}</div><div style="font-size:14px;max-width:380px">{{ emptyDetailBody }}</div></div>
+      </div>
+    </sc-if>
+
+    <!-- Opportunity detail -->
+    <sc-if value="{{ showOpp }}" hint-placeholder-val="{{ true }}">
+      <div style="padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-6);max-width:960px">
+        <header>
+          <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700)">Opportunity · <span class="mono">{{ d.idShort }}</span></div>
+          <h2 style="margin:2px 0 4px;font-size:30px">{{ d.company }}&nbsp;—&nbsp;{{ d.titleSafe }}</h2>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <span class="tag tag-accent">{{ d.status }}</span>
+            <span class="tag tag-neutral">event&nbsp;{{ d.status_event }}</span>
+            <span class="tag tag-neutral">coverage&nbsp;{{ d.coverageText }}</span>
+            <span class="tag tag-neutral">eligible&nbsp;{{ d.eligibleText }}</span>
+            <span class="tag {{ d.advTagClass }}">{{ d.advancesText }}</span>
+            <a href="{{ d.url }}" class="mono" style="margin-left:auto">{{ d.url }}</a>
+          </div>
+        </header>
+
+        <!-- Attention panel: outward-action outcome or stale approval. First-class, above everything else. -->
+        <sc-if value="{{ d.attention }}" hint-placeholder-val="{{ false }}">
+          <section class="blueprint" style="display:flex;flex-wrap:wrap;gap:var(--space-4);align-items:center;padding:var(--space-4) var(--space-6);background:{{ d.attentionBg }};color:{{ d.attentionFg }};border-color:{{ d.attentionEdge }}">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div style="flex:1 1 260px;min-width:0">
+              <div class="mono" style="font-weight:700;letter-spacing:.08em;font-size:12px;opacity:.9">{{ d.attentionKicker }}</div>
+              <div style="font-family:var(--font-heading);font-weight:600;font-size:22px;line-height:1.1;margin:2px 0 4px">{{ d.attentionTitle }}</div>
+              <div style="font-size:14px;max-width:560px;text-wrap:pretty">{{ d.attentionBody }}</div>
+            </div>
+            <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;justify-content:flex-end;flex:0 0 auto;margin-left:auto">
+              <sc-if value="{{ d.canReconcile }}" hint-placeholder-val="{{ false }}"><button class="btn btn-primary blueprint" style="background:var(--color-bg);color:var(--color-accent-900);border-color:var(--color-bg)" onClick="{{ doReconcile }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Reconcile</button></sc-if>
+              <sc-if value="{{ d.isStale }}" hint-placeholder-val="{{ false }}">
+                <button class="btn btn-secondary" onClick="{{ openChanges }}">Review changes</button>
+                <button class="btn btn-primary blueprint" onClick="{{ openApprove }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Re-approve</button>
+              </sc-if>
+              <sc-if value="{{ d.isRetry }}" hint-placeholder-val="{{ false }}"><button class="btn btn-primary blueprint" onClick="{{ openDraft }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><span>Retry draft in {{ d.destinationLabel }}</span></button></sc-if>
+            </div>
+          </section>
+        </sc-if>
+
+        <!-- Primary action area -->
+        <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center;padding:var(--space-3) 0;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider)">
+          <button class="btn btn-secondary" onClick="{{ openStatus }}">Change status</button>
+          <span style="width:1px;height:24px;background:var(--color-divider);margin:0 4px"></span>
+          <sc-if value="{{ d.undecided }}" hint-placeholder-val="{{ false }}">
+            <button class="btn btn-primary blueprint" onClick="{{ openApprove }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Approve review</button>
+            <button class="btn btn-secondary" onClick="{{ doReject }}">Reject</button>
+          </sc-if>
+          <sc-if value="{{ d.approvedCurrent }}" hint-placeholder-val="{{ false }}">
+            <span class="tag tag-accent" style="font-size:12px;padding:6px 10px">✓ Approved by&nbsp;{{ d.actorSafe }}&nbsp;for&nbsp;{{ d.nsText }}</span>
+            <sc-if value="{{ d.canRejectApproval }}" hint-placeholder-val="{{ false }}"><button class="btn btn-ghost" onClick="{{ doReject }}">Withdraw approval</button></sc-if>
+          </sc-if>
+          <sc-if value="{{ d.isStale }}" hint-placeholder-val="{{ false }}"><span class="tag tag-outline" style="font-size:12px;padding:6px 10px">Approval stale — see above</span></sc-if>
+          <sc-if value="{{ d.rejected }}" hint-placeholder-val="{{ false }}">
+            <span class="tag tag-neutral" style="font-size:12px;padding:6px 10px">Rejected by&nbsp;{{ d.actorSafe }}</span>
+            <button class="btn btn-ghost" onClick="{{ openApprove }}">Approve instead</button>
+          </sc-if>
+          <sc-if value="{{ d.showDraftButton }}" hint-placeholder-val="{{ false }}">
+            <span style="display:inline-flex;flex-direction:column;align-items:flex-start;gap:2px;margin-left:auto">
+              <button class="btn btn-primary blueprint" disabled="{{ d.draftDisabled }}" onClick="{{ openDraft }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><span>Create draft in {{ d.destinationLabel }}</span></button>
+              <sc-if value="{{ d.draftDisabled }}" hint-placeholder-val="{{ false }}"><span class="text-muted" style="font-size:11.5px">{{ d.draftReason }}</span></sc-if>
+            </span>
+          </sc-if>
+          <sc-if value="{{ d.receiptLink }}" hint-placeholder-val="{{ false }}">
+            <span class="tag tag-accent" style="margin-left:auto;font-size:12px;padding:6px 10px">Draft created ·&nbsp;<span class="mono" style="margin-left:4px">{{ d.receiptShort }}</span>&nbsp;— open Gmail Drafts to send it yourself</span>
+          </sc-if>
+          <sc-if value="{{ d.refusalHint }}" hint-placeholder-val="{{ false }}"><span class="text-muted" style="font-size:12px;flex-basis:100%">{{ d.refusalHint }}</span></sc-if>
+        </div>
+
+        <!-- Two-column: evidence + packet -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--space-6)">
+          <section class="blueprint" style="padding:var(--space-4)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700)">Review evidence</div>
+            <h4 style="margin:2px 0 8px">Why it scored {{ d.coverageText }}</h4>
+            <sc-if value="{{ d.hasReasons }}" hint-placeholder-val="{{ true }}">
+              <ul style="margin:0;padding-left:18px;font-size:14px;line-height:1.6">
+                <sc-for list="{{ d.reasons }}" as="rs" hint-placeholder-count="5"><li>{{ rs }}</li></sc-for>
+              </ul>
+            </sc-if>
+            <sc-if value="{{ d.noReview }}" hint-placeholder-val="{{ false }}">
+              <p class="text-muted" style="font-size:14px">{{ d.noReviewText }}</p>
+            </sc-if>
+            <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--color-neutral-700)"><span>stated {{ d.stated_skills }}</span><span>matched {{ d.matched_skills }}</span><span>location {{ d.location }}</span></div>
+          </section>
+
+          <section class="blueprint" style="padding:var(--space-4)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700)">Approval packet</div>
+            <h4 style="margin:2px 0 8px">What an approval binds</h4>
+            <sc-if value="{{ d.hasBound }}" hint-placeholder-val="{{ true }}">
+              <dl style="display:grid;grid-template-columns:90px minmax(0,1fr);gap:4px 10px;margin:0;font-size:13px">
+                <dt class="text-muted">review</dt><dd class="mono" style="margin:0">{{ d.reviewShort }}</dd>
+                <dt class="text-muted">source</dt><dd class="mono" style="margin:0">{{ d.sourceShort }}</dd>
+                <dt class="text-muted">recipient</dt><dd style="margin:0">{{ d.toSafe }}</dd>
+                <dt class="text-muted">subject</dt><dd style="margin:0">{{ d.subjectSafe }}</dd>
+                <dt class="text-muted">destination</dt><dd style="margin:0">{{ d.destinationText }}</dd>
+              </dl>
+              <div style="margin-top:10px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-neutral-700)">wording</div>
+              <pre style="margin:4px 0 0;padding:10px;background:var(--color-surface);font:13px/1.5 var(--font-body);white-space:pre-wrap">{{ d.wordingSafe }}</pre>
+            </sc-if>
+            <sc-if value="{{ d.noReview }}" hint-placeholder-val="{{ false }}">
+              <p class="text-muted" style="font-size:14px">No current review — nothing an approval could bind.</p>
+            </sc-if>
+          </section>
+        </div>
+
+        <!-- Action state: quieter, the sentences the CLI prints -->
+        <div style="display:grid;grid-template-columns:90px minmax(0,1fr);gap:4px 10px;font-size:13.5px;padding:0 var(--space-2)">
+          <span class="text-muted">approval</span><span>{{ d.approvalText }}</span>
+          <span class="text-muted">draft</span><span>{{ d.attemptText }}</span>
+          <span></span><span class="text-muted" style="font-size:12px">Reporting, not prediction — the write path re-checks every binding inside its own transaction.</span>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;margin-top:var(--space-2)"><span style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-neutral-700)">History &amp; evidence</span><span style="flex:1;height:1px;background:var(--color-divider)"></span></div>
+
+        <!-- History + provenance -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--space-6)">
+          <section>
+            <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:6px">Status history · append-only</div>
+            <table class="table">
+              <thead><tr><th>event</th><th>when</th><th>status</th><th>actor</th><th>reason</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ d.history }}" as="h" hint-placeholder-count="2">
+                  <tr><td class="mono">{{ h.event }}</td><td class="mono">{{ h.when }}</td><td><span class="tag tag-accent">{{ h.status }}</span></td><td>{{ h.actorSafe }}</td><td style="white-space:pre-wrap">{{ h.reasonSafe }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </section>
+          <section>
+            <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:6px">Provenance · messages that carried it</div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <sc-for list="{{ d.sources }}" as="s" hint-placeholder-count="1">
+                <button class="row" onClick="{{ s.go }}" style="text-align:left;padding:8px 10px;border:1px solid var(--color-divider);background:transparent;font:inherit;cursor:pointer;color:inherit">
+                  <div style="font-size:13px;font-weight:500">{{ s.senderSafe }}</div>
+                  <div style="font-size:13px">{{ s.subjectSafe }}</div>
+                  <div class="mono text-muted">{{ s.idShort }} · {{ s.namespace }}</div>
+                </button>
+              </sc-for>
+              <sc-if value="{{ d.noSources }}" hint-placeholder-val="{{ false }}"><div class="text-muted" style="font-size:13px">Structured intake — no message addressing. A draft would be refused for want of a recipient.</div></sc-if>
+            </div>
+            <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin:14px 0 6px">Audit · this review</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px">
+              <sc-for list="{{ d.audit }}" as="a" hint-placeholder-count="2"><span class="tag tag-neutral mono">{{ a }}</span></sc-for>
+            </div>
+          </section>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- Message detail -->
+    <sc-if value="{{ showMsg }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-6);max-width:960px">
+        <header>
+          <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700)">Recruiting message · <span class="mono">{{ md.idShort }}</span></div>
+          <h2 style="margin:2px 0 4px;font-size:28px">{{ md.senderSafe }}</h2>
+          <div style="font-size:16px;margin-bottom:6px">{{ md.subjectSafe }}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <span class="tag tag-neutral">{{ md.namespace }}</span>
+            <span class="tag tag-neutral">{{ md.format }}</span>
+            <span class="tag tag-neutral">arrival&nbsp;#{{ md.arrival }}</span>
+            <span class="tag {{ md.extractedTagClass }}">{{ md.okCount }}&nbsp;extracted</span>
+            <sc-if value="{{ md.hasFailures }}" hint-placeholder-val="{{ false }}"><span class="tag tag-outline">{{ md.failCount }}&nbsp;not extracted</span></sc-if>
+          </div>
+        </header>
+
+        <!-- 1. Extracted opportunities: where this message leads -->
+        <section>
+          <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:6px">Extracted opportunities ·&nbsp;{{ md.okCount }}</div>
+          <sc-if value="{{ md.noneExtracted }}" hint-placeholder-val="{{ false }}"><div class="text-muted" style="font-size:14px;padding:8px 0">Nothing was extracted from this message. The reasons are below; the message stays as evidence.</div></sc-if>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--space-3)">
+            <sc-for list="{{ md.linked }}" as="lo" hint-placeholder-count="1">
+              <button class="row blueprint" onClick="{{ lo.go }}" style="text-align:left;padding:10px 12px;border:1px solid var(--color-divider);background:transparent;font:inherit;cursor:pointer;color:inherit">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font-family:var(--font-heading);font-weight:600;font-size:16px">{{ lo.company }}</span><span class="mono" style="color:var(--color-neutral-700)">{{ lo.coverageText }}</span></div>
+                <div style="font-size:14px">{{ lo.titleSafe }}</div>
+                <div style="display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap"><span class="tag tag-accent">{{ lo.status }}</span><span class="tag {{ lo.queueTagClass }}">{{ lo.queueLabel }}</span><span class="text-muted" style="font-size:11px;margin-left:auto">{{ lo.currentText }}</span></div>
+              </button>
+            </sc-for>
+          </div>
+        </section>
+
+        <!-- 2. What the extractor read -->
+        <section>
+          <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:6px">Stored evidence · what the extractor read</div>
+          <div class="text-muted" style="font-size:13px;margin-bottom:8px">The message body is not stored — only the labeled excerpt per item, exactly as it arrived. Control characters are rendered visibly, never removed.</div>
+          <div style="display:flex;flex-direction:column;gap:var(--space-3)">
+            <sc-for list="{{ md.items }}" as="it" hint-placeholder-count="2">
+              <div class="blueprint" style="padding:var(--space-3) var(--space-4);border-color:{{ it.edge }}">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+                  <span class="mono text-muted">item&nbsp;{{ it.index }}</span>
+                  <span class="tag {{ it.tagClass }}">{{ it.label }}</span>
+                  <sc-if value="{{ it.hasReason }}" hint-placeholder-val="{{ false }}"><span style="font-size:13.5px">{{ it.reason }}</span></sc-if>
+                  <sc-if value="{{ it.linked }}" hint-placeholder-val="{{ false }}">
+                    <button class="btn btn-ghost" style="margin-left:auto;font-size:13px;padding:2px 6px" onClick="{{ it.go }}"><span>Open {{ it.company }} ›</span></button>
+                  </sc-if>
+                </div>
+                <pre style="margin:0;padding:8px 10px;background:var(--color-surface);font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap">{{ it.excerptSafe }}</pre>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+
+        <!-- 3. Provenance record -->
+        <section class="blueprint" style="padding:var(--space-4)">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent-700);margin-bottom:6px">Provenance</div>
+          <dl style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:4px 10px;margin:0;font-size:13px">
+            <dt class="text-muted">message id</dt><dd class="mono" style="margin:0">{{ md.idShort }}</dd>
+            <dt class="text-muted">external id</dt><dd class="mono" style="margin:0">{{ md.external_id }}</dd>
+            <dt class="text-muted">namespace</dt><dd style="margin:0">{{ md.namespace }}</dd>
+            <dt class="text-muted">sender (raw)</dt><dd style="margin:0">{{ md.senderSafe }}</dd>
+            <dt class="text-muted">subject (raw)</dt><dd style="margin:0">{{ md.subjectSafe }}</dd>
+            <dt class="text-muted">format · parser</dt><dd style="margin:0">{{ md.format }} · {{ md.parser_version }}</dd>
+            <dt class="text-muted">arrival</dt><dd style="margin:0">#{{ md.arrival }} in ingest order <span class="text-muted">— no timestamp is stored for messages today; see the review, §8</span></dd>
+            <dt class="text-muted">addresses a draft for</dt><dd style="margin:0">{{ md.addressesText }}</dd>
+          </dl>
+          <div class="text-muted" style="font-size:12.5px;margin-top:10px">Nothing here can be edited. A misread message is corrected by re-ingesting a corrected message under a new message id — the record of what arrived stays.</div>
+        </section>
+      </div>
+    </sc-if>
+
+    <!-- ── Dialogs ────────────────────────────────────── -->
+    <sc-if value="{{ dlgChanges }}" hint-placeholder-val="{{ false }}">
+      <div class="dialog-backdrop" style="position:absolute">
+        <div class="dialog blueprint" style="background:var(--color-bg);min-width:0;max-width:100%;max-height:100%;overflow:auto;width:min(560px,100%)">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div class="dialog-title">What moved since you approved</div>
+          <div class="dialog-body">The approval on record is true about the past. It no longer binds the packet shown, so it authorizes nothing until you approve the current material.</div>
+          <table class="table" style="table-layout:fixed;width:100%"><thead><tr><th style="width:80px"></th><th>approved</th><th>now</th></tr></thead><tbody>
+            <sc-for list="{{ d.changes }}" as="c" hint-placeholder-count="2">
+              <tr><td class="text-muted">{{ c.field }}</td><td style="overflow-wrap:anywhere;text-decoration:{{ c.deco }}">{{ c.before }}</td><td style="overflow-wrap:anywhere;font-weight:{{ c.weight }}">{{ c.after }}</td></tr>
+            </sc-for>
+          </tbody></table>
+          <div class="dialog-actions"><button class="btn btn-secondary" onClick="{{ closeDialog }}">Close</button><button class="btn btn-primary blueprint" onClick="{{ openApprove }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Re-approve current packet</button></div>
+        </div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ dlgStatus }}" hint-placeholder-val="{{ false }}">
+      <div class="dialog-backdrop" style="position:absolute">
+        <div class="dialog blueprint" style="background:var(--color-bg);min-width:0;max-width:100%;max-height:100%;overflow:auto;width:min(480px,100%)">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div class="dialog-title">Record a status</div>
+          <div class="dialog-body">{{ d.company }}&nbsp;—&nbsp;{{ d.titleSafe }}&nbsp;is <strong>{{ d.status }}</strong>. This decision is made against <span class="mono">event&nbsp;{{ d.status_event }}</span>; if the opportunity has moved since, nothing is written.</div>
+          <div class="field"><label>Status</label>
+            <select class="input" value="{{ form.status }}" onChange="{{ setFormStatus }}">
+              <sc-for list="{{ statuses }}" as="s" hint-placeholder-count="9"><option value="{{ s }}">{{ s }}</option></sc-for>
+            </select>
+          </div>
+          <div class="field"><label>Reason (kept verbatim, line breaks preserved)</label><textarea class="input" style="min-height:64px" value="{{ form.reason }}" onChange="{{ setFormReason }}"></textarea></div>
+          <div class="field"><label>Actor</label><input class="input" value="{{ form.actor }}" onChange="{{ setFormActor }}"></div>
+          <div class="dialog-actions"><button class="btn btn-secondary" onClick="{{ closeDialog }}">Cancel</button><button class="btn btn-primary blueprint" onClick="{{ submitStatus }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><span>Record against event {{ d.status_event }}</span></button></div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ dlgApprove }}" hint-placeholder-val="{{ false }}">
+      <div class="dialog-backdrop" style="position:absolute">
+        <div class="dialog blueprint" style="background:var(--color-bg);min-width:0;max-width:100%;max-height:100%;overflow:auto;width:min(560px,100%)">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div class="dialog-title">Approve this review for one destination</div>
+          <div class="dialog-body">You are approving exactly the packet you read. The request carries the digests below; the server refuses if any of them no longer match the current review.</div>
+          <dl style="display:grid;grid-template-columns:120px minmax(0,1fr);gap:3px 10px;margin:0;font-size:13px">
+            <dt class="text-muted">recipient</dt><dd style="margin:0">{{ d.toSafe }}</dd>
+            <dt class="text-muted">subject</dt><dd style="margin:0">{{ d.subjectSafe }}</dd>
+            <dt class="text-muted">wording</dt><dd style="margin:0;white-space:pre-wrap">{{ d.wordingSafe }}</dd>
+            <dt class="text-muted">content digest</dt><dd class="mono" style="margin:0">{{ d.contentDigestShort }}</dd>
+            <dt class="text-muted">draft digest</dt><dd class="mono" style="margin:0">{{ d.draftDigestShort }}</dd>
+            <dt class="text-muted">addressing digest</dt><dd class="mono" style="margin:0">{{ d.addressingDigestShort }}</dd>
+            <dt class="text-muted">status event</dt><dd class="mono" style="margin:0">{{ d.status_event }}&nbsp;({{ d.status }})</dd>
+          </dl>
+          <div class="field"><label>Destination (declared now, verified at draft time)</label>
+            <select class="input" value="{{ form.provider }}" onChange="{{ setFormProvider }}">
+              <option value="controlled">controlled — stays on this machine</option>
+              <option value="gmail">gmail — gmail:operator@example.com</option>
+            </select>
+          </div>
+          <div class="field"><label>Actor</label><input class="input" value="{{ form.actor }}" onChange="{{ setFormActor }}"></div>
+          <div class="dialog-actions"><button class="btn btn-secondary" onClick="{{ closeDialog }}">Cancel</button><button class="btn btn-primary blueprint" onClick="{{ submitApprove }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Approve</button></div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ dlgDraft }}" hint-placeholder-val="{{ false }}">
+      <div class="dialog-backdrop" style="position:absolute">
+        <div class="dialog blueprint" style="background:var(--color-bg);min-width:0;max-width:100%;max-height:100%;overflow:auto;width:min(520px,100%)">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div class="dialog-title">Create a draft — never send</div>
+          <div class="dialog-body">One attempt per review. The claim re-verifies the approval's content, wording, addressing, status and destination inside one transaction, then contacts <strong>{{ d.destinationText }}</strong> once. If the outcome is unknown it is never retried — you reconcile.</div>
+          <dl style="display:grid;grid-template-columns:100px minmax(0,1fr);gap:3px 10px;margin:0;font-size:13px">
+            <dt class="text-muted">to</dt><dd style="margin:0">{{ d.toSafe }}</dd>
+            <dt class="text-muted">subject</dt><dd style="margin:0">Re:&nbsp;{{ d.subjectSafe }}</dd>
+            <dt class="text-muted">approved by</dt><dd style="margin:0">{{ d.actorSafe }}</dd>
+          </dl>
+          <div class="dialog-actions"><button class="btn btn-secondary" onClick="{{ closeDialog }}">Cancel</button><button class="btn btn-primary blueprint" onClick="{{ submitDraft }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Create draft</button></div>
+        </div>
+      </div>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;simulateConflict&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Demo mode (not shipped)&quot;,&quot;description&quot;:&quot;Another writer (the CLI) records a status while the dialog is open, so the compare-and-append refuses.&quot;},&quot;draftOutcome&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;accepted&quot;,&quot;provider_rejected&quot;,&quot;uncertain&quot;],&quot;default&quot;:&quot;accepted&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Demo mode (not shipped)&quot;,&quot;description&quot;:&quot;What the provider does when a draft is created.&quot;},&quot;reconcileOutcome&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;found&quot;,&quot;unknown&quot;],&quot;default&quot;:&quot;found&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Demo mode (not shipped)&quot;,&quot;description&quot;:&quot;Whether reconciliation finds the draft by its intent key.&quot;},&quot;showFullIds&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Demo mode (not shipped)&quot;,&quot;description&quot;:&quot;Show full 64-char identifiers instead of a prefix.&quot;}}">
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    const T = 1789021264; // Sep 2026 base, seconds
+    const H = 3600, D = 86400;
+    const hx = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h.toString(16).padStart(8, "0") + "c4f1d2e3a5b6" + h.toString(16)).slice(0, 64).padEnd(64, "0"); };
+    const opp = (o) => ({ ...o, id: hx("opp:" + o.url), review: o.review === null ? null : hx("rev:" + o.url) });
+    const opps = [
+      opp({ company: "Example Corp", title: "IAM Architect", location: "remote", url: "https://jobs.example.com/roles/1", coverage: 100, stated: 2, matched: 2, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 6 * D], ["reviewing", "operator", "", T - 5 * D], ["interested", "operator", "Sent CV", T - 4 * D]],
+        decision: { approved: true, actor: "operator", binds: true, provider: "gmail", ns: "gmail:operator@example.com" }, intent: null, audit: ["review_created", "approved"], sources: ["m1"] }),
+      opp({ company: "Contoso", title: "SailPoint Engineer", location: "remote", url: "https://careers.contoso.example/j/8812", coverage: 75, stated: 4, matched: 3, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 2 * D], ["reviewing", "operator", "Looks plausible; check comp band", T - 1 * D]], decision: null, intent: null, audit: ["review_created"], sources: ["m2"] }),
+      opp({ company: "Northwind", title: "Generalist", location: "remote", url: "https://northwind.example/jobs/generalist", coverage: null, stated: 0, matched: 0, eligible: true, advances: false,
+        history: [["new", "intake", "", T - 2 * D]], decision: null, intent: null, audit: ["review_created"], sources: ["m2"] }),
+      opp({ company: "Fabrikam", title: "Desktop Support", location: "onsite boise, id", url: "https://fabrikam.example/careers/ds-114", coverage: 33, stated: 3, matched: 1, eligible: false, advances: false,
+        history: [["new", "intake", "", T - 9 * D], ["rejected", "operator", "Onsite only", T - 8 * D]], decision: null, intent: null, audit: ["review_created"], sources: ["m5"] }),
+      opp({ company: "Woodgrove Bank", title: "Platform Engineer", location: "remote", url: "https://woodgrove.example/careers/pe-77", coverage: 80, stated: 5, matched: 4, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 12 * D], ["interested", "operator", "", T - 11 * D], ["applied", "operator", "Applied via portal", T - 7 * D]],
+        decision: { approved: true, actor: "operator", binds: false, provider: "gmail", ns: "gmail:operator@example.com", boundTo: "Jane Recruiter <jane.recruiter@example.com>", boundSubject: "Platform Engineer - remote" }, intent: null, audit: ["review_created", "approved"], sources: ["m6", "m3"] }),
+      opp({ company: "Tailspin Toys", title: "Data Engineer", location: "remote", url: "https://tailspin.example/jobs/de-3", coverage: 100, stated: 3, matched: 3, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 20 * D], ["interested", "operator", "", T - 19 * D], ["applied", "operator", "", T - 15 * D], ["interviewing", "operator", "Phone screen Thu", T - 3 * D]],
+        decision: { approved: true, actor: "operator", binds: true, provider: "gmail", ns: "gmail:operator@example.com" }, intent: { state: "confirmed", receipt: "gmail-draft:r1a2b3c4d5" }, audit: ["review_created", "approved", "draft_intent", "draft_confirmed"], sources: ["m7"] }),
+      opp({ company: "Adatum", title: "Security Analyst", location: "remote", url: "https://adatum.example/roles/sa-21", coverage: 100, stated: 2, matched: 2, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 4 * D], ["interested", "operator", "", T - 3 * D]],
+        decision: { approved: true, actor: "operator", binds: true, provider: "gmail", ns: "gmail:operator@example.com" }, intent: { state: "uncertain", receipt: null }, audit: ["review_created", "approved", "draft_intent", "draft_uncertain"], sources: ["m8"] }),
+      opp({ company: "Litware", title: "Backend Engineer\u001b]0;spoofed\u0007", location: "remote", url: "https://litware.example/jobs/be-9", coverage: 67, stated: 3, matched: 2, eligible: true, advances: false,
+        history: [["new", "intake", "", T - 1 * D]], decision: null, intent: null, audit: ["review_created"], sources: ["m9"] }),
+      opp({ company: "Proseware", title: "Identity Engineer", location: "remote", url: "https://proseware.example/careers/ie-5", coverage: 100, stated: 2, matched: 2, eligible: true, advances: true,
+        history: [["new", "intake", "", T - 5 * D], ["interested", "operator", "", T - 4 * D]],
+        decision: { approved: true, actor: "operator", binds: true, provider: "gmail", ns: "gmail:operator@example.com" }, intent: null, audit: ["review_created", "approved", "draft_intent", "draft_rejected"], sources: ["m10"] }),
+      opp({ company: "Wingtip", title: "Solutions Engineer", location: "remote", url: "https://wingtip.example/jobs/se-2", coverage: null, stated: null, matched: null, eligible: true, advances: true,
+        history: [["new", "migration", "Backfilled when status history was introduced", T - 40 * D], ["reviewing", "operator", "", T - 30 * D]], decision: null, intent: null, audit: ["review_created"], sources: [] }),
+    ];
+    const msgs = {
+      m1: { namespace: "gmail:operator@example.com", external_id: "18f2a9c0e4b1", sender: "Jane Recruiter <jane.recruiter@example.com>", subject: "IAM Architect - remote", format: "text", parser_version: "labeled-v1", t: T - 6 * D, items: [{ index: 0, excerpt: "Title: IAM Architect\nCompany: Example Corp\nLocation: remote\nSkills: python, sql\nURL: https://jobs.example.com/roles/1", reason: "", url: "https://jobs.example.com/roles/1" }] },
+      m2: { namespace: "gmail:operator@example.com", external_id: "18f2b1d77a02", sender: "alerts@jobs.example.com", subject: "3 new jobs matching Python", format: "html", parser_version: "labeled-v1", t: T - 2 * D, items: [
+        { index: 0, excerpt: "Title: SailPoint Engineer\nCompany: Contoso\nLocation: Remote\nSkills: SailPoint, Python, SQL, Java\nURL: https://careers.contoso.example/j/8812?utm_source=alert", reason: "", url: "https://careers.contoso.example/j/8812" },
+        { index: 1, excerpt: "Title: Generalist\nCompany: Northwind\nLocation: remote\nURL: https://northwind.example/jobs/generalist", reason: "", url: "https://northwind.example/jobs/generalist" },
+        { index: 2, excerpt: "Title: Staff Engineer\nCompany: Unknown Startup\nLocation: remote\nSkills: python", reason: "Missing required fields: url", url: null }] },
+      m3: { namespace: "gmail:operator@example.com", external_id: "18f2c0aa1290", sender: "bob.sourcer@example.net", subject: "Re: Platform Engineer at Woodgrove", format: "text", parser_version: "labeled-v1", t: T - 1 * D, items: [{ index: 0, excerpt: "Title: Platform Engineer\nCompany: Woodgrove Bank\nLocation: remote\nSkills: python, sql, terraform, aws, kubernetes\nURL: https://woodgrove.example/careers/pe-77", reason: "", url: "https://woodgrove.example/careers/pe-77" }] },
+      m4: { namespace: "personal-inbox", external_id: "<weekly-digest-38@lists.example.org>", sender: "digest@lists.example.org", subject: "Weekly digest #38", format: "html", parser_version: "labeled-v1", t: T - 3 * D, items: [{ index: 0, excerpt: "Hi all — this week's roundup of interesting roles is below. Click through for details…", reason: "No supported labeled opportunities found", url: null }] },
+      m5: { namespace: "gmail:operator@example.com", external_id: "18f1e0b2c3d4", sender: "hr@fabrikam.example", subject: "Desktop Support - Boise", format: "text", parser_version: "labeled-v1", t: T - 9 * D, items: [{ index: 0, excerpt: "Role: Desktop Support\nEmployer: Fabrikam\nLocation: Onsite Boise, ID\nSkills: windows, python, networking\nApply: https://fabrikam.example/careers/ds-114", reason: "", url: "https://fabrikam.example/careers/ds-114" }] },
+      m6: { namespace: "gmail:operator@example.com", external_id: "18f1c4f5a6b7", sender: "Jane Recruiter <jane.recruiter@example.com>", subject: "Platform Engineer - remote", format: "text", parser_version: "labeled-v1", t: T - 12 * D, items: [{ index: 0, excerpt: "Title: Platform Engineer\nCompany: Woodgrove Bank\nLocation: remote\nSkills: python, sql, terraform, aws, kubernetes\nURL: https://woodgrove.example/careers/pe-77", reason: "", url: "https://woodgrove.example/careers/pe-77" }] },
+      m7: { namespace: "gmail:operator@example.com", external_id: "18f0a1b2c3d4", sender: "talent@tailspin.example", subject: "Data Engineer", format: "text", parser_version: "labeled-v1", t: T - 20 * D, items: [{ index: 0, excerpt: "Title: Data Engineer\nCompany: Tailspin Toys\nLocation: remote\nSkills: python, sql, spark\nURL: https://tailspin.example/jobs/de-3", reason: "", url: "https://tailspin.example/jobs/de-3" }] },
+      m8: { namespace: "gmail:operator@example.com", external_id: "18f2a0ff0011", sender: "recruiting@adatum.example", subject: "Security Analyst (remote)", format: "text", parser_version: "labeled-v1", t: T - 4 * D, items: [{ index: 0, excerpt: "Title: Security Analyst\nCompany: Adatum\nLocation: remote\nSkills: python, sql\nURL: https://adatum.example/roles/sa-21", reason: "", url: "https://adatum.example/roles/sa-21" }] },
+      m9: { namespace: "gmail:operator@example.com", external_id: "18f2d1e2f3a4", sender: "jobs@litware.example", subject: "Backend Engineer", format: "html", parser_version: "labeled-v1", t: T - 1 * D, items: [{ index: 0, excerpt: "Title: Backend Engineer\u001b]0;spoofed\u0007\nCompany: Litware\nLocation: remote\nSkills: go, python, sql\nURL: https://litware.example/jobs/be-9", reason: "", url: "https://litware.example/jobs/be-9" }] },
+      m10: { namespace: "gmail:operator@example.com", external_id: "18f2a5b6c7d8", sender: "Sam Lee <sam.lee@proseware.example>", subject: "Identity Engineer — quick chat?", format: "text", parser_version: "labeled-v1", t: T - 5 * D, items: [{ index: 0, excerpt: "Title: Identity Engineer\nCompany: Proseware\nLocation: remote\nSkills: python, sql\nURL: https://proseware.example/careers/ie-5", reason: "", url: "https://proseware.example/careers/ie-5" }] },
+    };
+    for (const k in msgs) msgs[k].id = "message:" + hx("msg:" + k);
+    let ev = 100;
+    for (const o of opps) o.history = o.history.map(([status, actor, reason, t]) => ({ status, actor, reason, t, event: ++ev }));
+    this.T = T;
+    this.state = { nav: "inbox", sel: opps[0].id, selMsg: "m2", dialog: null, banner: null, filters: { q: "", active: false, minCov: 0 }, form: { status: "interested", reason: "", actor: "operator", provider: "gmail" }, opps, msgs, now: T };
+  }
+
+  // ── helpers ported from system/views.py ──
+  safe(v) { return String(v ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, (c) => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0")); }
+  safeLines(v) { return String(v ?? "").replace(/\r\n/g, "\n").split("\n").map((l) => this.safe(l)).join("\n"); }
+  short(id) { if (!id) return "-"; return (this.props.showFullIds ?? false) ? id : id.slice(0, 12) + "…"; }
+  when(t) { const d = Math.round((this.state.now - t) / 86400); return d <= 0 ? "today" : d === 1 ? "1 day ago" : d + " days ago"; }
+  coverageText(o) { if (o.review === null) return "-"; if (o.stated === null) return "pre-coverage"; if (o.stated === 0) return "not scored"; return o.coverage + "%"; }
+  latest(o) { return o.history[o.history.length - 1]; }
+  TERMINAL = ["rejected", "withdrawn", "closed"];
+  ACTIVE = ["reviewing", "interested", "applied", "interviewing", "offer"];
+  STATUSES = ["new", "reviewing", "interested", "applied", "interviewing", "offer", "rejected", "withdrawn", "closed"];
+
+  action(o) {
+    const last = [...o.audit].reverse().find((e) => ["approved", "rejected", "draft_refused", "draft_rejected"].includes(e));
+    const draft = o.intent ? o.intent.state : last === "draft_refused" ? "refused" : last === "draft_rejected" ? "rejected" : "none";
+    return { decision: o.decision ? (o.decision.approved ? "approved" : "rejected") : null, actor: o.decision?.actor ?? null, binds: o.decision ? o.decision.binds : null, attempted: !!o.intent, draft, receipt: o.intent?.receipt ?? null, provider: o.decision?.provider ?? null, ns: o.decision?.ns ?? null };
+  }
+  approvalText(a) {
+    if (a.decision === null) return "not yet decided";
+    const decided = (a.decision === "approved" ? "approved by " : "rejected by ") + this.safe(a.actor);
+    if (a.decision === "approved" && !a.binds) {
+      const stale = "stale: does not bind the material shown";
+      if (!a.attempted) return `${decided} (${stale}; reapprove)`;
+      if (a.draft === "confirmed") return `${decided} (${stale}; the earlier draft stands)`;
+      return `${decided} (${stale}; reconcile the attempt, do not retry)`;
+    }
+    return decided;
+  }
+  attemptText(a) {
+    const D = { none: "not attempted", refused: "refused; nothing was created", rejected: "provider rejected; nothing was created — the approval still stands", attempting: "attempting; no outcome recorded yet", uncertain: "uncertain; reconciliation required — never retried automatically", confirmed: "created" };
+    return a.draft === "confirmed" && a.receipt ? `created; receipt ${this.safe(a.receipt)}` : D[a.draft];
+  }
+  queue(o) {
+    const a = this.action(o), st = this.latest(o).status, terminal = this.TERMINAL.includes(st);
+    if (o.review === null) return null;
+    if (o.stated === null) return { key: "pre", label: "pre-coverage · re-ingest", cls: "tag-outline" };
+    if (["attempting", "uncertain"].includes(a.draft)) return { key: "reconcile", label: "reconcile", cls: "tag-outline" };
+    if (a.draft === "confirmed") return { key: "created", label: "draft created", cls: "tag-accent" };
+    if (a.decision === "approved" && !a.binds) return { key: "stale", label: "stale approval · reapprove", cls: "tag-outline" };
+    if (a.decision === "approved" && a.binds && !terminal) return { key: "draft", label: a.draft === "rejected" ? "retry draft" : "ready to draft", cls: "tag-accent" };
+    if (a.decision === "rejected") return { key: "rejected", label: "review rejected", cls: "tag-neutral" };
+    if (o.advances && a.decision === null && !terminal) return { key: "decide", label: "awaiting decision", cls: "tag-accent" };
+    if (!o.advances) return { key: "no", label: o.eligible ? "does not advance" : "ineligible", cls: "tag-neutral" };
+    return { key: "none", label: terminal ? "ended" : "—", cls: "tag-neutral" };
+  }
+  go(nav, sel, selMsg) { this.setState({ nav, sel: sel ?? this.state.sel, selMsg: selMsg ?? null, dialog: null }); }
+  find(id) { return this.state.opps.find((o) => o.id === id); }
+  byUrl(url) { return this.state.opps.find((o) => o.url === url); }
+
+  // ── commands (mock of the server outcome records) ──
+  banner(outcome, message, next) { this.setState({ banner: { outcome, message, next }, dialog: null }); }
+  submitStatus = () => {
+    const o = this.find(this.state.sel), cur = this.latest(o);
+    if (this.props.simulateConflict ?? false) {
+      const ghost = { status: "withdrawn", actor: "cli", reason: "Recorded from the terminal while this page was open", t: this.state.now, event: cur.event + 1 };
+      o.history.push(ghost);
+      this.banner("REFUSED", `Opportunity status changed since it was read: expected event ${cur.event}, found event ${ghost.event} (withdrawn).`, "Read the opportunity again and record against its current state. Nothing was written.");
+      return;
+    }
+    const f = this.state.form;
+    o.history.push({ status: f.status, actor: f.actor, reason: f.reason, t: this.state.now, event: Math.max(...this.state.opps.flatMap((x) => x.history.map((h) => h.event))) + 1 });
+    this.banner("ACCEPTED", `${f.status} recorded as event ${this.latest(o).event}`, "");
+  };
+  submitApprove = () => {
+    const o = this.find(this.state.sel), f = this.state.form;
+    if (o.intent) return this.banner("REFUSED", "Draft already attempted; decision is locked for reconciliation.", "");
+    if (this.TERMINAL.includes(this.latest(o).status)) return this.banner("REFUSED", `Opportunity status is ${this.latest(o).status}; record an active status before approving an outward draft.`, "");
+    o.decision = { approved: true, actor: f.actor, binds: true, provider: f.provider, ns: f.provider === "gmail" ? "gmail:operator@example.com" : "controlled" };
+    o.audit.push("approved");
+    this.banner("ACCEPTED", `review ${this.short(o.review)} approved by ${f.actor} for ${o.decision.ns}`, "");
+  };
+  doReject = () => {
+    const o = this.find(this.state.sel);
+    if (o.intent) return this.banner("REFUSED", "Draft already attempted; decision is locked for reconciliation.", "");
+    o.decision = { approved: false, actor: this.state.form.actor, binds: null, provider: "controlled", ns: "controlled" };
+    o.audit.push("rejected");
+    this.banner("ACCEPTED", `review ${this.short(o.review)} rejected by ${this.state.form.actor}`, "");
+  };
+  submitDraft = () => {
+    const o = this.find(this.state.sel), mode = this.props.draftOutcome ?? "accepted";
+    o.audit.push("draft_intent");
+    if (mode === "provider_rejected") { o.audit.push("draft_rejected"); o.intent = null; return this.banner("PROVIDER_REJECTED", "Gmail refused the draft (403); nothing was created.", "Correct the cause and run draft again. The approval is untouched."); }
+    if (mode === "uncertain") { o.intent = { state: "uncertain", receipt: null }; o.audit.push("draft_uncertain"); return this.banner("UNCERTAIN", "The provider was contacted and the outcome is unknown: timed out.", "Reconcile this review. The write is never repeated automatically."); }
+    o.intent = { state: "confirmed", receipt: "gmail-draft:" + Math.random().toString(36).slice(2, 12) }; o.audit.push("draft_confirmed");
+    this.banner("ACCEPTED", `draft confirmed; receipt ${o.intent.receipt}`, "Open Gmail Drafts to read and send it yourself — CareerSignal cannot.");
+  };
+  doReconcile = () => {
+    const o = this.find(this.state.sel);
+    if ((this.props.reconcileOutcome ?? "found") === "unknown") return this.banner("UNCERTAIN", "Reconciliation looked through the mailbox's drafts and found no draft carrying this intent key — the outcome is still unknown.", "Still unknown is a legitimate answer. Nothing was written; reconcile again later, never draft again.");
+    o.intent = { state: "confirmed", receipt: "gmail-draft:q9z8y7x6w5" }; o.audit.push("draft_confirmed");
+    this.banner("ACCEPTED", `draft confirmed; receipt ${o.intent.receipt}`, "Found by its intent header in the mailbox's drafts; nothing new was written.");
+  };
+
+  renderVals() {
+    const s = this.state, self = this;
+    const nav = s.nav, isDash = nav === "dashboard", isInbox = nav === "inbox", isOpps = nav === "opportunities", isApprovals = nav === "approvals", isActivity = nav === "activity";
+    const acc = "var(--color-accent)", none = "transparent";
+    const queueOf = (o) => this.queue(o)?.key;
+    const counts = {
+      dashboard: "", inbox: Object.keys(s.msgs).length,
+      opportunities: s.opps.filter((o) => this.ACTIVE.includes(this.latest(o).status) || this.latest(o).status === "new").length,
+      approvals: s.opps.filter((o) => ["decide", "draft", "stale", "reconcile"].includes(queueOf(o))).length,
+      activity: "",
+    };
+    const navItems = [["dashboard", "Dashboard"], ["inbox", "Inbox"], ["opportunities", "Opportunities"], ["approvals", "Approvals"], ["activity", "Activity"]].map(([key, label]) => ({
+      key, label, count: counts[key], edge: nav === key ? acc : none, bg: nav === key ? "color-mix(in srgb,var(--color-accent) 10%,transparent)" : none, go: () => this.go(key, undefined, isInbox && key === "inbox" ? s.selMsg : null),
+    }));
+
+    // rows
+    let list = s.opps;
+    if (isApprovals) list = s.opps.filter((o) => ["decide", "draft", "stale", "reconcile", "created", "rejected"].includes(queueOf(o)));
+    if (isOpps) {
+      const q = s.filters.q.toLowerCase();
+      list = list.filter((o) => (!q || (o.company + " " + o.title).toLowerCase().includes(q)) && (!s.filters.active || this.ACTIVE.includes(this.latest(o).status)) && (!s.filters.minCov || (o.coverage ?? -1) >= s.filters.minCov));
+    }
+    const order = Object.fromEntries(this.STATUSES.map((x, i) => [x, i]));
+    const qOrder = { reconcile: 0, stale: 1, decide: 2, draft: 3, created: 4, rejected: 5 };
+    list = [...list].sort((a, b) => isApprovals ? (qOrder[queueOf(a)] - qOrder[queueOf(b)]) : (order[this.latest(a).status] - order[this.latest(b).status]) || ((b.coverage ?? -1) - (a.coverage ?? -1)) || a.company.localeCompare(b.company));
+    const rows = list.map((o) => { const q = this.queue(o) || { label: "no review", cls: "tag-neutral" }; return { company: o.company, titleSafe: this.safe(o.title), coverageText: this.coverageText(o), status: this.latest(o).status, queueLabel: q.label, queueTagClass: q.cls, when: this.when(this.latest(o).t), edge: s.sel === o.id && !s.selMsg ? acc : none, bg: s.sel === o.id && !s.selMsg ? "color-mix(in srgb,var(--color-accent) 8%,transparent)" : none, go: () => this.setState({ sel: o.id, selMsg: null, dialog: null, banner: null }) }; });
+
+    const msgRows = Object.entries(s.msgs).sort((a, b) => b[1].t - a[1].t).map(([k, m]) => { const fails = m.items.filter((i) => i.reason).length; return { senderSafe: this.safe(m.sender), subjectSafe: this.safe(m.subject), namespace: m.namespace, format: m.format, okCount: m.items.length - fails, failCount: fails, hasFailures: fails > 0, edge: s.selMsg === k ? acc : none, bg: s.selMsg === k ? "color-mix(in srgb,var(--color-accent) 8%,transparent)" : none, go: () => this.setState({ selMsg: k, dialog: null, banner: null }) }; });
+
+    // timeline
+    const timeline = [];
+    for (const o of s.opps) {
+      for (const h of o.history) timeline.push({ t: h.t, kind: "status", tagClass: "tag-accent", text: `${o.company} — ${this.safe(o.title)} → ${h.status}`, sub: `event ${h.event} · ${this.safe(h.actor)}${h.reason ? " · " + this.safe(h.reason) : ""}`, opp: o.id });
+      o.audit.forEach((e, i) => { if (e === "review_created") return; timeline.push({ t: this.latest(o).t + i * 60 + 30, kind: e.replace("draft_", "draft "), tagClass: e.startsWith("draft_") ? "tag-outline" : "tag-neutral", text: `${o.company} — ${this.safe(o.title)}`, sub: `review ${this.short(o.review)}`, opp: o.id }); });
+    }
+    for (const [k, m] of Object.entries(s.msgs)) timeline.push({ t: m.t, kind: "message", tagClass: "tag-neutral", text: this.safe(m.subject), sub: `${this.safe(m.sender)} · ${m.items.length} item(s)`, msg: k });
+    timeline.sort((a, b) => b.t - a.t);
+    const tl = timeline.map((e) => ({ ...e, when: this.when(e.t), bg: (e.msg ? s.selMsg === e.msg : s.sel === e.opp && !s.selMsg) ? "color-mix(in srgb,var(--color-accent) 8%,transparent)" : none, go: () => e.msg ? this.setState({ selMsg: e.msg, banner: null }) : this.setState({ sel: e.opp, selMsg: null, banner: null }) }));
+
+    // dashboard
+    const statusCounts = this.STATUSES.map((st) => ({ status: st, n: s.opps.filter((o) => this.latest(o).status === st).length }));
+    const qn = (k) => s.opps.filter((o) => queueOf(o) === k).length;
+    const unparsed = Object.values(s.msgs).reduce((n, m) => n + m.items.filter((i) => i.reason).length, 0);
+    const first = (k) => s.opps.find((o) => queueOf(o) === k)?.id;
+    const queues = [
+      { n: qn("reconcile"), label: "Needs reconciliation", hint: "a draft was attempted and the outcome is unknown", color: "var(--color-accent-800)", go: () => this.go("approvals", first("reconcile")) },
+      { n: qn("stale"), label: "Stale approvals", hint: "the packet moved since you approved; reapprove", color: "var(--color-accent-800)", go: () => this.go("approvals", first("stale")) },
+      { n: qn("decide"), label: "Awaiting your decision", hint: "advances the threshold and is undecided", color: acc, go: () => this.go("approvals", first("decide")) },
+      { n: qn("draft"), label: "Ready to draft", hint: "approved and binding; one attempt available", color: acc, go: () => this.go("approvals", first("draft")) },
+      { n: unparsed, label: "Items not extracted", hint: "messages whose labeled fields were missing or conflicting", color: "var(--color-neutral-700)", go: () => this.go("inbox", undefined, "m2") },
+      { n: s.opps.filter((o) => this.latest(o).status === "new").length, label: "New, untouched", hint: "opened by intake, nothing decided yet", color: "var(--color-neutral-700)", go: () => this.setState({ nav: "opportunities", filters: { ...s.filters, active: false } }) },
+    ];
+
+    // detail
+    const o = this.find(s.sel), a = o && this.action(o), last = o && this.latest(o), terminal = o && this.TERMINAL.includes(last.status);
+    const src = o && o.sources.length ? s.msgs[o.sources[o.sources.length - 1]] : null;
+    const canDecide = o && o.review !== null && o.stated !== null && o.advances && !o.intent && !terminal;
+    const canDraft = o && a.decision === "approved" && a.binds && !o.intent && !terminal && ["none", "rejected", "refused"].includes(a.draft);
+    const canReconcile = o && o.intent && ["attempting", "uncertain"].includes(o.intent.state);
+    const refusalHint = !o ? "" : o.stated === null ? "Predates stated skill coverage — not actionable; re-ingest under a new message id." : !o.advances && o.review !== null ? (o.eligible ? "Below threshold — approval is refused by the decision rules." : "Location ineligible — approval is refused by the decision rules.") : terminal ? `Status is ${last.status}; an ended opportunity authorizes no outward draft.` : o.intent ? "One attempt per review — the decision is locked." : "";
+    const d = o && {
+      idShort: this.short(o.id), company: o.company, titleSafe: this.safe(o.title), status: last.status, status_event: last.event, coverageText: this.coverageText(o), eligibleText: o.eligible ? "yes" : "no", advancesText: o.advances ? "advances" : "does not advance", advTagClass: o.advances ? "tag-accent" : "tag-neutral", url: o.url,
+      location: o.location, stated_skills: o.stated ?? "-", matched_skills: o.matched ?? "-",
+      hasReasons: o.review !== null && o.stated !== null, noReview: o.review === null || o.stated === null, noReviewText: o.stated === null ? "This review predates stated skill coverage; its reasons were produced by a rule this version does not use and are not shown as evidence." : "No current review.",
+      reasons: o.stated === null ? [] : [
+        o.stated ? `Stated skill coverage: ${o.matched}/${o.stated} (${o.coverage}%)` : "Stated skill coverage: not scored; the job states no skills",
+        ...(o.stated ? [`Matched: ${["python", "sql", "terraform", "aws", "spark", "sailpoint", "java", "windows", "go", "networking"].slice(0, o.matched).join(", ")}`, `Unmatched stated skills: ${o.stated - o.matched ? o.stated - o.matched + " skill(s)" : "none"}`] : []),
+        `Profile relevance: ${o.matched}/2`, `Location read as ${o.location}`, o.eligible ? "Location eligible" : "Location outside configured eligibility", "Coverage must be strictly above 70", o.advances ? "Advances" : "Does not advance"],
+      hasBound: o.review !== null && o.stated !== null, reviewShort: this.short(o.review), sourceShort: src ? this.short(src.id) : "-", toSafe: src ? this.safe(src.sender) : "-", subjectSafe: src ? this.safe(src.subject) : "-",
+      destinationText: a.ns ? `${a.provider} · ${a.ns}` : "not yet declared", destinationLabel: a.provider === "gmail" ? "Gmail" : "controlled",
+      wordingSafe: this.safeLines(`I would like to learn more about ${o.title} at ${o.company}. Reference: ${o.url}`),
+      contentDigestShort: this.short(o.review && "sha256:" + o.review), draftDigestShort: this.short("d7" + (o.review || "").slice(2)), addressingDigestShort: this.short("a1" + (o.review || "").slice(2)),
+      approvalText: this.approvalText(a), attemptText: this.attemptText(a), actorSafe: this.safe(a.actor), stateEdge: ["uncertain", "attempting"].includes(a.draft) || (a.decision === "approved" && !a.binds) ? "var(--color-accent-700)" : "var(--color-divider)",
+      canDecide, canDraft, canReconcile, receiptLink: a.draft === "confirmed", receiptShort: this.short(a.receipt), refusalHint,
+      undecided: canDecide && a.decision === null, approvedCurrent: a.decision === "approved" && a.binds, canRejectApproval: a.decision === "approved" && a.binds && !o.intent, isStale: a.decision === "approved" && !a.binds && !o.intent, rejected: a.decision === "rejected" && canDecide,
+      nsText: a.ns || "", showDraftButton: canDecide || canDraft, draftDisabled: !canDraft, isRetry: a.draft === "rejected" && canDraft,
+      draftReason: a.decision === null ? "Requires an approval for a destination" : a.decision === "rejected" ? "Review is rejected" : !a.binds ? "Requires a current approval — re-approve above" : terminal ? "Opportunity has ended" : "",
+      changes: [{ field: "recipient", before: this.safe(o.decision?.boundTo ?? "-"), after: src ? this.safe(src.sender) : "-" }, { field: "subject", before: this.safe(o.decision?.boundSubject ?? "-"), after: src ? this.safe(src.subject) : "-" }, { field: "wording", before: "unchanged", after: "unchanged" }, { field: "status", before: "interested (event " + (o.history[1]?.event ?? "?") + ")", after: last.status + " (event " + last.event + ")" }].map((c) => ({ ...c, deco: c.before !== c.after && c.before !== "unchanged" ? "line-through" : "none", weight: c.before !== c.after && c.before !== "unchanged" ? "600" : "400" })),
+      ...(() => {
+        const dr = a.draft, panel = (kicker, title, body, bg, fg, edge) => ({ attention: true, attentionKicker: kicker, attentionTitle: title, attentionBody: body, attentionBg: bg, attentionFg: fg, attentionEdge: edge });
+        if (dr === "uncertain" || dr === "attempting") return panel("ACTION OUTCOME · " + dr.toUpperCase(), "CareerSignal cannot prove whether " + (a.provider === "gmail" ? "Gmail" : "the provider") + " created the draft", "A draft-create request may have reached the mailbox. Do not retry until reconciled — reconciliation reads the drafts collection for this review's intent key and writes nothing new.", "var(--color-accent-900)", "var(--color-bg)", "var(--color-accent-900)");
+        if (dr === "rejected" && !o.intent) return panel("ACTION OUTCOME · PROVIDER REJECTED", (a.provider === "gmail" ? "Gmail" : "The provider") + " rejected the request; nothing was created", "The provider was contacted and its own response proves the draft does not exist. The reserved attempt was released and the approval still stands, so a corrected draft can be retried without re-approving.", "transparent", "var(--color-text)", "var(--color-accent-700)");
+        if (dr === "refused") return panel("ACTION OUTCOME · REFUSED", "CareerSignal did not contact " + (a.provider === "gmail" ? "Gmail" : "the provider"), "The draft was refused before anything left this machine (an unusable recipient, subject or body). Nothing was reserved; correct the source and ask again.", "transparent", "var(--color-text)", "var(--color-neutral-700)");
+        if (a.decision === "approved" && !a.binds && !o.intent) return panel("APPROVAL STALE", "Your approval no longer matches the current material", "A newer message moved the recipient or subject after you approved. The record of who approved stays; it just authorizes nothing until you approve what is shown now.", "transparent", "var(--color-text)", "var(--color-accent-700)");
+        return { attention: false };
+      })(),
+      history: o.history.map((h) => ({ event: h.event, when: this.when(h.t), status: h.status, actorSafe: this.safe(h.actor), reasonSafe: this.safeLines(h.reason) })),
+      sources: o.sources.map((k) => ({ senderSafe: this.safe(s.msgs[k].sender), subjectSafe: this.safe(s.msgs[k].subject), idShort: this.short(s.msgs[k].id), namespace: s.msgs[k].namespace, go: () => this.setState({ nav: "inbox", selMsg: k, banner: null }) })),
+      noSources: o.sources.length === 0, audit: o.audit,
+    };
+    const m = s.selMsg && s.msgs[s.selMsg];
+    const arrivalOrder = Object.entries(s.msgs).sort((x, y) => x[1].t - y[1].t).map(([k]) => k);
+    const linkedOpps = m ? m.items.filter((it) => it.url && this.byUrl(it.url)).map((it) => this.byUrl(it.url)) : [];
+    const addressed = m ? s.opps.filter((o2) => o2.sources[o2.sources.length - 1] === s.selMsg) : [];
+    const md = m && { idShort: this.short(m.id), subjectSafe: this.safe(m.subject), senderSafe: this.safe(m.sender), namespace: m.namespace, format: m.format, parser_version: m.parser_version, external_id: this.safe(m.external_id), itemCount: m.items.length,
+      arrival: arrivalOrder.indexOf(s.selMsg) + 1, okCount: m.items.filter((i) => !i.reason).length, failCount: m.items.filter((i) => i.reason).length, hasFailures: m.items.some((i) => i.reason), noneExtracted: !m.items.some((i) => !i.reason), extractedTagClass: m.items.some((i) => !i.reason) ? "tag-accent" : "tag-neutral",
+      addressesText: addressed.length ? addressed.map((o2) => o2.company + " — " + this.safe(o2.title)).join("; ") + " (newest source wins)" : "nothing — a newer message addresses these opportunities, or none were extracted",
+      linked: linkedOpps.map((lo) => { const q = this.queue(lo) || { label: "no review", cls: "tag-neutral" }; return { company: lo.company, titleSafe: this.safe(lo.title), coverageText: this.coverageText(lo), status: this.latest(lo).status, queueLabel: q.label, queueTagClass: q.cls, currentText: lo.sources[lo.sources.length - 1] === s.selMsg ? "current source" : "superseded by a newer message", go: () => this.setState({ nav: "opportunities", sel: lo.id, selMsg: null, banner: null }) }; }),
+      items: m.items.map((it) => { const lo = it.url && this.byUrl(it.url); return { index: it.index, excerptSafe: this.safeLines(it.excerpt), reason: it.reason, hasReason: !!it.reason, linked: !!lo, label: it.reason ? "not extracted" : "extracted", tagClass: it.reason ? "tag-outline" : "tag-accent", edge: it.reason ? "var(--color-accent-700)" : "var(--color-divider)", company: lo?.company, titleSafe: lo && this.safe(lo.title), go: () => lo && this.setState({ nav: "opportunities", sel: lo.id, selMsg: null, banner: null }) }; }) };
+
+    const showMsg = !!md && (isInbox || isActivity);
+    const showOpp = !showMsg && !!d && !(isInbox);
+    const noSelection = !showMsg && !showOpp;
+    const b = s.banner;
+    const bannerBg = b ? ({ ACCEPTED: "var(--color-accent-700)", REFUSED: "var(--color-neutral-800)", PROVIDER_REJECTED: "var(--color-neutral-800)", UNCERTAIN: "var(--color-accent-900)" })[b.outcome] : none;
+    const set = (k) => (e) => this.setState({ form: { ...s.form, [k]: e.target.value } });
+    return {
+      navItems, isDash, isInbox, isOpps, isActivity, isOppList: isOpps || isApprovals, rows, msgRows, timeline: tl, statusCounts, queues, statuses: this.STATUSES,
+      listTitle: ({ dashboard: "Dashboard", inbox: "Inbox", opportunities: "Opportunities", approvals: "Approvals", activity: "Activity" })[nav],
+      listSubtitle: ({ dashboard: "Every count is derived from status history, decisions and draft intents — nothing is stored twice.", inbox: "Recruiting messages as ingested. Read-only evidence.", opportunities: "One row per opportunity; the review is evidence about it.", approvals: "Reviews that advance, ordered by what needs you most.", activity: "Status events, decisions and draft attempts — append-only." })[nav],
+      listEmpty: rows.length === 0, emptyText: isApprovals ? "Nothing awaits a decision. Approvals appear when a review advances the threshold." : "No opportunities match these filters.",
+      filters: s.filters, setQuery: (e) => this.setState({ filters: { ...s.filters, q: e.target.value } }), toggleActive: () => this.setState({ filters: { ...s.filters, active: !s.filters.active } }), setMinCov: (e) => this.setState({ filters: { ...s.filters, minCov: Number(e.target.value) } }),
+      activeBg: s.filters.active ? acc : none, activeFg: s.filters.active ? "var(--color-bg)" : "inherit",
+      banner: !!b, bannerOutcome: b?.outcome, bannerMsg: b?.message, bannerNext: b?.next, bannerBg, dismissBanner: () => this.setState({ banner: null }),
+      noSelection, emptyDetailTitle: isInbox ? "Select a message" : "Select an opportunity", emptyDetailBody: isInbox ? "Each message shows what the extractor read and which opportunities it produced. Nothing here is editable." : "The detail shows the review evidence, the exact material an approval binds, and the full status history.",
+      showOpp, showMsg, d, md,
+      dlgStatus: s.dialog === "status", dlgApprove: s.dialog === "approve", dlgDraft: s.dialog === "draft", dlgChanges: s.dialog === "changes", form: s.form, openChanges: () => this.setState({ dialog: "changes" }),
+      openStatus: () => this.setState({ dialog: "status", form: { ...s.form, status: this.ACTIVE.includes(last.status) ? last.status : "reviewing", reason: "" } }),
+      openApprove: () => this.setState({ dialog: "approve", form: { ...s.form, provider: a.provider || "gmail" } }), openDraft: () => this.setState({ dialog: "draft" }), closeDialog: () => this.setState({ dialog: null }),
+      setFormStatus: set("status"), setFormReason: set("reason"), setFormActor: set("actor"), setFormProvider: set("provider"),
+      submitStatus: this.submitStatus, submitApprove: this.submitApprove, doReject: this.doReject, submitDraft: this.submitDraft, doReconcile: this.doReconcile,
+    };
+  }
+}
+</script>
+</body>
+</html>
