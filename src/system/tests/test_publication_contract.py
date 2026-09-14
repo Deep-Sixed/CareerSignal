@@ -10,8 +10,14 @@ argued for is the failure worth testing against:
   * a binary artifact is refused everywhere except a real PNG in one exact directory of
     design renders -- the name alone is never the evidence.
 
-Both are exercised as pure predicates and again end to end against a temporary tree, so a
-future edit that widens either rule fails here rather than in review.
+`ops/tools/verify_secrets.py` carries a third: one detector, in three named artifacts.
+Its paths arrive from detect-secrets spelled the way the running platform spells them,
+so separator normalisation is part of the comparison and is pinned here too -- as
+normalisation only, never as a fourth way to widen the allowance.
+
+All are exercised as pure predicates and again end to end, against a temporary tree for
+the tree gate and a findings payload for the secret gate, so a future edit that widens
+any rule fails here rather than in review.
 """
 
 import importlib.util
@@ -303,3 +309,111 @@ def test_a_refused_finding_is_not_masked_by_a_reviewed_one(scanner, monkeypatch,
     assert "Secret scan requires review" in scan_result(scanner, monkeypatch, results)
     printed = capsys.readouterr().out
     assert "Private Key" in printed and HEX not in printed
+
+
+# ── separator normalisation: the same three artifacts, either platform's spelling ────
+# detect-secrets reports the path as the operating system spells it, so a Windows runner
+# names the mock with backslashes. Before the fix those never matched the allowlist and
+# all four Windows cells refused a reviewed artifact -- caught by a durability push, not
+# by review, which is why both spellings are pinned here.
+WINDOWS_ARTIFACTS = [
+    r"docs\ui-design\CareerSignal-Mock.dc.html",
+    r"docs\ui-design\CareerSignal-Handoff.dc.html",
+    r"docs\ui-design\CareerSignal-UI-Review.dc.html",
+]
+
+
+@pytest.mark.parametrize("path", WINDOWS_ARTIFACTS)
+def test_windows_spelling_resolves_to_the_same_reviewed_artifact(scanner, path):
+    assert scanner.reviewed_design_finding(path, HEX)
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [
+        (r"docs\ui-design\CareerSignal-Mock.dc.html", MOCK),
+        (
+            r"docs\ui-design\CareerSignal-Handoff.dc.html",
+            "docs/ui-design/CareerSignal-Handoff.dc.html",
+        ),
+        (
+            r"docs\ui-design\CareerSignal-UI-Review.dc.html",
+            "docs/ui-design/CareerSignal-UI-Review.dc.html",
+        ),
+        # A mixed spelling normalises the same way rather than becoming a third form.
+        (r"docs/ui-design\CareerSignal-Mock.dc.html", MOCK),
+        # Already canonical: normalising is idempotent.
+        (MOCK, MOCK),
+    ],
+)
+def test_both_spellings_canonicalise_identically(scanner, reported, expected):
+    assert scanner.canonical_path(reported) == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # The posix near misses, spelled the Windows way. Folding separators must not be
+        # an occasion to admit anything the allowlist excludes.
+        r"docs\ui-design\CareerSignal-Mock-v2.dc.html",
+        r"docs\ui-design\CareerSignal-Sketch.dc.html",
+        r"docs\ui-design\CareerSignal-Mock.dc.html.bak",
+        r"docs\CareerSignal-Mock.dc.html",
+        r"docs\ui-design\nested\CareerSignal-Mock.dc.html",
+        r"docs\ui-design\renders\dashboard.png",
+        r"src\system\cli.py",
+    ],
+)
+def test_windows_near_misses_are_still_refused(scanner, path):
+    assert not scanner.reviewed_design_finding(path, HEX)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Windows is case-insensitive about filenames; this gate is not. The allowlist
+        # names three exact artifacts, and folding case would admit a fourth file.
+        r"docs\ui-design\careersignal-Mock.dc.html",
+        r"docs\UI-Design\CareerSignal-Mock.dc.html",
+        r"DOCS\ui-design\CareerSignal-Mock.dc.html",
+        "docs/ui-design/careersignal-mock.dc.html",
+    ],
+)
+def test_case_is_not_folded_by_normalisation(scanner, path):
+    assert not scanner.reviewed_design_finding(path, HEX)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Walking out and back in is not the same path as never leaving: `..` is left in
+        # place rather than resolved, so these compare unequal and are refused.
+        "docs/ui-design/../ui-design/CareerSignal-Mock.dc.html",
+        r"docs\ui-design\..\ui-design\CareerSignal-Mock.dc.html",
+        # An absolute path from a runner is not the relative path the allowlist names.
+        r"D:\a\CareerSignal\CareerSignal\docs\ui-design\CareerSignal-Mock.dc.html",
+        "/home/runner/work/CareerSignal/docs/ui-design/CareerSignal-Mock.dc.html",
+    ],
+)
+def test_normalisation_does_not_resolve_or_absolutise(scanner, path):
+    assert not scanner.reviewed_design_finding(path, HEX)
+
+
+@pytest.mark.parametrize(
+    "detector", ["Base64 High Entropy String", "Private Key", "AWS Access Key"]
+)
+def test_windows_spelling_does_not_widen_the_detector(scanner, detector):
+    """The fix is about separators. Every other detector still stops the gate."""
+    assert not scanner.reviewed_design_finding(WINDOWS_ARTIFACTS[0], detector)
+
+
+def test_windows_reported_finding_passes_triage(scanner, monkeypatch, capsys):
+    """End to end through main(): the Windows spelling of the mock is allowed through."""
+    results = {WINDOWS_ARTIFACTS[0]: [{"type": HEX, "line_number": 467}]}
+    assert scan_result(scanner, monkeypatch, results) == ""
+    assert "1 reviewed synthetic identifiers" in capsys.readouterr().out
+
+
+def test_windows_spelled_refusal_still_stops_the_gate(scanner, monkeypatch):
+    results = {r"docs\ui-design\CareerSignal-Mock-v2.dc.html": [{"type": HEX, "line_number": 5}]}
+    assert "Secret scan requires review" in scan_result(scanner, monkeypatch, results)
