@@ -133,6 +133,82 @@ class Repository:
                 (message_id,),
             ).fetchall()
 
+    # One row per ingested message. The counts come from the same evidence rows
+    # extraction_evidence() returns, so a list and a detail view cannot disagree about how
+    # much of a message was understood.
+    COMMUNICATIONS = (
+        "SELECT m.message_id,m.namespace,m.external_id,m.sender,m.subject,m.format,"
+        "m.parser_version,"
+        "SUM(CASE WHEN i.reason='' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN i.reason<>'' THEN 1 ELSE 0 END),"
+        "m.rowid "
+        "FROM message_sources m LEFT JOIN extraction_items i ON i.message_id=m.message_id"
+    )
+
+    @staticmethod
+    def _communication(row) -> dict:
+        return {
+            "message": row[0],
+            "namespace": row[1],
+            "external_id": row[2],
+            "sender": row[3],
+            "subject": row[4],
+            "format": row[5],
+            "parser_version": row[6],
+            "extracted": row[7],
+            "unextracted": row[8],
+            # Arrival is the row the insert assigned, not a timestamp. It is the same
+            # ordering _addressing() binds by, for the same reason: two messages can share
+            # a second, and the sequence they arrived in is what decides which one wins.
+            "arrival": row[9],
+        }
+
+    def communications(self) -> list[dict]:
+        """Every ingested message, in arrival order. Read-only.
+
+        Ascending, because arrival is a sequence and reversing it is the caller's business
+        -- `arrival` is on every row precisely so a view can order either way without
+        inventing its own rule.
+        """
+        with connection(self.path) as conn:
+            return [
+                self._communication(row)
+                for row in conn.execute(
+                    self.COMMUNICATIONS + " GROUP BY m.message_id ORDER BY m.rowid"
+                ).fetchall()
+            ]
+
+    def communication(self, message_id) -> dict:
+        """One message, its per-item evidence, and what it currently addresses.
+
+        `addresses` names the opportunities whose newest provenance row is this message --
+        the ones an outward draft would be addressed from today -- not every opportunity
+        the message ever contributed to. A superseded source still holds its evidence and
+        its provenance row; it just no longer decides where anything goes.
+        """
+        with connection(self.path) as conn:
+            row = conn.execute(
+                self.COMMUNICATIONS + " WHERE m.message_id=? GROUP BY m.message_id",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            addresses = [
+                found[0]
+                for found in conn.execute(
+                    "SELECT p.opportunity_id FROM provenance p WHERE p.message_id=? "
+                    "AND p.rowid=(SELECT MAX(q.rowid) FROM provenance q "
+                    "WHERE q.opportunity_id=p.opportunity_id) "
+                    "ORDER BY p.opportunity_id",
+                    (message_id,),
+                ).fetchall()
+            ]
+        return {
+            **self._communication(row),
+            "items": self.extraction_evidence(message_id),
+            "addresses": addresses,
+        }
+
     # One row per opportunity: the durable business object. The review is evidence about
     # it, joined in as columns rather than being the subject of the list.
     SUMMARY = (
@@ -834,6 +910,37 @@ class Repository:
         with connection(self.path) as conn:
             return self._addressing(conn, review_id)
 
+    def sources(self, opportunity_id) -> list[dict]:
+        """Every message this opportunity arrived in, oldest first. Read-only.
+
+        Ordered by the row each insert assigned, so the last element is the source
+        `_addressing()` binds for the review that element names -- the same join and the
+        same ordering, read rather than re-derived. A message ingested without a stored
+        source row cannot address anything and does not appear, exactly as `_addressing()`
+        cannot bind one.
+        """
+        with connection(self.path) as conn:
+            return [
+                {
+                    "message": row[0],
+                    "namespace": row[1],
+                    "external_id": row[2],
+                    "sender": row[3],
+                    "subject": row[4],
+                    "format": row[5],
+                    "parser_version": row[6],
+                    "review": row[7],
+                    "arrival": row[8],
+                }
+                for row in conn.execute(
+                    "SELECT p.message_id,m.namespace,m.external_id,m.sender,m.subject,"
+                    "m.format,m.parser_version,p.review_id,p.rowid "
+                    "FROM provenance p JOIN message_sources m ON m.message_id=p.message_id "
+                    "WHERE p.opportunity_id=? ORDER BY p.rowid",
+                    (opportunity_id,),
+                ).fetchall()
+            ]
+
     def draft_material(self, review_id):
         """Everything a draft would be composed from, read without reserving anything.
 
@@ -900,6 +1007,58 @@ class Repository:
                 "status": binding["status"],
                 "status_event_id": binding["status_event_id"],
             }
+
+    def timeline(self, *, limit: int = 200, since=None) -> list[dict]:
+        """Status events and audit events as one activity stream, newest first. Read-only.
+
+        Two append-only ledgers with independent id sequences, so an id identifies an event
+        only together with the `kind` that says which ledger it came from. The pair is the
+        identity; neither half is one alone.
+
+        `since` is an inclusive lower bound on `created_at`, applied to both ledgers before
+        they are combined. It is an incremental filter -- "everything from this moment on"
+        -- and deliberately not a pagination cursor. `created_at` has second resolution, so
+        an exclusive bound would silently drop an event sharing its second with the last
+        one a caller saw. An inclusive bound can repeat that boundary event instead, and a
+        repeat is recoverable where an omission is not. Paging backwards through history
+        needs a composite `(created_at, id)` cursor or its own parameter; it must not be
+        spelled by narrowing this one.
+
+        Ordering is `created_at DESC, id DESC`, which is deterministic within a ledger and
+        stable across the union for any one row, but two events from different ledgers
+        sharing a second are ordered by an id comparison across unrelated sequences. That
+        decides a tie; it does not claim one happened first.
+        """
+        if limit <= 0:
+            # SQLite reads a negative LIMIT as no limit at all, which would turn a bounded
+            # read into an unbounded one on a typo.
+            raise ValueError("Limit must be positive")
+        status_where = " WHERE created_at>=?" if since is not None else ""
+        audit_where = " WHERE a.created_at>=?" if since is not None else ""
+        values = ([since] if since is not None else []) * 2 + [limit]
+        with connection(self.path) as conn:
+            rows = conn.execute(
+                "SELECT created_at,'status',opportunity_id,NULL,status,actor,reason,id "
+                f"FROM opportunity_status_history{status_where} "
+                "UNION ALL "
+                "SELECT a.created_at,'audit',r.opportunity_id,a.review_id,a.event,NULL,NULL,a.id "
+                f"FROM audit a JOIN reviews r ON r.id=a.review_id{audit_where} "
+                "ORDER BY created_at DESC,id DESC LIMIT ?",
+                tuple(values),
+            ).fetchall()
+        return [
+            {
+                "kind": row[1],
+                "created_at": row[0],
+                "opportunity": row[2],
+                "review": row[3],
+                "event": row[4],
+                "actor": row[5],
+                "reason": row[6],
+                "event_id": row[7],
+            }
+            for row in rows
+        ]
 
     def audit(self, review_id):
         with connection(self.path) as conn:

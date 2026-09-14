@@ -82,6 +82,43 @@ Only a line feed is structural, with `CRLF` folded into it. Python's `str.splitl
 
 The `--json` form needs none of this — `json.dumps` escapes control characters already — and it retains the underlying value, so automation still sees exactly what was stored.
 
+## Read projections
+
+Five reads exist for a graphical surface that does not exist yet. They have **no command**:
+nothing below is reachable from the CLI, and adding one is a separate change.
+
+| | |
+|---|---|
+| `views.queue(summary, action)` | Which queue an opportunity is in: `reconcile`, `created`, `stale`, `draft`, `decide`, `rejected`, `none` |
+| `Repository.communications()` | Every ingested message, in arrival order, with its extracted and unextracted counts |
+| `Repository.communication(message_id)` | One message, its per-item evidence, and the opportunities it currently addresses |
+| `Repository.sources(opportunity_id)` | Every message an opportunity arrived in, oldest first |
+| `Repository.timeline(limit=200, since=None)` | Status events and audit events as one stream, newest first |
+
+They derive nothing new. Each one reads what a write path already decided, so a list and a
+detail pane cannot disagree: `queue()` is a pure function over the two dictionaries the
+repository already returns, the message counts are the same evidence rows
+`extraction_evidence()` returns, and `sources()` ends at the message `_addressing()` binds
+because it uses that join and that ordering rather than a second opinion.
+
+Three orderings are load-bearing:
+
+- **Arrival is a row number, not a clock.** `communications()` and `sources()` order by the
+  row each insert assigned, the same sequence that decides which message addresses a draft.
+  Two messages can share a second; they cannot share a row.
+- **`queue()`'s test order is the rule.** A durable intent wins absolutely, so a
+  `draft_refused` in the audit trail beside an open intent describes a draft that is not
+  currently proposed rather than the current state.
+- **`timeline()`'s `since` is an inclusive lower bound, not a cursor.** `created_at` has
+  second resolution, so an exclusive bound would silently drop an event sharing its second
+  with the last one a caller saw; an inclusive one can repeat that event instead, and a
+  repeat is recoverable where an omission is not. Paging backwards needs a composite
+  `(created_at, id)` cursor or its own parameter — not a narrowing of this one.
+
+`timeline()` unions two append-only ledgers with independent id sequences, so each row says
+which ledger it came from: `kind` with `event_id` is the identity, and `event_id` alone is
+not unique across the stream.
+
 ## What these commands are not
 
 - They do not change status. That is the `status` command, which is a [compare-and-append](status-history.md#compare-and-append) write and a different command on purpose.
