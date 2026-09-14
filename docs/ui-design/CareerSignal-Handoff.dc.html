@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/styles.css">
+  <script src="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/_ds_bundle.js"></script>
+  <style>
+    body{margin:0}
+    a{color:var(--color-accent-700)} a:hover{color:var(--color-accent-900)}
+    .doc h2{font-size:28px;margin:0 0 4px} .doc h3{font-size:20px;margin:20px 0 6px} .doc h4{font-size:15px;margin:14px 0 4px}
+    .doc p,.doc li{font-size:14.5px;line-height:1.55;text-wrap:pretty} .doc ul,.doc ol{margin:4px 0 10px;padding-left:22px}
+    .doc code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--color-surface);padding:1px 4px}
+    .doc pre{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5;background:var(--color-surface);padding:10px 12px;margin:6px 0 12px;white-space:pre-wrap;overflow:auto}
+    .doc .table td,.doc .table th{vertical-align:top;font-size:13px;overflow-wrap:anywhere}
+    .kicker{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent-700)}
+  </style>
+</helmet>
+<div class="doc" data-screen-label="Handoff" style="max-width:960px;margin:0 auto;padding:40px 28px 80px;font-family:var(--font-body);color:var(--color-text)">
+
+  <header style="margin-bottom:32px">
+    <div class="kicker">Design → implementation handoff · Deep-Sixed/CareerSignal @ main · 13 Sep 2026</div>
+    <h1 style="font-size:42px;margin:6px 0 8px;line-height:1.05">Frozen mock, application contract, PR sequence</h1>
+    <p style="font-size:17px;max-width:740px">The interaction design is locked. This document says what backs every displayed field and action, what must be added, and in what order to build it. No redesign, no implementation code.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:13px">
+      <a class="btn btn-secondary" href="CareerSignal Mock.dc.html" style="text-decoration:none">Frozen mock</a>
+      <a class="btn btn-secondary" href="CareerSignal UI Review.dc.html" style="text-decoration:none">Design review</a>
+    </div>
+  </header>
+
+  <section class="blueprint" style="padding:14px 18px;margin-bottom:32px">
+    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="kicker">Freeze</div>
+    <p style="margin:4px 0 0"><strong>CareerSignal Mock.dc.html is the reference build.</strong> Five nav items (Dashboard, Inbox, Opportunities, Approvals, Activity), three panes, one detail pane with two shapes. Changes to it from here are bugs against this document, not design iterations. The mock's Demo-mode props are the acceptance-test surface described in §6, not product UI.</p>
+    <p style="margin:8px 0 0;font-size:13.5px"><strong>Design baseline accepted 13 Sep 2026.</strong> The mock and this handoff are the baseline for the PR series; design is closed. Two decisions are deliberately left open and belong to their own contracts, not to a UI PR: how the local web surface is packaged (§4) and which clock the Inbox sorts by (§5). Everything else is settled. Next step is PR 1 — split <code>Workflow</code> along the boundary the UI needs, with no UI code.</p>
+  </section>
+
+  <!-- 1 -->
+  <section id="h1">
+    <div class="kicker">1</div><h2>Field-by-field backing</h2>
+    <p>Every value the mock displays, and the method on <code>main</code> that already produces it. "New" means a projection this handoff adds; nothing in the list requires a new domain concept.</p>
+
+    <h3>Opportunity list row · Opportunities, Approvals, Dashboard queues</h3>
+    <table class="table"><thead><tr><th style="width:190px">Displayed</th><th style="width:300px">Backed by</th><th>Note</th></tr></thead><tbody>
+      <tr><td>company, title, location, url</td><td><code>Repository.opportunities()</code> → <code>_summary</code> keys <code>company/title/location/url</code></td><td>Raw recruiter text; escaped at render only.</td></tr>
+      <tr><td>status tag</td><td><code>_summary["status"]</code> (derived from newest <code>opportunity_status_history</code> row inside <code>SUMMARY</code>)</td><td>—</td></tr>
+      <tr><td>coverage cell (<code>86%</code> / <code>not scored</code> / <code>pre-coverage</code> / <code>-</code>)</td><td><code>views.coverage(row)</code> over <code>review/actionable/scored/coverage</code></td><td>Port the four-branch rule verbatim to JS; do not re-derive.</td></tr>
+      <tr><td>row ordering</td><td><code>opportunities()</code>'s Python sort: pipeline order → coverage desc → company → title</td><td>Server returns ordered; the UI must not re-sort by default.</td></tr>
+      <tr><td>list filters</td><td><code>opportunities(status=, active=, eligible=, min_coverage=, max_coverage=)</code></td><td>Exactly the CLI's set. Free-text search is client-side over the returned page.</td></tr>
+      <tr><td><strong>queue tag</strong> (reconcile / stale / decide / draft / created / rejected)</td><td><strong>New</strong> — pure function over <code>_summary</code> + <code>_action</code></td><td>§2. Derivation only; no new state is stored.</td></tr>
+      <tr><td>"3 days ago"</td><td><code>_summary["status_changed_at"]</code></td><td>The opportunity's own clock. Messages have none — see §5.</td></tr>
+    </tbody></table>
+
+    <h3>Opportunity detail</h3>
+    <table class="table"><thead><tr><th style="width:190px">Displayed</th><th style="width:300px">Backed by</th><th>Note</th></tr></thead><tbody>
+      <tr><td>header tags: status + <code>event N</code>, coverage, eligible, advances</td><td><code>opportunity()</code> → <code>status</code>, <code>status_event</code>, <code>eligible</code>, <code>advances</code></td><td><code>status_event</code> is the value the status command must carry back.</td></tr>
+      <tr><td>Review evidence list</td><td><code>opportunity()["packet"]["reasons"]</code></td><td>Rendered verbatim, in order. No UI scoring.</td></tr>
+      <tr><td>stated / matched / location line</td><td><code>_summary["stated_skills"]</code>, <code>["matched_skills"]</code>, <code>["location"]</code></td><td>—</td></tr>
+      <tr><td>"pre-coverage, not actionable" refusal text</td><td><code>_summary["actionable"] is False</code>; wording from <code>_current()</code>'s raise</td><td>Quote the engine's sentence.</td></tr>
+      <tr><td>Approval packet: review, source, recipient, subject, wording</td><td><code>opportunity()["bound"]</code> = <code>_bound()</code> over <code>_binding()</code></td><td>The one legal source for these five. Never reassemble from <code>addressing()</code> or the payload copy.</td></tr>
+      <tr><td>destination (provider · namespace)</td><td><code>action["provider"]</code>, <code>action["provider_namespace"]</code></td><td>Empty = a decision predating migration 0007; show "not declared", offer re-approval.</td></tr>
+      <tr><td>approval sentence</td><td><code>views.approval(action)</code></td><td>Port including the three stale remediations.</td></tr>
+      <tr><td>draft sentence</td><td><code>views.attempt(action)</code></td><td>Port including receipt quoting.</td></tr>
+      <tr><td>decision state (undecided / approved-current / stale / rejected)</td><td><code>action["decision"]</code> + <code>action["binds"]</code> + <code>action["attempted"]</code></td><td>The mock's three-state button area is exactly this triple; no new field.</td></tr>
+      <tr><td>attention panel (UNCERTAIN / PROVIDER REJECTED / REFUSED / STALE)</td><td><code>action["draft"]</code> ∈ {attempting, uncertain, rejected, refused} else stale rule above</td><td><code>_action</code> already distinguishes all four; copy is new, data is not.</td></tr>
+      <tr><td>"Create draft" enabled + disabled reason</td><td><code>binds ∧ ¬attempted ∧ status ∉ TERMINAL ∧ actionable</code></td><td>Advisory. <code>claim()</code> re-checks each clause in its own transaction.</td></tr>
+      <tr><td>receipt</td><td><code>action["receipt"]</code></td><td>Provider text; escape.</td></tr>
+      <tr><td>Status history table</td><td><code>opportunity()["history"]</code> — <code>event, created_at, status, actor, reason</code></td><td>Multi-line reasons via the <code>safe_lines</code> rule.</td></tr>
+      <tr><td>Provenance · messages that carried it</td><td><strong>New</strong> <code>sources(opportunity_id)</code> — <code>provenance ⋈ message_sources</code>, <code>ORDER BY p.rowid</code></td><td>Newest last; the last one is the one <code>_addressing()</code> uses.</td></tr>
+      <tr><td>Audit chips</td><td><code>Repository.audit(review_id)</code></td><td>Event names only today; timestamps needed for Activity (§2).</td></tr>
+      <tr><td>Approve dialog digests</td><td><code>Repository.authorization(review_id)</code> — already public, already returns bound_* and current <code>content_digest</code> / <code>draft_digest</code> / <code>addressing_digest</code> / <code>status_event_id</code></td><td><strong>No new projection needed.</strong> Earlier note in the review overstated this: only the write-side compare is new.</td></tr>
+      <tr><td>"Review changes" before/now table</td><td><code>authorization()</code>'s bound_* vs current pairs</td><td>Digests differ → name the field; show <code>bound_source</code> vs current <code>source</code> for the recipient story.</td></tr>
+    </tbody></table>
+
+    <h3>Inbox</h3>
+    <table class="table"><thead><tr><th style="width:190px">Displayed</th><th style="width:300px">Backed by</th><th>Note</th></tr></thead><tbody>
+      <tr><td>list: sender, subject, namespace, format</td><td><strong>New</strong> <code>communications()</code> over <code>message_sources</code> + <code>extraction_items</code> counts</td><td>A list read; the row shape already exists as a table.</td></tr>
+      <tr><td>extracted / not-extracted counts</td><td><code>extraction_items.reason</code> empty vs set</td><td>Counted in SQL.</td></tr>
+      <tr><td>item excerpts, reasons, links</td><td><code>Repository.extraction_evidence(message_id)</code></td><td>Exists, unchanged.</td></tr>
+      <tr><td>"current source" vs "superseded"</td><td>whether this message is the last <code>provenance.rowid</code> for that review</td><td>Same ordering rule as <code>_addressing()</code>; derive, don't store.</td></tr>
+      <tr><td>external_id, parser_version, digest</td><td><code>message_sources</code>; <code>messages.digest</code></td><td>—</td></tr>
+      <tr><td>arrival order</td><td><code>message_sources.rowid</code></td><td>Not a time. See §5.</td></tr>
+    </tbody></table>
+
+    <h3>Dashboard and Activity</h3>
+    <table class="table"><thead><tr><th style="width:190px">Displayed</th><th style="width:300px">Backed by</th><th>Note</th></tr></thead><tbody>
+      <tr><td>count per status</td><td><code>opportunities()</code> grouped client-side, or one <code>GROUP BY</code></td><td>9 cells from <code>recruiting.status.STATUSES</code>.</td></tr>
+      <tr><td>six work queues</td><td>the queue function of §2 over the same rows</td><td>The queue is the dashboard; no separate model.</td></tr>
+      <tr><td>session facts</td><td><code>store.sqlite_report()</code>, db path, token presence</td><td>Presence booleans only — never a token value.</td></tr>
+      <tr><td>timeline</td><td><strong>New</strong> <code>timeline(limit, since)</code> — union of <code>opportunity_status_history</code> and <code>audit</code>, both ordered by <code>created_at</code> then <code>id</code></td><td><code>audit</code> has <code>created_at</code>; <code>Repository.audit()</code> just doesn't project it.</td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 2 -->
+  <section id="h2" style="margin-top:40px">
+    <div class="kicker">2</div><h2>Minimal new read projections</h2>
+    <p>Four functions and one derivation. All read-only, all on <code>Repository</code> beside the ones they extend, all expressible in the existing SQL vocabulary.</p>
+    <pre>queue(summary, action) -&gt; str          # pure function, module-level beside views
+  "reconcile" if action["draft"] in ("attempting","uncertain")
+  "created"   if action["draft"] == "confirmed"
+  "stale"     if decision=="approved" and not binds and not attempted
+  "draft"     if decision=="approved" and binds and not attempted and status not in TERMINAL
+  "decide"    if advances and actionable and decision is None and status not in TERMINAL
+  "rejected"  if decision=="rejected"
+  "none"      otherwise                # includes pre-coverage, below-threshold, terminal
+  Order of tests matters and mirrors _action's own precedence (an intent wins absolutely).
+
+Repository.communications() -&gt; list[dict]
+  message_sources LEFT JOIN extraction_items, one row per message:
+  {message_id, namespace, external_id, sender, subject, format, parser_version,
+   extracted, unextracted, arrival}      # arrival = message_sources.rowid
+
+Repository.communication(message_id) -&gt; dict
+  the row above + items=extraction_evidence(message_id)
+                + addresses=[opportunity ids whose newest provenance row is this message]
+
+Repository.sources(opportunity_id) -&gt; list[dict]
+  provenance JOIN message_sources WHERE opportunity_id=? ORDER BY p.rowid
+  (the last element is the one _addressing() binds)
+
+Repository.timeline(*, limit=200, since=None) -&gt; list[dict]
+  SELECT created_at, 'status', opportunity_id, NULL, status, actor, reason, id
+    FROM opportunity_status_history
+  UNION ALL
+  SELECT a.created_at, 'audit', r.opportunity_id, a.review_id, a.event, NULL, NULL, a.id
+    FROM audit a JOIN reviews r ON r.id=a.review_id
+  ORDER BY created_at DESC, id DESC LIMIT ?</pre>
+    <p><strong>Not needed after re-reading the source:</strong> a digest projection (<code>authorization()</code> already returns everything the approve dialog shows and echoes) and any change to <code>_summary</code>, <code>_action</code>, <code>_bound</code> or <code>opportunity()</code>. The UI consumes those unchanged.</p>
+
+    <h3>The one write-side change</h3>
+    <pre>Repository.decide(review_id, *, approved, actor, provider="controlled",
+                  provider_namespace="controlled", expected=None)
+
+  expected = {"content_digest","draft_digest","addressing_digest","status_event_id"}
+  Inside the existing transaction, after binding = self._binding(conn, review_id)
+  and before the upsert:
+      if expected is not None and (
+          expected["content_digest"]   != binding["content_digest"] or
+          expected["draft_digest"]     != binding["draft_digest"] or
+          expected["addressing_digest"]!= binding["addressing"]["digest"] or
+          expected["status_event_id"]  != binding["status_event_id"]):
+          raise BindingConflict(expected, binding)      # subclass of ValueError
+
+  Optional, exactly as record_status's expected_event_id is optional and for the same
+  stated reason: intake has no prior state to have moved; every operator-facing surface
+  supplies it. The web layer always does. The CLI gains --expect on `approve` for parity.
+  Compared inside the transaction, never before it — moving the check earlier only moves
+  the race earlier, the argument record_status already documents.</pre>
+    <p>Rejections send no <code>expected</code>: a rejection binds nothing, and requiring a fresh packet to record one would block the safest action behind the riskiest precondition.</p>
+  </section>
+
+  <!-- 3 -->
+  <section id="h3" style="margin-top:40px">
+    <div class="kicker">3</div><h2>Commands, and the exceptions each raises</h2>
+    <table class="table"><thead><tr><th style="width:210px">UI action</th><th style="width:250px">Call</th><th>Outcomes the UI must render distinctly</th></tr></thead><tbody>
+      <tr><td>Change status</td><td><code>record_status(id, to, actor=, reason=, expected_event_id=)</code></td><td>returns <code>{status, event, previous_event}</code> → ACCEPTED. <code>StatusConflict</code> → REFUSED with expected vs observed vs current status. <code>ValueError</code> (unknown id, bad actor) → REFUSED.</td></tr>
+      <tr><td>Approve / Withdraw / Reject</td><td><code>decide(review_id, approved=, actor=, provider=, provider_namespace=, expected=)</code></td><td><code>BindingConflict</code> → 409, "reload the packet". <code>ValueError</code> → REFUSED verbatim: below threshold, terminal status, "draft already attempted; decision is locked", pre-coverage.</td></tr>
+      <tr><td>Create draft</td><td><code>OutwardActions.draft(review_id)</code> with a provider built for the declared destination</td><td>receipt → ACCEPTED. <code>None</code> → UNCERTAIN. <code>DraftRefused</code> → REFUSED. <code>ProviderRejected</code> → PROVIDER_REJECTED. <code>ValueError</code> (destination mismatch) → REFUSED. Replay of a confirmed intent returns its receipt and writes nothing.</td></tr>
+      <tr><td>Reconcile</td><td><code>OutwardActions.reconcile(review_id)</code></td><td>receipt → ACCEPTED. <code>None</code> → UNCERTAIN, "still unknown; do not draft again". <code>DraftRefused</code> (identity unverifiable) → REFUSED, intent unaffected. <code>ValueError</code> → REFUSED.</td></tr>
+      <tr><td>Ingest .eml</td><td><code>Intake.intake_message(Message.from_bytes(...))</code></td><td>list of review ids; "message ID reused with different content" → REFUSED. Per-item reasons come back through <code>extraction_evidence</code>.</td></tr>
+      <tr><td>Read Gmail label</td><td><code>GmailReader.messages(...)</code> fully, then <code>intake_message</code> per message</td><td>Read everything before writing anything — no reservation is held across the network.</td></tr>
+    </tbody></table>
+    <p>The HTTP layer is a translator: request → one engine call → the CLI's own <code>attempted()</code>-shaped record. <code>outcome</code> in the body is the contract; HTTP codes stay transport (200 for every settled outcome, 409 for a stale read, 404 unknown id, 400 malformed).</p>
+  </section>
+
+  <!-- 4 -->
+  <section id="h4" style="margin-top:40px">
+    <div class="kicker">4</div><h2>Three architecture questions, answered by the contract</h2>
+
+    <h4>Does the design justify splitting <code>Workflow</code>? — Yes, and it is now the cheapest moment.</h4>
+    <p><code>Workflow.__init__(repository, provider, profile)</code> forces every caller to hold all three. The UI's two lanes need exactly one each: intake needs the profile and no provider; draft and reconcile need a per-request provider and no profile — and the <code>Profile(("placeholder",))</code> in the draft path exists only because that is not expressible today. Under a web surface the placeholder gets worse, because a per-request provider means constructing a <code>Workflow</code> per request and inventing a profile each time.</p>
+    <pre>Intake(repository, profile)           .intake_message(message) .intake(message_id, body)
+OutwardActions(repository, provider)  .draft(review_id) .reconcile(review_id)</pre>
+    <p>Pure motion: the method bodies are unchanged, the split is along the dependency they already use. <code>test_operator_interface</code>'s no-second-route assertion re-points to <code>OutwardActions</code>. Land it <em>before</em> the web module so the web module never learns the placeholder.</p>
+
+    <h4>Must <code>careersignal.*</code> namespacing precede the web work? — No, and it must not gate it.</h4>
+    <p>The two are independent: namespacing is a mechanical rename of top-level packages (<code>data</code>, <code>system</code>, <code>recruiting</code>, <code>communications</code>), and the web module adds one subpackage plus a static resource directory under whichever name is current. The ordering argument is only about rename cost: doing it after the web module means a slightly larger diff, doing it before means the web PRs start on the final names. Neither is a correctness concern, and neither touches the wheel contract.</p>
+    <p><strong>Where it does become a precondition:</strong> if the optional <code>careersignal[web]</code> extra is ever chosen (option B in the review), the extra's name and its import boundary should be expressed against a real <code>careersignal</code> namespace rather than a bare <code>system.web</code> — an extra that installs top-level <code>system</code> is a name-collision hazard in any environment that installs anything else. So: <em>stdlib-only v1 → rename optional and independent; adopting a web extra → rename first.</em> That is the actual dependency between the two open findings, and it argues for doing the rename before, not after, if a web extra is considered likely.</p>
+
+    <h4>Connection and write model — unchanged from the review, restated as the implementation rule.</h4>
+    <ul>
+      <li>One connection per request, opened and closed on the handling thread through <code>store.connection()</code>; <code>check_same_thread=True</code> stays; nothing pooled or shared.</li>
+      <li>One in-process write authority with two lanes — local (status, decide, intake) and outward (draft, reconcile) — so a 30 s Gmail call cannot block a status append. The lock is for UX; every invariant remains enforced inside <code>BEGIN IMMEDIATE</code>.</li>
+      <li>One HTTP request = one engine call = one transaction. No transaction spans a response or a network call.</li>
+      <li>The CLI may write concurrently; it can only lose a race loudly. Reservation exhaustion surfaces as a REFUSED-shaped banner ("another writer held the database; nothing was written").</li>
+    </ul>
+  </section>
+
+  <!-- 5 -->
+  <section id="h5" style="margin-top:40px">
+    <div class="kicker">5</div><h2>Additive schema changes — separate from v1</h2>
+    <p>None of these are required for the first usable UI. Each should be decided through its own acceptance contract, not smuggled in with the web work.</p>
+    <table class="table"><thead><tr><th style="width:210px">Change</th><th style="width:210px">Why</th><th>Notes</th></tr></thead><tbody>
+      <tr><td><code>0008_message_time.sql</code> — <code>received_at</code> and/or <code>ingested_at</code> on <code>message_sources</code></td><td>Inbox ordering and message events on the Activity timeline. v1 orders by <code>rowid</code> (arrival order) and says so in the UI.</td><td>Two different facts: <em>ingested_at</em> is knowable for every row (<code>DEFAULT CURRENT_TIMESTAMP</code>, NULL for backfilled rows); <em>received_at</em> comes from the provider and is absent for structured intake. Decide whether the Inbox sorts by the mailbox's clock or the machine's before choosing — they disagree on a batch import, which is exactly when it matters. Backfill must not invent a time; NULL sorts as "unknown", and the UI falls back to arrival order for those rows. <strong>Working preference (to be confirmed by the migration's own contract):</strong> order by <code>received_at</code> when known, else <code>ingested_at</code>, else arrival — and label which clock each row is showing, so a Monday message imported on Thursday cannot silently read as either.</td></tr>
+      <tr><td>Persisted profile (skills, locations, threshold)</td><td>A Settings pane; today the profile is launch configuration, as <code>--skill</code> is for the CLI.</td><td>Changing it changes what <em>future</em> reviews say, never past ones — reviews are evidence and are not recomputed. That rule has to be stated in the acceptance contract before the table exists, or the first user assumption will be wrong.</td></tr>
+      <tr><td>Contacts</td><td>Only if a real need appears.</td><td>New table, a normalisation rule for sender strings, and an explicit prohibition: a contact may never influence addressing — <code>_addressing()</code> stays the only source.</td></tr>
+      <tr><td>Tasks / follow-ups</td><td>Deferred.</td><td>Would need its own append-only history to be consistent with the rest of the engine. The dashboard queues cover the need without it.</td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 6 -->
+  <section id="h6" style="margin-top:40px">
+    <div class="kicker">6</div><h2>PR sequence</h2>
+    <p>Nine PRs. Each is independently reviewable, keeps all 12 CI cells green, and adds no runtime dependency.</p>
+    <table class="table"><thead><tr><th style="width:40px">#</th><th style="width:220px">PR</th><th>Contents and the test that proves it</th></tr></thead><tbody>
+      <tr><td>1</td><td>Split <code>Workflow</code></td><td><code>Intake</code> + <code>OutwardActions</code>; CLI moved onto both; <code>Profile(("placeholder",))</code> deleted; no-second-route assertion re-pointed. Behaviour-neutral: the existing workflow tests pass unchanged apart from construction.</td></tr>
+      <tr><td>2</td><td><code>BindingConflict</code> + <code>decide(expected=)</code></td><td>Mirrors <code>test_compare_and_append</code>: approve with a stale <code>addressing_digest</code> → refused, nothing written, decision row untouched; approve with a matching packet → accepted; <code>expected=None</code> → today's behaviour exactly.</td></tr>
+      <tr><td>3</td><td>Read projections</td><td><code>queue()</code>, <code>communications()</code>, <code>communication()</code>, <code>sources()</code>, <code>timeline()</code>. Table-driven tests for <code>queue()</code> over every <code>_action</code> shape, including intent-wins-over-audit and the pre-coverage row.</td></tr>
+      <tr><td>4</td><td>Web surface, read side</td><td><code>system/web</code>: stdlib <code>ThreadingHTTPServer</code>, loopback bind, per-launch token, <code>Origin</code> check, CSP, static resources via <code>importlib.resources</code>, GET routes, <code>careersignal serve</code>. Wheel verifier proves static assets ship and dependencies stay empty.</td></tr>
+      <tr><td>5</td><td>Frontend shell + read screens</td><td>Three panes; Dashboard, Opportunities, Inbox, Activity read-only; <code>views.coverage/approval/attempt</code> ported to JS with the same fixtures the Python tests use. Hostile-fixture rendering test: control characters visible, nothing executed, <code>textContent</code> only.</td></tr>
+      <tr><td>6</td><td>Write authority + status command</td><td>Two lanes; per-request connections. Concurrency test: two simultaneous status posts → one ACCEPTED, one 409, never a timeout, never two events.</td></tr>
+      <tr><td>7</td><td>Decision + outward commands</td><td>Approve / reject / draft / reconcile; responses shaped like <code>cli.attempted()</code>. Test asserts REFUSED, PROVIDER_REJECTED and UNCERTAIN render three different <code>next</code> lines and that only UNCERTAIN offers reconcile.</td></tr>
+      <tr><td>8</td><td>Intake from the UI</td><td><code>.eml</code> upload via <code>email.parser</code>; Gmail read when the token is present, reading all messages before ingesting any.</td></tr>
+      <tr><td>9</td><td><code>--demo</code> mode</td><td>Controlled provider plus scripted outcomes behind a launch flag: stale status, stale approval, REFUSED, PROVIDER_REJECTED, UNCERTAIN, reconcile-found, reconcile-unknown, full binding ids. Drives the acceptance tests for PRs 6–8 without a mailbox; refuses to start against a database containing real Gmail intents.</td></tr>
+    </tbody></table>
+    <p style="margin-top:12px"><strong>Then, separately:</strong> the <code>received_at</code> decision, the persisted profile, and the <code>careersignal.*</code> rename (before any web extra, never as a gate on PRs 1–9).</p>
+    <p><strong>Definition of done for the release:</strong> a job seeker ingests a week of alerts, sees which opportunities advance, decides each, creates and reconciles a Gmail draft, and later reads back exactly what happened — without typing a 64-character id, and without any path the CLI does not already have.</p>
+  </section>
+</div>
+</x-dc>
+</body>
+</html>

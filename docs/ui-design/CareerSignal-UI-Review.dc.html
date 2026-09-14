@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/styles.css">
+  <script src="_ds/industry-c8f8c103-181e-4744-847e-e52de5f84b79/_ds_bundle.js"></script>
+  <style>
+    body{margin:0}
+    a{color:var(--color-accent-700)} a:hover{color:var(--color-accent-900)}
+    .doc h2{font-size:28px;margin:0 0 4px} .doc h3{font-size:20px;margin:18px 0 6px} .doc h4{font-size:16px;margin:14px 0 4px}
+    .doc p,.doc li{font-size:14.5px;line-height:1.55;text-wrap:pretty} .doc ul,.doc ol{margin:4px 0 10px;padding-left:22px}
+    .doc code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--color-surface);padding:1px 4px}
+    .doc pre{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5;background:var(--color-surface);padding:10px 12px;margin:6px 0 12px;white-space:pre-wrap;overflow:auto}
+    .doc .table td,.doc .table th{vertical-align:top;font-size:13.5px}
+    .kicker{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent-700)}
+    .box{border:1px solid var(--color-divider);padding:8px 10px;font-size:12.5px;line-height:1.4}
+  </style>
+</helmet>
+<div class="doc" data-screen-label="Design review" style="max-width:920px;margin:0 auto;padding:40px 28px 80px;font-family:var(--font-body);color:var(--color-text)">
+
+  <header style="margin-bottom:34px">
+    <div class="kicker">Design review · Deep-Sixed/CareerSignal @ main · September 2026</div>
+    <h1 style="font-size:44px;margin:6px 0 8px;line-height:1.05">A first graphical interface for CareerSignal</h1>
+    <p style="font-size:17px;max-width:720px">A lightweight personal recruiting CRM over the existing, strongly controlled workflow engine. Different views over one SQLite state — not a new subsystem per navigation item, not Salesforce, not an agent.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <a class="btn btn-primary blueprint" href="CareerSignal Mock.dc.html" style="text-decoration:none"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Open the clickable mock</a>
+      <span class="text-muted" style="font-size:13px;align-self:center">Mid-fi, synthetic data. Tweaks: simulate a status conflict; choose the draft outcome.</span>
+    </div>
+  </header>
+
+  <nav class="blueprint" style="padding:12px 16px;margin-bottom:36px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 24px;font-size:13.5px">
+    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <a href="#s0">0. What the engine actually is</a><a href="#s5">5. Security and correctness constraints</a>
+    <a href="#s1">1. Information architecture</a><a href="#s6">6. First-release acceptance contract</a>
+    <a href="#s2">2. Primary user journeys</a><a href="#s7">7. Architecture recommendation</a>
+    <a href="#s3">3. Screen-level specification</a><a href="#s8">8. Risks</a>
+    <a href="#s4">4. UI-facing application contract</a><a href="#s9">9. Proposed layout and implementation sequence</a>
+  </nav>
+
+  <!-- 0 -->
+  <section id="s0">
+    <div class="kicker">0</div><h2>What the engine actually is (read from the code)</h2>
+    <p>Everything below is derived from <code>src/data/repository.py</code>, <code>src/system/workflow.py</code>, <code>src/system/views.py</code>, <code>src/system/cli.py</code>, the seven migrations and the docs. The UI has four kinds of thing to show, and it already has the projections for three of them.</p>
+    <table class="table"><thead><tr><th style="width:170px">Concept</th><th>Where it lives</th><th>UI consequence</th></tr></thead><tbody>
+      <tr><td><strong>Opportunity</strong></td><td><code>opportunities</code> + <code>Repository.SUMMARY</code>/<code>_summary()</code>; status derived from <code>opportunity_status_history</code> (latest by id)</td><td>The durable business object. One row per opportunity everywhere; the review is columns, not the subject.</td></tr>
+      <tr><td><strong>Review / fit evidence</strong></td><td><code>reviews</code> (payload with <code>reasons</code>, coverage, eligible, advances); <code>scored</code>/<code>actionable</code> flags for pre-coverage rows</td><td>Shown inside the opportunity. Never its own list.</td></tr>
+      <tr><td><strong>Recruiting communication</strong></td><td><code>messages</code>, <code>message_sources</code>, <code>extraction_items</code>, <code>provenance</code></td><td>Read-only evidence. No body is stored — only excerpts. No timestamp column exists (see §8).</td></tr>
+      <tr><td><strong>Approval &amp; controlled draft</strong></td><td><code>decisions</code> (upserted; binds content, draft, addressing digests, status event, provider, namespace), <code>draft_intents</code> (one row per review), <code>audit</code> (append-only); <code>_action()</code>, <code>_bound()</code>, <code>_binding()</code>, <code>authorization()</code></td><td>One packet view. The UI must show exactly <code>_bound()</code> and echo <code>_binding()</code>'s digests back on approve.</td></tr>
+      <tr><td><strong>Operator activity</strong></td><td><code>opportunity_status_history</code> + <code>audit</code> — both have <code>created_at</code>, both refuse UPDATE/DELETE</td><td>A timeline is a union of two append-only tables. No new table.</td></tr>
+      <tr><td><strong>Contacts</strong></td><td>Does not exist. <code>message_sources.sender</code> is untrusted recruiter text.</td><td>Not a v1 nav item. A derived "by sender" facet in Inbox is the honest substitute.</td></tr>
+      <tr><td><strong>Tasks / follow-ups</strong></td><td>Does not exist.</td><td>Not a v1 nav item. The Dashboard's queues are the follow-up list the engine can actually justify.</td></tr>
+    </tbody></table>
+    <p style="margin-top:12px">Four outcomes already name every result an action can have — <code>ACCEPTED</code>, <code>REFUSED</code>, <code>PROVIDER_REJECTED</code>, <code>UNCERTAIN</code> (plus exit-2 misuse). The UI adopts that vocabulary verbatim rather than inventing toasts.</p>
+  </section>
+
+  <!-- 1 -->
+  <section id="s1" style="margin-top:44px">
+    <div class="kicker">1</div><h2>Information architecture</h2>
+    <h3>Primary navigation (five items, all views over one state)</h3>
+    <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 14px">
+      <div class="box blueprint"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><strong>Dashboard</strong><br>Counts by status + work queues derived from <code>_action()</code></div>
+      <div class="box blueprint"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><strong>Inbox</strong><br><code>message_sources</code> → <code>extraction_items</code> → linked opportunities</div>
+      <div class="box blueprint"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><strong>Opportunities</strong><br><code>opportunities()</code> with the CLI's filters</div>
+      <div class="box blueprint"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><strong>Approvals</strong><br>Same rows, filtered to reviews that advance; ordered by urgency</div>
+      <div class="box blueprint"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><strong>Activity</strong><br>status history ∪ audit, newest first</div>
+    </div>
+    <h3>List / detail relationships</h3>
+    <ul>
+      <li><strong>One detail pane, two shapes.</strong> Dashboard, Opportunities, Approvals and Activity all select an <em>opportunity</em> and show <code>OpportunityDetail</code>. Inbox selects a <em>message</em> and shows <code>CommunicationDetail</code>. Activity can select either (a status/audit event → opportunity; a message event → message).</li>
+      <li><strong>Approvals is a filter, not a screen of its own.</strong> Its list is <code>opportunities()</code> rows where the current review is actionable and advances, sorted: reconcile → stale → awaiting decision → ready to draft → created → rejected. Selecting one opens the same <code>OpportunityDetail</code>, scrolled to the packet.</li>
+      <li><strong>Cross-links follow provenance.</strong> Opportunity detail lists the messages that carried it (<code>provenance</code>, newest wins for addressing); message detail links each extracted item to its opportunity (<code>extraction_items.opportunity_id</code>).</li>
+      <li><strong>Which concepts belong together.</strong> Opportunity ⟷ review ⟷ approval ⟷ draft are one object in the UI because the engine binds them as one (<code>_binding()</code> reads them in one statement). Messages stay separate because they are evidence about many opportunities and are never edited.</li>
+    </ul>
+    <h3>Deliberately not in v1 navigation</h3>
+    <p><strong>Contacts</strong> would need new backend scope: a <code>contacts</code> table keyed on a normalised address, a sender→contact link, and a rule for what to do when a recruiter's display name changes — plus a decision about whether it may ever influence addressing (it must not; <code>_addressing()</code> stays the only source). <strong>Tasks</strong> would need a table with its own append-only history and a due-date model. Neither is required to be "substantially easier than the CLI", so both are deferred (§6).</p>
+  </section>
+
+  <!-- 2 -->
+  <section id="s2" style="margin-top:44px">
+    <div class="kicker">2</div><h2>Primary user journeys</h2>
+    <p>Each journey names the engine call it ends in. The UI never has its own path to a write.</p>
+    <table class="table"><thead><tr><th style="width:210px">Journey</th><th>Screen path</th><th>Engine boundary</th></tr></thead><tbody>
+      <tr><td><strong>A new recruiting message arrives</strong></td><td>Dashboard → <em>Ingest</em> (drop an <code>.eml</code>, or "Read Gmail label" if the server has the read token). Result panel lists messages read, reviews created, and items not extracted with their <code>reason</code>. Inbox shows the message; its extracted items link to opportunities that opened at <code>new</code>.</td><td><code>Message.from_bytes</code> / <code>GmailReader.messages()</code> read fully first, then <code>Workflow.intake_message</code> per message. Replay returns existing reviews; a reused id with different content is refused and shown as such.</td></tr>
+      <tr><td><strong>Opportunity is extracted and reviewed</strong></td><td>Opportunities → row → detail: <em>Review evidence</em> card shows <code>packet.reasons</code> verbatim, coverage as the CLI spells it (<code>86%</code>, <code>not scored</code>, <code>pre-coverage</code>, <code>-</code>), eligibility, advances.</td><td><code>Repository.opportunity()</code>. No UI-side scoring, no re-computation.</td></tr>
+      <tr><td><strong>User changes status</strong></td><td>Detail → <em>Change status</em> → dialog shows "against event N", status select (whole vocabulary — no transition is forbidden), reason, actor → ACCEPTED banner with the new event; or REFUSED conflict banner naming what was found. The detail re-reads.</td><td><code>record_status(..., expected_event_id=N)</code>. <code>N</code> is the <code>status_event</code> the page rendered.</td></tr>
+      <tr><td><strong>User approves or rejects a review</strong></td><td>Approvals → row → packet card shows <code>_bound()</code> (review, source, recipient, subject, wording) and destination. <em>Approve</em> dialog repeats the packet, shows the four bound identifiers and asks for destination + actor. Submit carries them back.</td><td><code>decide(..., expected=seen)</code> — a compare-and-decide inside the transaction (§4, the one backend change). <em>Reject</em> needs no digests (it authorises nothing).</td></tr>
+      <tr><td><strong>Controlled Gmail draft is created</strong></td><td>Detail → <em>Create draft in Gmail</em> (only when approval binds and no intent exists). Dialog states one attempt, never sends. Outcome banner is one of ACCEPTED (receipt shown, "open Gmail Drafts yourself"), PROVIDER_REJECTED, UNCERTAIN.</td><td><code>Workflow.draft(review_id)</code> with a provider built for the request's declared destination; the response is the CLI's <code>attempted()</code> record.</td></tr>
+      <tr><td><strong>Uncertain / provider-rejected outcomes are reconciled</strong></td><td>Dashboard "Needs reconciliation" → detail shows <em>uncertain; reconciliation required</em> and a single <em>Reconcile</em> action. PROVIDER_REJECTED shows <em>retry draft</em> instead (intent released, approval untouched). Stale + attempted shows "reconcile, do not retry" with no draft button.</td><td><code>Workflow.reconcile()</code> using the intent's own provider/mailbox; the UI may not offer another destination.</td></tr>
+      <tr><td><strong>User returns later</strong></td><td>Dashboard queues answer "what needs me"; Activity answers "what happened" (every status event, decision, intent, confirmation, rejection); an opportunity's history table answers "how did this get here", including <code>migration</code>-backfilled rows named as such.</td><td>Reads only: <code>opportunities()</code>, <code>opportunity()</code>, and the two append-only tables.</td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 3 -->
+  <section id="s3" style="margin-top:44px">
+    <div class="kicker">3</div><h2>Screen-level specification</h2>
+
+    <h3>Dashboard</h3>
+    <ul>
+      <li><strong>Purpose.</strong> Answer "what needs me" in one glance and route to it.</li>
+      <li><strong>Data.</strong> Count per status (9 cells). Queues: needs reconciliation (<code>draft ∈ {attempting, uncertain}</code>); stale approvals (<code>decision=approved ∧ ¬binds ∧ ¬attempted</code>); awaiting decision (<code>advances ∧ actionable ∧ decision=null ∧ status ∉ TERMINAL</code>); ready to draft (<code>approved ∧ binds ∧ ¬attempted</code>, including after <code>draft_rejected</code>); items not extracted; new and untouched. Session facts: db path, SQLite version and WAL-fix flag from <code>sqlite_report()</code>, which tokens are present (never their values), declared mailbox.</li>
+      <li><strong>Actions.</strong> Ingest (.eml upload; Gmail read if configured). Each queue row navigates.</li>
+      <li><strong>Empty state.</strong> "No opportunities yet — ingest a message." with the ingest control in place.</li>
+      <li><strong>Warnings.</strong> Reconcile and stale queues render in the deep accent step; SQLite below the WAL-fix range shows the diagnostic line <code>version</code> already prints.</li>
+    </ul>
+
+    <h3>Inbox</h3>
+    <ul>
+      <li><strong>Purpose.</strong> See what arrived and what the extractor did with it. Evidence, not mail.</li>
+      <li><strong>Data.</strong> List: sender, subject, namespace, format, extracted / not-extracted counts. Detail: external id, parser version, every <code>extraction_items</code> row with excerpt and reason, link to the opportunity (and whether the linked review is still that opportunity's current review).</li>
+      <li><strong>Filters.</strong> Namespace; "has unextracted items"; free text over sender/subject. A "by sender" grouping is the Contacts substitute.</li>
+      <li><strong>Actions.</strong> None that write. "Open opportunity" only.</li>
+      <li><strong>Empty state.</strong> "Nothing ingested yet."</li>
+      <li><strong>Warnings.</strong> Sender/subject are recruiter-controlled: rendered with <code>textContent</code> and control characters shown as <code>\x1b</code>-style glyphs (the browser twin of <code>views.safe</code>). A banner states that evidence is never edited; corrections are a new message id.</li>
+    </ul>
+
+    <h3>Opportunities</h3>
+    <ul>
+      <li><strong>Purpose.</strong> The CRM list. Same rows and order as <code>careersignal opportunities</code>.</li>
+      <li><strong>Data.</strong> Row: company, title, status tag, coverage as spelled by <code>views.coverage()</code>, queue tag from <code>_action()</code>, time since last status event. Detail: header tags (status, event id, coverage, eligible, advances), URL, review evidence, approval packet, action state ("where it stands as an action": the exact <code>views.approval()</code> / <code>views.attempt()</code> sentences), history table, provenance, audit events.</li>
+      <li><strong>Filters.</strong> Exactly the CLI's: single status, active, eligible/ineligible, min/max coverage, plus client-side text search. Invalid combinations are impossible by construction (segmented controls), so exit-2 errors have no UI equivalent.</li>
+      <li><strong>Actions.</strong> Change status (always). Approve / Reject (when <code>actionable ∧ advances ∧ ¬attempted ∧ status ∉ TERMINAL</code>). Create draft (when approval binds, no intent, status not terminal). Reconcile (when intent is attempting/uncertain). Buttons hidden when the rules would refuse, with the refusal reason shown as text instead — but the server still refuses independently.</li>
+      <li><strong>Empty state.</strong> "No opportunities match." mirroring <code>views.table()</code>.</li>
+      <li><strong>Warnings / refusal states.</strong> Pre-coverage review: "not actionable; re-ingest under a new message id". Structured intake with no message: "no recipient — a draft would be refused". Terminal status: "an ended opportunity authorizes no outward draft". Stale approval: the three remediations verbatim.</li>
+    </ul>
+
+    <h3>Approvals</h3>
+    <ul>
+      <li><strong>Purpose.</strong> The work queue for the only thing that leaves the machine.</li>
+      <li><strong>Data.</strong> Opportunity rows with a queue tag; detail is the same <code>OpportunityDetail</code>, packet first. The approve dialog shows recipient, subject, wording, the content/draft/addressing digests and status event it will carry, destination select, actor.</li>
+      <li><strong>Filters.</strong> Queue (reconcile / stale / awaiting / ready / created / rejected); destination.</li>
+      <li><strong>Actions.</strong> Approve for a destination, reject, create draft, reconcile.</li>
+      <li><strong>Empty state.</strong> "Nothing awaits a decision. Approvals appear when a review advances the threshold (strictly above 70)."</li>
+      <li><strong>Refusal states.</strong> 409 from a stale packet: "This packet changed while you were reading it" with a diff of what moved (recipient / subject / wording / status) and a single "Reload packet" action. "Draft already attempted; decision is locked." shown in place of approve.</li>
+    </ul>
+
+    <h3>Activity</h3>
+    <ul>
+      <li><strong>Purpose.</strong> "What happened while I was away", and an audit trail a person can read.</li>
+      <li><strong>Data.</strong> Union of status events (event id, status, actor, reason) and audit events (<code>review_created</code>, <code>approved</code>, <code>rejected</code>, <code>draft_intent</code>, <code>draft_confirmed</code>, <code>draft_uncertain</code>, <code>draft_refused</code>, <code>draft_rejected</code>), each with the opportunity it concerns. Message arrivals appear only once a timestamp exists (§8).</li>
+      <li><strong>Filters.</strong> Kind; actor; since.</li>
+      <li><strong>Actions.</strong> Navigate only. There is no undo, no edit, no delete — the tables refuse them.</li>
+      <li><strong>Empty state.</strong> "No activity recorded."</li>
+    </ul>
+  </section>
+
+  <!-- 4 -->
+  <section id="s4" style="margin-top:44px">
+    <div class="kicker">4</div><h2>UI-facing application contract</h2>
+    <p>Read models extend <code>_summary()</code>, <code>_action()</code>, <code>_bound()</code> and <code>opportunity()</code>. Nothing is renamed; the UI consumes the same JSON <code>--json</code> already emits, plus four additions marked <em>new</em>.</p>
+    <h3>Read models</h3>
+    <pre>OpportunitySummary  = Repository._summary(row)               # unchanged: id, company, title, location, url,
+                                                              # status, status_changed_at, review, coverage,
+                                                              # matched_skills, stated_skills, advances, status_event,
+                                                              # eligible, scored, actionable
+                    + queue: "reconcile"|"stale"|"decide"|"draft"|"created"|"rejected"|"none"   # new, derived from _action()
+                    + opened_at                                # new: created_at of the opening 'new' status event
+
+OpportunityDetail   = Repository.opportunity()                # unchanged: ...summary, packet, action, bound, history[]
+                    + binding: { content_digest, draft_digest, addressing_digest, status_event_id }   # new: subset of authorization()
+                    + sources: [CommunicationSummary]         # new: provenance join, newest last
+                    + audit: [ {event, created_at} ]           # new: audit(review_id) with timestamps
+
+CommunicationSummary = message_sources row                    # message_id, namespace, external_id, sender, subject,
+                                                              # format, parser_version
+                    + extracted, unextracted (counts from extraction_items)
+
+CommunicationDetail = CommunicationSummary
+                    + items: Repository.extraction_evidence(message_id)   # index, excerpt, reason, opportunity_id, review_id
+                    + current: per item, whether review_id == opportunities.current_review
+
+TimelineEvent       = { at, kind: "status"|"audit", opportunity_id, review_id?, status?, actor?, reason?, event? }
+                      # union of opportunity_status_history and audit, ordered by created_at desc then id desc
+
+ApprovalSummary     = OpportunitySummary where actionable and (advances or decision exists)
+                    + action: Repository._action()            # unchanged
+                    + destination: {provider, provider_namespace}
+
+Config              = { db_path, sqlite: sqlite_report(), providers: ["controlled","gmail"?],
+                        declared_mailbox?, read_token_present: bool, compose_token_present: bool }   # never a token value</pre>
+
+    <h3>Commands (one HTTP request = one engine call = the engine's own transaction)</h3>
+    <pre>POST /api/opportunities/{id}/status
+  { "to": "applied", "actor": "operator", "reason": "Sent CV", "expect_event": 12 }
+  → 200 { outcome: "accepted", status, event, expected_event }
+  → 409 { outcome: "refused", status, event, expected_event, message, next }      # StatusConflict
+
+POST /api/reviews/{id}/decision
+  { "approved": true, "actor": "operator", "provider": "gmail", "mailbox": "operator@example.com",
+    "seen": { "content_digest": "…", "draft_digest": "…", "addressing_digest": "…", "status_event": 12 } }
+  → 200 { outcome: "accepted", message }
+  → 409 { outcome: "refused", message, changed: ["addressing"], current: binding }  # BindingConflict (new)
+  → 200 { outcome: "refused", message }     # decide()'s own refusals: ineligible, terminal, locked, pre-coverage
+  Rejection: { "approved": false, "actor": "…" } — no "seen" required; a rejection binds nothing.
+
+POST /api/reviews/{id}/draft       { "provider": "gmail", "mailbox": "operator@example.com" }
+POST /api/reviews/{id}/reconcile   { "provider": "gmail", "mailbox": "operator@example.com" }
+  → 200 the exact record cli.attempted() builds: { outcome, state, receipt, message, next }
+    HTTP status maps the outcome: accepted 200, refused 200, provider_rejected 200, uncertain 200 —
+    the outcome field is the contract; HTTP codes are reserved for transport, 404 unknown id, 409 stale read, 400 malformed.
+
+POST /api/intake/eml      multipart .eml + namespace          → { reviews, diagnostics }   (as cli ingest)
+POST /api/intake/gmail    { label_ids, query, limit }         → { mailbox, read, messages } (as cli gmail-ingest)
+  Profile (skills, locations, threshold) comes from server launch configuration in v1, exactly as the CLI takes --skill.</pre>
+
+    <h3>The one backend addition the contract needs</h3>
+    <p><code>decide()</code> today binds whatever is current at commit time. That is correct for a terminal that just printed the packet, but a browser page can be minutes old. The fix mirrors <code>record_status</code>'s <code>expected_event_id</code>:</p>
+    <pre>Repository.decide(review_id, *, approved, actor, provider, provider_namespace,
+                  expected=None)   # {"content_digest","draft_digest","addressing_digest","status_event_id"}
+  inside the BEGIN IMMEDIATE transaction, after _binding():
+    if expected is not None and any(binding[k] != expected[k] ...): raise BindingConflict(changed=[...])</pre>
+    <p>Optional, so intake and existing callers are untouched; the web surface always supplies it, as the CLI always supplies <code>--expect</code>. The check is inside the transaction because checking before it would only move the race earlier — the same reasoning the status path already documents. <code>BindingConflict</code> should subclass <code>ValueError</code> so existing refusal handling still refuses.</p>
+    <p>To render the packet the UI also needs the digests, which <code>authorization()</code> already computes; exposing them as <code>OpportunityDetail.binding</code> is a projection change, not a schema change. Approval remains bound to what the operator saw because the server compares what the page carried back against <code>_binding()</code> — the same statement <code>_bound()</code> rendered from.</p>
+  </section>
+
+  <!-- 5 -->
+  <section id="s5" style="margin-top:44px">
+    <div class="kicker">5</div><h2>Security and correctness constraints the UI must preserve</h2>
+    <table class="table"><thead><tr><th style="width:210px">Guarantee</th><th>Where it is enforced today</th><th>What the UI must (not) do</th></tr></thead><tbody>
+      <tr><td>Explicit approval</td><td><code>claim()</code> refuses without <code>approved=1</code>; <code>decide()</code> requires a boolean and an actor</td><td>Approve is a dialog with a typed actor and a chosen destination. No "approve all", no default-checked boxes, no keyboard shortcut that approves.</td></tr>
+      <tr><td>Digest-bound reviewed content</td><td><code>decide()</code> records content/draft/addressing digests; <code>claim()</code> re-verifies all three</td><td>Render only <code>_bound()</code>; carry <code>binding</code> back; treat 409 as "reload and re-read", never auto-retry with fresh digests.</td></tr>
+      <tr><td>Provider / mailbox binding</td><td><code>decisions.provider/provider_namespace</code>; <code>approved_identity()</code>, <code>identity()</code> live check before <code>claim()</code></td><td>Destination is chosen at approval and displayed on the packet. Draft/reconcile send the declared mailbox; the server builds the provider per request, never from a global. The UI never offers a different destination for reconcile.</td></tr>
+      <tr><td>One attempt per review</td><td><code>draft_intents</code> PK; <code>decide()</code> locks once an intent exists</td><td>Disable the button on click; but correctness comes from the server: a second request finds the intent and returns replay (confirmed → receipt) or REFUSED (attempting).</td></tr>
+      <tr><td>REFUSED vs PROVIDER_REJECTED vs UNCERTAIN</td><td><code>cli.attempted()</code>; <code>REJECTED_CREATE_STATUSES = {400,401,403}</code></td><td>Three different banners with the three different "next" lines. Never collapse to "error". UNCERTAIN offers only Reconcile; PROVIDER_REJECTED offers Retry draft; REFUSED offers nothing outward.</td></tr>
+      <tr><td>Reconciliation</td><td><code>Workflow.reconcile()</code> identity-checks then <code>lookup()</code>; unknown stays unknown</td><td>"Still unknown" is a legitimate result, shown as such — not as failure and not as a prompt to draft again.</td></tr>
+      <tr><td>No email sending</td><td><code>DraftProvider</code> has no send; <code>FORBIDDEN_SEGMENTS</code> refuses <code>drafts/send</code>; the CLI test asserts no second route</td><td>The web module calls <code>Workflow.draft/reconcile</code> only. Extend the source-assertion test in <code>test_operator_interface</code> to <code>system/web</code>. No "Send" affordance anywhere, including copy.</td></tr>
+      <tr><td>Provenance</td><td><code>provenance</code>, <code>source_message_id</code> on decisions and intents, newest source addresses</td><td>Show the source message on the packet; show all carrying messages in detail; never let the UI pick a recipient.</td></tr>
+      <tr><td>Append-only / history</td><td>Triggers on <code>audit</code> and <code>opportunity_status_history</code>; <code>StatusConflict</code></td><td>No edit or delete controls exist. Status is always "record against event N". Corrections are new events with a reason.</td></tr>
+      <tr><td>Evidence unchanged</td><td><code>clean()</code> only collapses whitespace; <code>views.safe()</code> escapes at the terminal only</td><td>JSON carries raw values (as <code>--json</code> does). The browser renders with <code>textContent</code>, never <code>innerHTML</code>; control characters become visible glyphs; CSP <code>default-src 'self'</code>; no inline script.</td></tr>
+      <tr><td>Fail closed</td><td>Every refusal is raised by the owning layer</td><td>Buttons hidden by client rules are a convenience. Every refusal string from the server is displayed verbatim; the UI never "fixes" a request to make it pass.</td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 6 -->
+  <section id="s6" style="margin-top:44px">
+    <div class="kicker">6</div><h2>First-release acceptance contract</h2>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:10px">
+      <div class="blueprint" style="padding:14px"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <h4 style="margin-top:0">Required for the first usable UI</h4>
+        <ul style="padding-left:18px">
+          <li>Three-pane shell; Dashboard, Inbox, Opportunities, Approvals, Activity</li>
+          <li>Opportunity list with the CLI's filters and ordering</li>
+          <li>Opportunity detail = <code>opportunity()</code> rendered in full: evidence, packet, action state sentences, history, provenance</li>
+          <li>Change status with <code>expect_event</code>; 409 shown as the CLI's REFUSED</li>
+          <li>Approve/reject with digests carried back; <code>decide(expected=…)</code></li>
+          <li>Create draft (controlled and Gmail); reconcile; the four outcomes as distinct banners</li>
+          <li>Inbox list + message detail with extraction items</li>
+          <li>Activity timeline from the two append-only tables</li>
+          <li>Ingest an <code>.eml</code>; trigger Gmail read when the token is present</li>
+          <li>Loopback bind, per-launch token, CSP, textContent rendering</li>
+          <li>Source test: web module has no route to a provider except <code>Workflow</code></li>
+        </ul>
+      </div>
+      <div class="blueprint" style="padding:14px"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <h4 style="margin-top:0">Desirable next</h4>
+        <ul style="padding-left:18px">
+          <li><code>messages.received_at</code> (or on <code>message_sources</code>) so Inbox and Activity can order by time</li>
+          <li>Persisted profile (skills, locations, threshold) with a Settings pane — new persistence, outside the DB or a small table</li>
+          <li>Inbox "by sender" grouping (derived, no schema)</li>
+          <li>Keyboard navigation j/k, "/" search</li>
+          <li>Stale-packet diff on 409 (which of recipient/subject/wording moved)</li>
+          <li>Follow-up hints: active opportunities with no event in N days (derived, no schema)</li>
+          <li>Bulk status change as N independent compare-and-appends with per-row outcomes</li>
+        </ul>
+      </div>
+      <div class="blueprint" style="padding:14px"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <h4 style="margin-top:0">Explicitly deferred</h4>
+        <ul style="padding-left:18px">
+          <li>Contacts as a first-class model (new table + normalisation rules)</li>
+          <li>Tasks / reminders subsystem</li>
+          <li>Editing draft wording in the UI — the wording is produced by <code>evaluate()</code> and bound by digest; editable drafts need a new review version path first</li>
+          <li>Multi-user, auth, remote access</li>
+          <li>OAuth flow / token storage — stays the operator's job</li>
+          <li>Reading message bodies — not stored, by design</li>
+          <li>Desktop packaging (§7)</li>
+          <li>Any sending, any application submission, any automatic action</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:14px"><strong>Acceptance test, in one sentence:</strong> a job seeker can ingest a week of alerts, see which opportunities advance, decide each, create and reconcile a Gmail draft, and later read back exactly what happened — without typing a 64-character id once, and without any path the CLI does not already have.</p>
+  </section>
+
+  <!-- 7 -->
+  <section id="s7" style="margin-top:44px">
+    <div class="kicker">7</div><h2>Architecture recommendation</h2>
+    <h3>Web stack — three options against the zero-dependency contract</h3>
+    <table class="table"><thead><tr><th style="width:190px">Option</th><th>For</th><th>Against</th></tr></thead><tbody>
+      <tr><td><strong>A. stdlib-only</strong> — <code>http.server.ThreadingHTTPServer</code>, <code>json</code>, static HTML/JS served via <code>importlib.resources</code> (as migrations already are)</td><td>Keeps <code>dependencies = []</code> and <code>verify_wheel.py</code> untouched in all 12 cells. The surface is ~8 GETs and ~6 POSTs for one user on loopback; routing is a dict. Same packaging story as today: <code>careersignal serve</code> in the wheel.</td><td>Hand-written request parsing, multipart for <code>.eml</code> upload (<code>email.parser</code> handles it), no async, no auto-docs. ~400–600 lines of careful code that must be tested like the CLI is.</td></tr>
+      <tr><td><strong>B. optional extra <code>careersignal[web]</code></strong> (e.g. a small ASGI stack)</td><td>Core wheel stays dependency-free; better ergonomics for validation and static files.</td><td>Two install shapes to certify; <code>verify_wheel.py</code> must prove the core still declares nothing while the extra installs cleanly; an import-boundary check must keep <code>system.web</code> from being imported by the CLI path. Adds a supply chain to a project whose whole pitch is "nothing but the standard library". Buys little at this surface size.</td></tr>
+      <tr><td><strong>C. formal exception</strong> — a third-party web stack as a runtime dependency</td><td>Only justified if the UI needs websockets, sessions, or a real templating layer.</td><td>It does not. Breaks a contract that is enforced by CI and stated in the README.</td></tr>
+    </tbody></table>
+    <p><strong>Recommendation: A for v1</strong>, with the web surface under <code>src/system/web/</code> (the build contract already places the operator UI under <code>system</code>). The frontend is static vanilla HTML/JS with the design tokens as CSS variables — no build step, so nothing new enters the wheel gate. Revisit B only if a later feature needs it; the API contract in §4 is stack-neutral so the move would be mechanical.</p>
+    <p><strong>Desktop vs local web.</strong> A desktop shell (pywebview, Electron, Tauri) adds a dependency or a second toolchain and gives one user on one machine nothing the browser does not — no tray, no notifications are in scope. Ship local web: <code>careersignal serve</code> binds <code>127.0.0.1</code> on an ephemeral port, prints (and optionally opens) a URL carrying a per-launch random token. Desktop packaging is deferred.</p>
+
+    <h3>SQLite connection model and writer serialisation</h3>
+    <ul>
+      <li><strong>Connections.</strong> One per request, opened on the handling thread through the existing <code>connection()</code>, closed before the response is written. <code>check_same_thread=True</code> stays. No connection is ever cached, pooled, or shared across threads. Reads run in autocommit and are never blocked by a writer under WAL.</li>
+      <li><strong>Write authority.</strong> One in-process <code>WriteAuthority</code> owned by the server: a lock (or one worker thread with a queue — equivalent here) through which every mutating command passes. Two lanes: <em>local</em> (status, decide, intake) and <em>outward</em> (draft, reconcile). Each lane executes one command at a time; the outward lane holds a Gmail call for up to 30 s and must not block a status change, so the lanes are separate. The database remains the final arbiter: every command still runs the engine's own <code>BEGIN IMMEDIATE</code> with its 20 ms busy timeout and bounded retry, so the lock is for UX — no spurious <code>Write reservation exhausted</code> from a double-click — not for correctness.</li>
+      <li><strong>Request/transaction boundary.</strong> One HTTP request → one command → one <code>Repository</code>/<code>Workflow</code> call. No transaction spans a request, a response, or a network call (<code>Workflow.draft</code> already commits <code>claim()</code> before contacting Gmail). A request never holds a connection while waiting for the lock.</li>
+      <li><strong>CLI concurrency.</strong> The CLI may keep writing while the server runs. This is stated rather than forbidden because every invariant that matters — compare-and-append, digest and destination binding, one intent row — is enforced inside the transaction, not by process ownership; a second process can only lose a race loudly, never silently. The UI handles <code>TimeoutError</code> from the reservation as a REFUSED-style banner ("another writer held the database; nothing was written; try again") and every 409 by re-reading. If a single authority is nevertheless wanted, the cheapest honest mechanism is a <code>var/careersignal.db.serve</code> lockfile the CLI's mutating commands check and refuse with exit 2 unless <code>--allow-concurrent</code> is given — a documented courtesy, not a guarantee, and not needed for v1.</li>
+    </ul>
+
+    <h3>Approval correctness across the browser round trip</h3>
+    <p>Covered by §4: <code>OpportunityDetail.binding</code> out, <code>seen</code> back, compared inside <code>decide()</code>'s transaction; <code>expect_event</code> on status. Draft and reconcile carry only the declared destination because the approval row is the binding — <code>claim()</code> rechecks it. A stale page can therefore never approve or record something it did not display; it can only be refused.</p>
+
+    <h3>Reference projects (patterns, not code, for v1)</h3>
+    <p>The zero-dependency, no-build posture rules out copying components from React/Vue codebases into v1. Use them as interaction references: <strong>shadcn-admin</strong> for the shell (sidebar + list + detail, command search) and, if a build step is ever accepted, as the shell donor; <strong>chatwoot</strong> for the Inbox three-pane rhythm and the "context panel" idea the packet card follows; <strong>jobhunt</strong> for job-seeker pipeline vocabulary and column density; <strong>atomic-crm</strong> for activity/timeline and filter-sidebar patterns — its deals/Kanban model is not adopted. Licences (all believed permissive, MIT for the first, second and fourth) must be verified in the reuse ledger before any file is copied; jobhunt's licence in particular needs confirming.</p>
+
+    <h3>What this decides about the open refactors</h3>
+    <ul>
+      <li><strong><code>Workflow</code> split — do it as part of the web work, because the web surface composes the halves separately.</strong> Intake needs a <code>Profile</code> and a reader; drafting needs a per-request provider and no profile. The UI contract makes that concrete: <code>Intake(repository, profile)</code> with <code>intake()</code>/<code>intake_message()</code>, and <code>OutwardActions(repository, provider)</code> with <code>draft()</code>/<code>reconcile()</code>. The <code>Profile(("placeholder",))</code> disappears; the CLI is adjusted to the same two classes, and <code>test_operator_interface</code>'s no-second-route assertion is re-pointed. Land this before the web module so the web module never learns the placeholder.</li>
+      <li><strong><code>careersignal.*</code> package move — independent; do not make it a prerequisite.</strong> The web module adds one package (<code>system.web</code>) and a static-resource directory. Renaming is mechanical either before or after; doing it first only makes sense if it is already committed for this milestone, because the web module doubles the import surface a later rename must touch. Recommended order: Workflow split → contract additions → web → rename (if still wanted).</li>
+    </ul>
+  </section>
+
+  <!-- 8 -->
+  <section id="s8" style="margin-top:44px">
+    <div class="kicker">8</div><h2>Risks</h2>
+    <table class="table"><thead><tr><th style="width:230px">Risk</th><th>How a GUI introduces it</th><th>Mitigation</th></tr></thead><tbody>
+      <tr><td>Approving a packet you did not read</td><td>A tab left open for an hour; a newer message moved the recipient; the operator clicks Approve</td><td><code>seen</code> digests compared in-transaction (§4). Without this, the UI is <em>less</em> safe than the CLI.</td></tr>
+      <tr><td>Blind status append</td><td>Any status control that does not carry the rendered event id</td><td><code>expect_event</code> is a required field in the request schema; the server rejects its absence with 400.</td></tr>
+      <tr><td>Double-click drafts</td><td>Two POSTs in flight for one review</td><td>Outward lane serialises; second call hits the existing intent and returns replay/REFUSED. Never an automatic retry.</td></tr>
+      <tr><td>Concurrent SQLite writers from threads</td><td><code>ThreadingHTTPServer</code> gives each request a thread; a naive implementation opens many writers or shares one connection</td><td>Per-request connections on the owning thread, <code>check_same_thread</code> kept, the write authority lock, and a test that two simultaneous status posts produce one ACCEPTED and one 409 — not a timeout.</td></tr>
+      <tr><td>Long network call blocks local writes</td><td>Draft/reconcile hold a 30 s Gmail call</td><td>Separate outward lane; no DB connection held across the call (already true in <code>Workflow.draft</code>).</td></tr>
+      <tr><td>Collapsing the four outcomes</td><td>Generic error toasts</td><td>Response schema is the CLI's record; the UI maps <code>outcome</code> to fixed copy. A test asserts the three failure outcomes render three different "next" lines.</td></tr>
+      <tr><td>Evidence rendered as HTML</td><td>A recruiter's subject containing markup or an escape sequence</td><td><code>textContent</code> only; visible control-character glyphs; CSP; a test with the same hostile fixtures <code>test_views</code> uses.</td></tr>
+      <tr><td>A second route outward</td><td>A "helpful" handler that calls <code>claim()</code>/<code>finish()</code> or a provider directly</td><td>Extend the source assertion to <code>system.web</code>; import-boundary check forbids <code>system.web</code> importing <code>communications.gmail_draft</code> except via the provider factory the CLI uses.</td></tr>
+      <tr><td>Local drive-by requests</td><td>Any site can POST to <code>localhost</code></td><td>Loopback bind; per-launch token required as a header on every POST; <code>Origin</code> check; JSON content type only.</td></tr>
+      <tr><td>Tokens in the browser</td><td>Temptation to paste a Gmail token into a settings form</td><td>Tokens remain environment variables of the server process; the API exposes presence only.</td></tr>
+      <tr><td>Missing timestamps</td><td>Inbox wants "arrived 2 days ago"; <code>messages</code>/<code>message_sources</code> have no time column</td><td>v1 orders by <code>provenance.rowid</code> and shows the opening status event's time for opportunities; add <code>received_at</code> as an additive migration (desirable).</td></tr>
+      <tr><td>Scope creep into a CRM</td><td>Contacts, tasks, notes, kanban</td><td>The nav is five items and all derived. New nouns require new tables and a new section of the build contract first.</td></tr>
+    </tbody></table>
+  </section>
+
+  <!-- 9 -->
+  <section id="s9" style="margin-top:44px">
+    <div class="kicker">9</div><h2>Proposed first-release layout and implementation sequence</h2>
+    <h3>Layout</h3>
+    <div class="blueprint" style="display:grid;grid-template-columns:150px 250px minmax(0,1fr);height:300px;margin:10px 0 6px">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div style="border-right:1px solid var(--color-divider);padding:10px;font-size:12px;display:flex;flex-direction:column;gap:6px"><strong>Navigation</strong><span>Dashboard</span><span style="color:var(--color-accent-700)">Inbox · n</span><span>Opportunities</span><span>Approvals · n</span><span>Activity</span><span style="margin-top:auto;color:var(--color-neutral-600)">Session: db, tokens present, mailbox</span></div>
+      <div style="border-right:1px solid var(--color-divider);padding:10px;font-size:12px;display:flex;flex-direction:column;gap:6px"><strong>List / work queue</strong><span class="text-muted">title + filters</span><span class="box">Company · title · status · queue tag</span><span class="box" style="border-color:var(--color-accent)">selected row</span><span class="box">…</span></div>
+      <div style="padding:10px;font-size:12px;display:flex;flex-direction:column;gap:6px"><strong>Selected-item detail</strong><span class="text-muted">header: company — title · status · event · coverage · eligible · advances · URL</span><span class="text-muted">action bar: Change status · Approve/Reject · Create draft · Reconcile</span><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px"><span class="box">Review evidence (reasons verbatim)</span><span class="box">Approval packet (bound material + destination)</span></div><span class="box">Where it stands as an action — approval / draft sentences</span><div style="display:grid;grid-template-columns:3fr 2fr;gap:6px"><span class="box">Status history (append-only)</span><span class="box">Provenance · audit</span></div></div>
+    </div>
+    <p class="text-muted" style="font-size:13px">Outcome banners pin to the top of the detail pane: ACCEPTED (accent-700), REFUSED / PROVIDER_REJECTED (neutral-800), UNCERTAIN (accent-900) — each with the CLI's message and "next" line.</p>
+
+    <h3>Detail-pane rules settled in review</h3>
+    <ul>
+      <li><strong>Reading order.</strong> What is this → where is it in my search → what needs my attention → why CareerSignal concluded this → what exactly I would authorize → what happened. Header, attention panel, primary action row, evidence + packet, action-state sentences, then a "History &amp; evidence" divider before status history and provenance.</li>
+      <li><strong>Attention panel</strong> (top of the pane, first-class): <em>UNCERTAIN / attempting</em> — steel field, "CareerSignal cannot prove whether Gmail created the draft. Do not retry until reconciled." with the only outward action, Reconcile. <em>PROVIDER REJECTED</em> — "Gmail rejected the request; nothing was created", offers Retry draft. <em>REFUSED</em> — "CareerSignal did not contact Gmail", offers nothing outward. <em>APPROVAL STALE</em> — "Your approval no longer matches the current material", offers Review changes (a before/now table of recipient, subject, wording, status) and Re-approve. Stale + attempted shows the outcome panel instead, because <code>decide()</code> is locked.</li>
+      <li><strong>Three decision states, never "Approve again".</strong> Undecided → Approve / Reject. Approved and current → "✓ Approved by … for gmail:…" with Withdraw approval (only while no intent exists; it is <code>decide(approved=False)</code>). Stale → handled by the attention panel. Rejected → tag + Approve instead.</li>
+      <li><strong>Create draft is always visible once a review advances</strong>, disabled with the reason beneath it ("Requires an approval for a destination", "Requires a current approval — re-approve above", "Opportunity has ended") rather than hidden or letting the click earn a refusal. The server refuses regardless.</li>
+      <li><strong>Inbox detail order:</strong> sender, subject, tags → Extracted opportunities (cards with status, coverage, queue, and whether this message is still the current addressing source) → Stored evidence (per-item excerpts, reasons) → Provenance record (ids, namespace, raw sender/subject, format/parser, arrival order, which drafts it addresses). "Original message" is not a section because the body is not stored.</li>
+      <li><strong>Demo mode.</strong> The mock's scenario controls (status conflict, draft outcome, reconcile outcome, full ids) are not product UI. Keep them as a <code>--demo</code> flag on <code>careersignal serve</code> that swaps in the controlled provider and scripted outcomes, so acceptance tests can drive REFUSED / PROVIDER_REJECTED / UNCERTAIN / stale-approval / stale-status without a mailbox.</li>
+    </ul>
+
+    <h3>Sequence (small PRs, each keeping every gate green)</h3>
+    <ol>
+      <li><strong>Split <code>Workflow</code></strong> into <code>Intake</code> and <code>OutwardActions</code>; remove the profile placeholder; move the CLI onto both; re-point the no-second-route test.</li>
+      <li><strong>Contract additions in <code>data</code>:</strong> <code>decide(expected=…)</code> + <code>BindingConflict</code>; <code>opportunity()</code> gains <code>binding</code>, <code>sources</code>, timestamped <code>audit</code>; new read functions <code>communications()</code>, <code>communication(id)</code>, <code>timeline(limit, since)</code>; <code>queue</code> derivation as a pure function next to <code>views</code>. Tests mirror <code>test_compare_and_append</code>.</li>
+      <li><strong><code>system/web</code>, read side:</strong> stdlib server, loopback + token, static resources, GET routes, <code>careersignal serve</code>. Frontend shell + Dashboard, Opportunities, Inbox, Activity read-only.</li>
+      <li><strong>Commands:</strong> status, decision, draft, reconcile through the write authority with two lanes; outcome records identical to the CLI's; concurrency test (two writers → one 409).</li>
+      <li><strong>Intake from the UI:</strong> <code>.eml</code> upload; Gmail read when the token is present (read all, then ingest — no reservation across network).</li>
+      <li><strong>Safety tests:</strong> hostile-fixture rendering, no-second-route source assertion for <code>system.web</code>, import boundary, wheel verifier proves the static assets ship and dependencies stay empty.</li>
+      <li><strong>Desirable follow-ups:</strong> <code>received_at</code> migration; persisted profile + Settings; by-sender facet; 409 packet diff; optional <code>careersignal.*</code> rename.</li>
+    </ol>
+    <p>Nothing in this sequence adds a status, a decision state, an intent state, or a route to a mailbox. The graphical interface is the CLI's outcomes, projections and refusals, made visible and clickable.</p>
+  </section>
+</div>
+</x-dc>
+</body>
+</html>
