@@ -34,6 +34,11 @@ The pipeline commands -- init, verify, demo, ingest, gmail-ingest -- are run by 
 still emit a JSON document. They report no outcome because they have no operator decision
 in them.
 
+`serve` is neither. It binds a loopback socket and blocks, printing one address and then
+answering reads until it is stopped. It records nothing and decides nothing, so it has no
+outcome to report either; every write an operator can make is still made here, on the
+command line, where it is already bounded.
+
 This module composes and prints. It holds no rule of its own: every refusal below comes
 from the layer that owns it, and nothing here decides whether an action is authorized.
 """
@@ -58,6 +63,7 @@ from recruiting.ports import DraftRefused, ProviderRejected
 from recruiting.status import StatusConflict
 from system.demo import golden_workflow
 from system.views import detail, outcome, table
+from system.web import DEFAULT_PORT, serve
 from system.workflow import Intake, OutwardActions
 
 ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
@@ -249,6 +255,7 @@ def main():
             "reject",
             "draft",
             "reconcile",
+            "serve",
         ),
     )
     parser.add_argument(
@@ -279,6 +286,12 @@ def main():
     parser.add_argument("--label", action="append", help="Gmail label id; repeat for multiple")
     parser.add_argument(
         "--limit", type=int, default=25, help="Maximum Gmail messages to read in one run"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port for the local read surface; it always binds 127.0.0.1 and nothing else",
     )
     parser.add_argument("--status", help="Filter opportunities by a single status")
     parser.add_argument("--to", help="Status to record, used only by the status command")
@@ -471,6 +484,13 @@ def main():
                 for message in messages
             ],
         }
+    elif args.command == "serve":
+        # Read-only, and loopback-only by construction: the surface offers no way to bind
+        # another interface and answers nothing but GET and HEAD. It blocks here until the
+        # operator stops it, so it returns rather than falling through to the JSON report
+        # the pipeline commands print.
+        serve(Repository(path), port=args.port)
+        return
     elif args.command == "init":
         result = {"applied": migrate(path)}
     elif args.command == "verify":

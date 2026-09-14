@@ -1,0 +1,55 @@
+/* Enough to read the bootstrap's answer, and no more. The designed screens arrive with
+   the views that need them; styling a page that exists to prove a boundary would only
+   have to be thrown away. */
+
+:root {
+  color-scheme: light dark;
+  --ink: #16191d;
+  --paper: #fbfbfa;
+  --quiet: #5c6570;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1.5rem;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 44rem;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+  margin: 0 0 0.5rem;
+}
+
+#state {
+  color: var(--quiet);
+  margin: 0 0 1.5rem;
+}
+
+#state[data-state="refused"] {
+  color: #8a1f1f;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+}
+
+dt {
+  color: var(--quiet);
+}
+
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
