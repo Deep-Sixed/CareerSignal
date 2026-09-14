@@ -305,7 +305,7 @@ class GmailReader:
         profile read, not N. Returns the declared namespace, which this call has now
         proven the credential actually matches, so a caller that wants the check to run
         before doing anything else of its own -- gmail-ingest, before it constructs
-        Repository/Workflow -- can invoke this directly without paying for a second
+        Repository/Intake -- can invoke this directly without paying for a second
         profile read once this reader's own entry points run.
         """
         if not self._identity_verified:

@@ -20,7 +20,7 @@ from data import store
 from data.repository import Repository
 from recruiting.models import Profile, fingerprint
 from system import cli
-from system.workflow import Workflow
+from system.workflow import Intake
 
 ESC = chr(0x1B)
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -49,7 +49,7 @@ TABLES = (
 
 
 def ingest(path, *, external_id="m1", sender=SENDER, subject=SUBJECT):
-    workflow = Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    workflow = Intake(Repository(path), Profile(("python", "sql")))
     review = workflow.intake_message(
         Message(
             namespace="gmail:operator@example.com",

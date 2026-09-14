@@ -1,3 +1,4 @@
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -8,7 +9,7 @@ from data.repository import Repository
 from data.store import connection
 from recruiting.models import Profile
 from system.demo import golden_workflow
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 
 def body(**changes):
@@ -25,7 +26,26 @@ def body(**changes):
 
 @pytest.fixture
 def flow(tmp_path):
-    return Workflow(Repository(tmp_path / "db"), ControlledDrafts(), Profile(("python", "sql")))
+    return Intake(Repository(tmp_path / "db"), Profile(("python", "sql")))
+
+
+@pytest.fixture
+def actions(flow):
+    return OutwardActions(flow.repository, ControlledDrafts())
+
+
+def test_each_half_is_constructed_from_only_what_it_uses(flow, actions):
+    """The draft path used to carry Profile(("placeholder",)) because one object held both.
+
+    Nothing about drafting reads an evaluation profile: what a draft says was decided and
+    approved long before it runs. While a single class held the profile and the provider
+    together, every caller had to supply both, so the command that only drafts invented a
+    profile to get past the constructor. These signatures are what stops that returning.
+    """
+    assert list(inspect.signature(Intake).parameters) == ["repository", "profile"]
+    assert list(inspect.signature(OutwardActions).parameters) == ["repository", "provider"]
+    assert not hasattr(flow, "provider"), "intake holds nothing it could contact"
+    assert not hasattr(actions, "profile"), "the outward half scores nothing"
 
 
 def test_golden_workflow_and_restart(tmp_path):
@@ -53,63 +73,63 @@ def test_message_and_opportunity_dedupe_and_provenance(flow):
         flow.intake("one", body(title="Changed"))
 
 
-def test_approval_rejection_and_ineligible_boundaries(flow):
+def test_approval_rejection_and_ineligible_boundaries(actions, flow):
     review = flow.intake("one", body())[0]
     with pytest.raises(ValueError, match="approval"):
-        flow.draft(review)
+        actions.draft(review)
     flow.repository.decide(review, approved=False, actor="operator")
     with pytest.raises(ValueError):
-        flow.draft(review)
+        actions.draft(review)
     below = dict(skills=["python", "java", "kubernetes", "aws", "go"])  # covers 1 of 5
     for i, fields in enumerate((dict(location="onsite"), below)):
         rejected = flow.intake(f"reject{i}", body(**fields))[0]
         with pytest.raises(ValueError):
             flow.repository.decide(rejected, approved=True, actor="operator")
-    assert flow.provider.calls == 0
+    assert actions.provider.calls == 0
 
 
-def test_changed_content_invalidates_old_approval_even_when_reverted(flow):
+def test_changed_content_invalidates_old_approval_even_when_reverted(actions, flow):
     old = flow.intake("one", body())[0]
     flow.repository.decide(old, approved=True, actor="operator")
     flow.intake("two", body(title="Changed"))
     with pytest.raises(ValueError, match="stale"):
-        flow.draft(old)
+        actions.draft(old)
     reverted = flow.intake("three", body())[0]
     assert reverted != old
     with pytest.raises(ValueError, match="approval"):
-        flow.draft(reverted)
+        actions.draft(reverted)
 
 
-def test_two_workers_only_one_provider_call(flow):
+def test_two_workers_only_one_provider_call(actions, flow):
     review = flow.intake("one", body())[0]
     flow.repository.decide(review, approved=True, actor="operator")
     with ThreadPoolExecutor() as pool:
-        list(pool.map(lambda _: flow.draft(review), range(2)))
-    assert flow.provider.calls == 1
+        list(pool.map(lambda _: actions.draft(review), range(2)))
+    assert actions.provider.calls == 1
     assert flow.repository.intent(review)[0] == "confirmed"
 
 
 @pytest.mark.parametrize("after_success", [False, True])
-def test_uncertain_external_result_never_blindly_retries(flow, after_success):
+def test_uncertain_external_result_never_blindly_retries(actions, flow, after_success):
     review = flow.intake("one", body())[0]
     flow.repository.decide(review, approved=True, actor="operator")
-    original = flow.provider.create
+    original = actions.provider.create
 
     def fail(key, text, **addressing):
         if after_success:
             original(key, text, **addressing)
         raise OSError("controlled interruption")
 
-    flow.provider.create = fail
+    actions.provider.create = fail
     with pytest.raises(OSError):
-        flow.draft(review)
+        actions.draft(review)
     assert flow.repository.intent(review)[0] == "uncertain"
-    assert flow.draft(review) is None
-    assert bool(flow.reconcile(review)) == after_success
-    assert flow.provider.calls == int(after_success)
+    assert actions.draft(review) is None
+    assert bool(actions.reconcile(review)) == after_success
+    assert actions.provider.calls == int(after_success)
 
 
-def test_failure_to_persist_receipt_can_be_reconciled(flow, monkeypatch):
+def test_failure_to_persist_receipt_can_be_reconciled(actions, flow, monkeypatch):
     review = flow.intake("one", body())[0]
     flow.repository.decide(review, approved=True, actor="operator")
     original = flow.repository.finish
@@ -119,12 +139,12 @@ def test_failure_to_persist_receipt_can_be_reconciled(flow, monkeypatch):
 
     monkeypatch.setattr(flow.repository, "finish", fail)
     with pytest.raises(OSError):
-        flow.draft(review)
+        actions.draft(review)
     monkeypatch.setattr(flow.repository, "finish", original)
     assert flow.repository.intent(review)[0] == "attempting"
-    assert flow.draft(review) is None
-    assert flow.reconcile(review)
-    assert flow.provider.calls == 1
+    assert actions.draft(review) is None
+    assert actions.reconcile(review)
+    assert actions.provider.calls == 1
 
 
 def mixed_body():
@@ -177,9 +197,9 @@ def test_a_malformed_envelope_still_fails_the_whole_message(flow):
         assert conn.execute("SELECT count(*) FROM extraction_items").fetchone()[0] == 0
 
 
-def test_structured_intake_creates_no_drafts(flow):
+def test_structured_intake_creates_no_drafts(actions, flow):
     reviews = flow.intake("mixed", mixed_body())
     for review in reviews:
         with pytest.raises(ValueError, match="approval"):
-            flow.draft(review)
-    assert flow.provider.calls == 0
+            actions.draft(review)
+    assert actions.provider.calls == 0

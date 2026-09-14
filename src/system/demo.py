@@ -6,13 +6,14 @@ from communications.controlled import ControlledDrafts
 from data.repository import Repository
 from data.store import verify_contract
 from recruiting.models import Profile
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 
 def golden_workflow(path):
     repository = Repository(path)
     provider = ControlledDrafts()
-    workflow = Workflow(repository, provider, Profile(("python", "sql")))
+    intake = Intake(repository, Profile(("python", "sql")))
+    actions = OutwardActions(repository, provider)
     body = json.dumps(
         {
             "jobs": [
@@ -26,19 +27,19 @@ def golden_workflow(path):
             ]
         }
     )
-    review_id = workflow.intake("synthetic-message-1", body)[0]
+    review_id = intake.intake("synthetic-message-1", body)[0]
     if repository.intent(review_id) is None:
         try:
-            workflow.draft(review_id)
+            actions.draft(review_id)
         except ValueError:
             pass
         else:
             raise AssertionError("Unapproved draft was allowed")
         repository.decide(review_id, approved=True, actor="synthetic-operator")
-    receipt = workflow.draft(review_id)
-    assert receipt and workflow.draft(review_id) == receipt
-    assert workflow.intake("synthetic-message-1", body) == [review_id]
-    assert workflow.intake("synthetic-message-2", body) == [review_id]
+    receipt = actions.draft(review_id)
+    assert receipt and actions.draft(review_id) == receipt
+    assert intake.intake("synthetic-message-1", body) == [review_id]
+    assert intake.intake("synthetic-message-2", body) == [review_id]
     assert provider.calls <= 1
     verify_contract(path)
     events = repository.audit(review_id)

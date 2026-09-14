@@ -10,7 +10,7 @@ from data import store
 from data.repository import Repository
 from recruiting.models import Profile
 from system import cli
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 TABLES = (
     "messages",
@@ -48,10 +48,9 @@ BODY = json.dumps(
 
 def prepared(path):
     repository = Repository(path)
-    flow = Workflow(repository, ControlledDrafts(), Profile(("python", "sql")))
-    reviews = flow.intake("message-1", BODY)
+    reviews = Intake(repository, Profile(("python", "sql"))).intake("message-1", BODY)
     repository.decide(reviews[0], approved=True, actor="operator")
-    flow.draft(reviews[0])
+    OutwardActions(repository, ControlledDrafts()).draft(reviews[0])
     for row, status in zip(repository.opportunities(), ("reviewing", "rejected")):
         repository.record_status(row["id"], status, actor="operator", reason="triage")
     return repository
@@ -169,8 +168,7 @@ HOSTILE_BODY = json.dumps(
 
 def hostile(path):
     repository = Repository(path)
-    flow = Workflow(repository, ControlledDrafts(), Profile(("python", "sql")))
-    flow.intake("hostile-message", HOSTILE_BODY)
+    Intake(repository, Profile(("python", "sql"))).intake("hostile-message", HOSTILE_BODY)
     identifier = repository.opportunities()[0]["id"]
     repository.record_status(
         identifier,

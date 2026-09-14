@@ -45,7 +45,7 @@ Because the token is only ever used as a header value, a token that could not le
 Gmail token belongs to gmail:<verified>, not the declared mailbox (gmail:<declared>); provide a token for that mailbox or correct the declared mailbox
 ```
 
-Verification runs once per `GmailReader` instance and is cached, so a batch of many messages costs one profile read, not one per message. `gmail-ingest` also calls `reader.verify_identity()` explicitly, before `Repository` or `Workflow` are even constructed — an early invocation of the same adapter-owned guarantee, not a separate check the command has to get right on its own, and it costs no extra request: the reader's own entry points see the check already cached.
+Verification runs once per `GmailReader` instance and is cached, so a batch of many messages costs one profile read, not one per message. `gmail-ingest` also calls `reader.verify_identity()` explicitly, before `Repository` or `Intake` are even constructed — an early invocation of the same adapter-owned guarantee, not a separate check the command has to get right on its own, and it costs no extra request: the reader's own entry points see the check already cached.
 
 Nothing is rewritten to make the two agree: a mismatch is a configuration error, not something CareerSignal silently repairs. Correct whichever one is wrong — the token or the declared mailbox — and try again. Only once the two match does `gmail:<mailbox>` become the namespace under which any message from that reader is stored, so provenance rests on what the token proved, not merely on what was declared.
 
@@ -61,7 +61,7 @@ The namespace is `gmail:<mailbox>`, with the mailbox case-folded, because Gmail 
 
 Reading the same mailbox twice produces the same message keys, so intake returns the existing review references and writes no new message, opportunity, review, or draft intent. A provider identifier that reappears carrying different content is refused with the existing immutable-message error rather than overwriting evidence.
 
-Reading a mailbox never creates a draft intent, never calls the draft provider, and never approves anything. The human approval boundary is unchanged: a review still requires an explicit `Repository.decide` before `Workflow.draft` will do anything.
+Reading a mailbox never creates a draft intent, never calls the draft provider, and never approves anything. The human approval boundary is unchanged: a review still requires an explicit `Repository.decide` before `OutwardActions.draft` will do anything.
 
 No write transaction is held open across a mailbox read. The whole batch is read first, then ingested.
 
@@ -78,7 +78,7 @@ uv run careersignal gmail-ingest \
   --db /path/to/private.db
 ```
 
-The command verifies the token's mailbox identity before reading anything — see [Mailbox identity](#mailbox-identity) — then prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox)).messages(...)` followed by `Workflow.intake_message` per message; `.messages()` verifies identity on its own, so no separate check is required to use it safely.
+The command verifies the token's mailbox identity before reading anything — see [Mailbox identity](#mailbox-identity) — then prints the mailbox namespace, how many messages were read, and each message's provider identifier, message key and review IDs. It does not print message content. The API equivalent is `GmailReader(GmailCredentials(token, mailbox)).messages(...)` followed by `Intake.intake_message` per message; `.messages()` verifies identity on its own, so no separate check is required to use it safely.
 
 ## Limitations
 
