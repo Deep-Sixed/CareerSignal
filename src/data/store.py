@@ -18,12 +18,16 @@ WAL_RESET_FIXED_344 = ((3, 44, 6), (3, 45, 0))
 WAL_RESET_FIXED_350 = ((3, 50, 7), (3, 51, 0))
 WAL_RESET_FIXED_MAIN = (3, 51, 3)
 
-# Writers keep a short reservation so transaction() owns the retry policy. Journal-mode
-# negotiation is a startup step and needs its own budget: changing it takes an exclusive
-# lock that concurrent first starts genuinely contend for.
+# Writers keep a short reservation so transaction() owns the retry policy. Startup is the
+# exception, and for two reasons: negotiating the journal mode takes an exclusive lock that
+# concurrent first starts genuinely contend for, and applying migrations holds the write
+# reservation for as long as the whole migration set takes to apply. Both get the same
+# bounded startup budget. A startup that finds nothing to migrate is an ordinary write and
+# keeps the ordinary budget.
 BUSY_TIMEOUT_MS = 20
 STARTUP_BUSY_TIMEOUT_MS = 250
 STARTUP_TIMEOUT = 5.0
+WRITE_TIMEOUT = 1.0
 
 
 def database_path(path=None) -> Path:
@@ -126,7 +130,7 @@ def connection(path=None):
 
 
 @contextmanager
-def transaction(conn, timeout=1.0):
+def transaction(conn, timeout=WRITE_TIMEOUT):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("Timeout must be positive and finite")
     if conn.in_transaction:
@@ -157,29 +161,47 @@ def migration_files():
     )
 
 
+def _migrations_pending(conn, files) -> bool:
+    """Whether this database still has migration work, read outside any reservation.
+
+    A WAL reader sees the snapshot from before the first initializer's transaction, so a
+    process racing that initializer still reads "pending" and waits on the startup budget.
+    Once the work is committed every caller reads "none" and reserves like any other write.
+    A read that fails at all counts as pending: the same failure resurfaces inside the
+    transaction, where it belongs, rather than deciding a budget here.
+    """
+    try:
+        existing = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
+    except sqlite3.Error:
+        return True
+    return any(resource.name not in existing for resource in files)
+
+
 def migrate(path=None):
     applied = []
-    with connection(path) as conn, transaction(conn):
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations "
-            "(version TEXT PRIMARY KEY, digest TEXT NOT NULL)"
-        )
-        existing = dict(conn.execute("SELECT version,digest FROM schema_migrations").fetchall())
+    with connection(path) as conn:
         files = migration_files()
-        if set(existing) - {p.name for p in files}:
-            raise RuntimeError("Database has unknown migrations")
-        for resource in files:
-            sql = resource.read_text(encoding="utf-8")
-            digest = sha256(sql.encode()).hexdigest()
-            if resource.name in existing:
-                if existing[resource.name] != digest:
-                    raise RuntimeError("Applied migration was modified")
-                continue
-            for statement in sql.split("-- statement"):
-                if statement.strip():
-                    conn.execute(statement)
-            conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (resource.name, digest))
-            applied.append(resource.name)
+        budget = STARTUP_TIMEOUT if _migrations_pending(conn, files) else WRITE_TIMEOUT
+        with transaction(conn, budget):
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations "
+                "(version TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+            )
+            existing = dict(conn.execute("SELECT version,digest FROM schema_migrations").fetchall())
+            if set(existing) - {p.name for p in files}:
+                raise RuntimeError("Database has unknown migrations")
+            for resource in files:
+                sql = resource.read_text(encoding="utf-8")
+                digest = sha256(sql.encode()).hexdigest()
+                if resource.name in existing:
+                    if existing[resource.name] != digest:
+                        raise RuntimeError("Applied migration was modified")
+                    continue
+                for statement in sql.split("-- statement"):
+                    if statement.strip():
+                        conn.execute(statement)
+                conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (resource.name, digest))
+                applied.append(resource.name)
     return applied
 
 

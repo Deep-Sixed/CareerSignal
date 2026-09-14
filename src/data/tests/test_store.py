@@ -111,6 +111,97 @@ def test_concurrent_initializers(tmp_path):
     assert sorted(len(r) for r in results) == [0, len(store.migration_files())]
 
 
+def _held_reservation(path, held, release):
+    """Hold a real write reservation on the thread that later releases it."""
+    holder = sqlite3.connect(str(path), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    held.set()
+    assert release.wait(20)
+    holder.rollback()
+    holder.close()
+
+
+def _in_wal(path):
+    """Settle the journal mode so the reservation is the only thing left to contend for."""
+    with store.connection(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+def test_a_first_migration_waits_past_the_ordinary_write_budget(tmp_path):
+    """The winner holds the reservation for as long as applying every migration takes."""
+    path = tmp_path / "fresh.db"
+    _in_wal(path)
+    held, release = Event(), Event()
+    hold = store.WRITE_TIMEOUT + 0.3
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(_held_reservation, path, held, release)
+        assert held.wait(5)
+        started = time.monotonic()
+        pool.submit(lambda: (time.sleep(hold), release.set()))
+        assert store.migrate(path) == [p.name for p in store.migration_files()]
+        waited = time.monotonic() - started
+        holder.result(timeout=20)
+    assert hold <= waited < store.STARTUP_TIMEOUT
+    store.verify_contract(path)
+    assert store.migrate(path) == []
+
+
+def test_the_startup_budget_is_reserved_only_for_real_migration_work(tmp_path, monkeypatch):
+    """Pending work buys the startup budget; an already-migrated database does not."""
+    reserved = []
+    opened = store.transaction
+
+    def record(conn, timeout):
+        reserved.append(timeout)
+        return opened(conn, timeout)
+
+    monkeypatch.setattr(store, "transaction", record)
+    path = tmp_path / "budget.db"
+    assert store.migrate(path) == [p.name for p in store.migration_files()]
+    assert store.migrate(path) == []
+    assert reserved == [store.STARTUP_TIMEOUT, store.WRITE_TIMEOUT]
+
+
+def test_a_contended_migration_gives_up_within_its_budget(tmp_path, monkeypatch):
+    """A startup budget is still a budget: contention that never clears must not hang."""
+    path = tmp_path / "blocked.db"
+    _in_wal(path)
+    monkeypatch.setattr(store, "STARTUP_TIMEOUT", 0.3)
+    held, release = Event(), Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(_held_reservation, path, held, release)
+        assert held.wait(5)
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="Write reservation exhausted"):
+            store.migrate(path)
+        assert 0.3 <= time.monotonic() - started < 3
+        release.set()
+        holder.result(timeout=20)
+    with store.connection(path) as conn:
+        assert not conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='schema_migrations'"
+        ).fetchall()
+
+
+def test_ordinary_writes_do_not_inherit_the_startup_budget(tmp_path):
+    """Startup waits longer so first starts survive; everything after it must not."""
+    path = tmp_path / "ordinary.db"
+    store.migrate(path)
+    held, release = Event(), Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(_held_reservation, path, held, release)
+        assert held.wait(5)
+        with store.connection(path) as conn:
+            started = time.monotonic()
+            with pytest.raises(TimeoutError, match="Write reservation exhausted"):
+                with store.transaction(conn):
+                    pass
+            waited = time.monotonic() - started
+        release.set()
+        holder.result(timeout=20)
+    assert store.WRITE_TIMEOUT <= waited < store.STARTUP_TIMEOUT
+
+
 def _locked_database(path, locked, release):
     """Own the SQLite connection on the thread that later releases its lock."""
     holder = sqlite3.connect(str(path), isolation_level=None)
