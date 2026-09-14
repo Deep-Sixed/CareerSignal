@@ -86,6 +86,8 @@ All under `/api/v1`, all `GET`, all exactly the repository projection they name.
 
 A parameter a route does not know is a `400`, not a silent pass: a misspelled filter that returned everything would tell the operator they are looking at a narrowed list when they are looking at all of it.
 
+A blank value is a value. `?status=` and `?misspelled=` are both refused rather than read as "no filter" — the query is parsed with `keep_blank_values` for exactly that reason, because a parameter dropped at the parsing boundary is never validated and comes back as the whole list wearing the shape of a narrowed one.
+
 An id that names nothing is `404`. A record that exists but has no evidence is an honest empty list — absence of a record and absence of evidence must not arrive looking the same.
 
 ## Static assets

@@ -560,6 +560,14 @@ def test_a_route_this_surface_does_not_have_is_not_found(client, path):
         "/api/v1/opportunities?max_coverage=101",
         "/api/v1/opportunities?limit=5",
         "/api/v1/opportunities?Status=new",
+        "/api/v1/opportunities?status=",
+        "/api/v1/opportunities?eligible=",
+        "/api/v1/opportunities?min_coverage=",
+        "/api/v1/opportunities?misspelled=",
+        "/api/v1/opportunities?status=new&status=new",
+        "/api/v1/opportunities?status=&status=",
+        "/api/v1/timeline?limit=",
+        "/api/v1/timeline?since=",
         "/api/v1/timeline?limit=0",
         "/api/v1/timeline?limit=-1",
         "/api/v1/timeline?status=new",
@@ -572,6 +580,25 @@ def test_a_query_this_route_cannot_mean_is_a_bad_request(client, path):
     status, body = client.json(path)
     assert status == 400, path
     assert set(body) == {"error"} and body["error"]
+
+
+def test_a_blank_value_is_a_value_and_not_a_missing_parameter(client, repository):
+    """The default `parse_qs` drops `?status=`, and a dropped filter is the wrong answer.
+
+    A filter that disappears at the parsing boundary is never validated and never refused:
+    the request narrows nothing and comes back with everything, which reads on screen as a
+    narrowed list that happens to be long. That is worse than an error, and worse than the
+    blank being rejected -- so blanks are kept and then refused by the rules that already
+    exist, one layer down.
+    """
+    everything = client.json("/api/v1/opportunities")
+    assert everything[0] == 200 and everything[1], "the fixture has nothing to over-report"
+
+    for query in ("status=", "eligible=", "min_coverage=", "misspelled="):
+        status, body = client.json("/api/v1/opportunities?" + query)
+        assert status == 400, (query, body)
+        assert body != everything[1], "a narrowed request was answered with the whole list"
+    assert client.json("/api/v1/timeline?limit=")[0] == 400
 
 
 def test_a_superseded_review_keeps_the_repositorys_own_refusal(client, repository):

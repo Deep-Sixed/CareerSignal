@@ -222,7 +222,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.UNAUTHORIZED, "A valid launch token is required")
         segments = [unquote(part) for part in parsed.path[len(API_ROOT) :].split("/") if part]
         try:
-            payload = self._projection(segments, parse_qs(parsed.query))
+            # keep_blank_values, because the default drops `?status=` entirely and this
+            # route's whole query contract is fail-closed: a parameter that disappears
+            # before it is looked at is a narrowed request answered with an unnarrowed
+            # list, which is the one wrong answer that looks right.
+            payload = self._projection(segments, parse_qs(parsed.query, keep_blank_values=True))
         except KeyError:
             return self._error(HTTPStatus.NOT_FOUND, "No record with that id")
         except ValueError as exc:
