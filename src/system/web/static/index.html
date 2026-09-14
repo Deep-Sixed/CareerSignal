@@ -5,19 +5,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <title>CareerSignal</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="careersignal.css" />
-    <script src="bootstrap.js" defer></script>
+    <script type="module" src="app.js"></script>
   </head>
   <body>
-    <main>
-      <h1>CareerSignal</h1>
-      <!--
-        Deliberately empty. Every element below is filled in from the API with textContent,
-        so nothing a recruiter wrote is ever parsed as markup. The screens themselves are a
-        later change; this page exists to prove the boundary works end to end.
-      -->
-      <p id="state">Connecting to the local surface&hellip;</p>
-      <dl id="facts"></dl>
-    </main>
+    <!--
+      Every element below is empty. Nothing stored is written into this file, and nothing
+      the API returns is ever parsed as markup: the screens build their own nodes and set
+      text with textContent. A recruiter's subject line reaching this origin is evidence,
+      not source.
+    -->
+    <div class="shell">
+      <nav class="rail" aria-label="Screens">
+        <div class="brand">
+          <span class="brand-name">CareerSignal</span>
+          <span class="brand-tag">read only</span>
+        </div>
+        <ul class="nav" id="nav"></ul>
+        <aside class="session" aria-labelledby="session-heading">
+          <h2 id="session-heading">Session</h2>
+          <dl id="session-facts"></dl>
+          <p class="session-note">Sending is not a capability of this application.</p>
+        </aside>
+      </nav>
+
+      <main class="list" aria-labelledby="list-title">
+        <header class="list-head">
+          <h1 id="list-title">CareerSignal</h1>
+          <p id="list-subtitle" class="subtitle">Reading the local database&hellip;</p>
+          <div id="list-controls" class="controls" hidden></div>
+        </header>
+        <div id="list-body" class="list-body" tabindex="-1"></div>
+      </main>
+
+      <aside class="detail" aria-labelledby="detail-heading" aria-live="polite">
+        <h2 id="detail-heading" class="visually-hidden">Selected item</h2>
+        <div id="detail" class="detail-body"></div>
+      </aside>
+    </div>
   </body>
 </html>

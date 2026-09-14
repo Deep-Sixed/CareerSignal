@@ -30,7 +30,8 @@ from communications.message import Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from system import cli
+from recruiting.status import STATUSES
+from system import cli, views
 from system.web import server as web
 from system.workflow import Intake
 
@@ -230,7 +231,7 @@ def test_no_response_ever_reports_the_token(client, surface):
     """Including the refusals, which is where a helpful error would leak it."""
     for path in (
         "/",
-        "/bootstrap.js",
+        "/app.js",
         "/api/v1/session",
         "/api/v1/opportunities",
         "/api/v1/timeline",
@@ -278,7 +279,7 @@ def test_the_static_page_needs_no_token_but_carries_no_data(client, surface):
     """The bootstrap has to load before it can present anything; it is inert until it does."""
     status, payload, headers = client.send("/", token=False)
     assert status == 200 and headers["Content-Type"].startswith("text/html")
-    assert b'<script src="bootstrap.js"' in payload
+    assert b'<script type="module" src="app.js"' in payload
     assert surface.token.encode() not in payload
     for name in ("recruiter@example.com", "IAM Architect", "Example Corp"):
         assert name.encode() not in payload, "a static asset carries stored evidence"
@@ -377,7 +378,15 @@ def test_nothing_outside_the_packaged_asset_names_can_be_served(client, path):
 
 def test_the_assets_are_read_from_package_resources_not_from_the_checkout(surface):
     """An installed wheel has no checkout beside it; the wheel test proves the other half."""
-    assert set(surface.assets) == {"index.html", "bootstrap.js", "careersignal.css"}
+    assert set(surface.assets) == {
+        "index.html",
+        "careersignal.css",
+        "app.js",
+        "api.js",
+        "dom.js",
+        "screens.js",
+        "icon.svg",
+    }
     packaged = resources.files("system.web") / "static"
     for name, (payload, media) in surface.assets.items():
         assert payload == (packaged / name).read_bytes()
@@ -633,6 +642,219 @@ def test_a_superseded_review_keeps_the_repositorys_own_refusal(client, repositor
     status, body = client.json(f"/api/v1/reviews/{superseded}/authorization")
     assert status == 400 and body["error"] == "Review is missing or stale"
     assert client.json(f"/api/v1/reviews/{current}/authorization")[0] == 200
+
+
+# --- presentation ---------------------------------------------------------------------------------
+
+
+def test_the_established_reads_are_unchanged_unless_presentation_is_asked_for(client, repository):
+    """The contract #29 set: a caller that asked for a projection keeps getting one.
+
+    Byte-for-byte against the repository, on every one of the eight reads, including the two
+    that can be enriched. Enrichment is opt-in precisely so this stays true.
+    """
+    opportunity = repository.opportunities()[0]["id"]
+    for path in (
+        "/api/v1/opportunities",
+        f"/api/v1/opportunities/{opportunity}",
+        "/api/v1/opportunities?presentation=false",
+        f"/api/v1/opportunities/{opportunity}?presentation=false",
+    ):
+        status, body = client.json(path)
+        assert status == 200, path
+        rows = body if isinstance(body, list) else [body]
+        assert all("presentation" not in row for row in rows), path
+    assert client.json("/api/v1/opportunities")[1] == json.loads(
+        json.dumps(repository.opportunities())
+    )
+
+
+def test_presentation_is_exactly_the_python_that_owns_it(client, repository):
+    """Equality against system.views itself, not against expected strings.
+
+    A literal here would pass while the two drifted; this cannot. The whole reason the
+    frontend receives these rather than computing them is that there is one implementation
+    of what CareerSignal state means, and it is the one being called on the right.
+    """
+    status, rows = client.json("/api/v1/opportunities?presentation=true")
+    assert status == 200 and rows
+    for row in rows:
+        action = repository.opportunity(row["id"])["action"]
+        assert row["presentation"] == {
+            "coverage": views.coverage(row),
+            "queue": views.queue(row, action),
+            "approval": views.approval(action),
+            "attempt": views.attempt(action),
+        }, row["company"]
+        assert set(row["presentation"]) == {"coverage", "queue", "approval", "attempt"}
+
+
+def test_presentation_adds_a_namespace_and_changes_nothing_else(client, repository):
+    opportunity = repository.opportunities()[0]["id"]
+    for path in ("/api/v1/opportunities/" + opportunity, "/api/v1/opportunities"):
+        plain = client.json(path)[1]
+        enriched = client.json(path + "?presentation=true")[1]
+        plain_rows = plain if isinstance(plain, list) else [plain]
+        rich_rows = enriched if isinstance(enriched, list) else [enriched]
+        assert len(plain_rows) == len(rich_rows)
+        for before, after in zip(plain_rows, rich_rows):
+            assert {key: value for key, value in after.items() if key != "presentation"} == before
+
+
+def test_the_detail_presentation_is_the_same_answer_as_the_row(client, repository):
+    """A list and a detail pane cannot disagree, which is the whole point of one queue().
+
+    Decided first, and on a second opportunity left undecided, so the two panes are being
+    compared on rows where the answer is actually different. Against an all-undecided
+    fixture every field would read the same whether or not the two sides shared an
+    implementation, and this would pass while proving nothing.
+    """
+    review = repository.opportunities()[0]["review"]
+    repository.decide(review, approved=True, actor="operator")
+    Intake(repository, Profile(("python", "sql"))).intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="m9",
+            sender="recruiter@example.com",
+            subject="Another role",
+            text=JOB_TEXT.replace("roles/1", "roles/9").replace("IAM Architect", "Data Engineer"),
+        )
+    )
+    rows = client.json("/api/v1/opportunities?presentation=true")[1]
+    assert len({row["presentation"]["queue"] for row in rows}) > 1, (
+        "every row is in the same queue, so this cannot tell the two panes apart"
+    )
+    for row in rows:
+        detail = client.json(f"/api/v1/opportunities/{row['id']}?presentation=true")[1]
+        assert detail["presentation"] == row["presentation"], row["company"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "presentation=",
+        "presentation=yes",
+        "presentation=1",
+        "presentation=TRUE&presentation=false",
+        "presentation=true&presentation=true",
+        "Presentation=true",
+    ),
+)
+def test_presentation_follows_the_same_fail_closed_query_rule(client, repository, query):
+    opportunity = repository.opportunities()[0]["id"]
+    assert client.json("/api/v1/opportunities?" + query)[0] == 400, query
+    assert client.json(f"/api/v1/opportunities/{opportunity}?" + query)[0] == 400, query
+
+
+def test_presentation_is_not_a_parameter_of_the_other_reads(client, repository):
+    """It enriches the two reads the contract named, and is unknown everywhere else."""
+    message = repository.communications()[0]["message"]
+    opportunity = repository.opportunities()[0]["id"]
+    for path in (
+        "/api/v1/session",
+        "/api/v1/communications",
+        f"/api/v1/communications/{message}",
+        f"/api/v1/opportunities/{opportunity}/sources",
+        "/api/v1/timeline",
+    ):
+        assert client.json(path + "?presentation=true")[0] == 400, path
+
+
+def test_presentation_composes_with_the_filters(client, repository):
+    opportunity = repository.opportunities()[0]["id"]
+    repository.record_status(opportunity, "interested", actor="operator", reason="")
+    status, rows = client.json("/api/v1/opportunities?status=interested&presentation=true")
+    assert status == 200 and len(rows) == 1
+    assert rows[0]["id"] == opportunity and "presentation" in rows[0]
+
+
+def test_the_web_package_derives_presentation_only_by_calling_views():
+    """Mechanical, because the alternative is a second implementation nobody notices.
+
+    Every `views.` attribute in the package must be one of the four the contract names. A
+    fifth -- or a locally written precedence table, status vocabulary or approval rule --
+    fails here rather than at review, which is what keeps Python authoritative about what
+    CareerSignal state means.
+    """
+    used = {node.attr for name, node in nodes(ast.Attribute) if _named(node.value, "views")}
+    assert used == {"coverage", "queue", "approval", "attempt"}, used
+    written = {node.value for name, node in nodes(ast.Constant) if isinstance(node.value, str)}
+    assert not written & set(views.QUEUES), "a queue name is written into the web layer"
+    assert not written & set(STATUSES), "the status vocabulary is copied into the web layer"
+    assert not written & set(views.DRAFTS.values()), "draft wording is copied into the web layer"
+
+
+# --- hostile content ------------------------------------------------------------------------------
+
+HOSTILE = (
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    "\x1b]0;spoofed\x07",
+    "\u202eevil\u200b",
+    "quotes \" ' and & < >",
+    "first line\nsecond line",
+)
+
+
+def test_stored_evidence_reaches_the_api_exactly_as_it_arrived(repository, client):
+    """Storage is untouched; safety is applied where the text is presented.
+
+    The terminal escapes for a terminal and the browser builds text nodes, but neither
+    rewrites the record. What a recruiter actually sent stays readable, because being able
+    to see what arrived is the whole reason the evidence is kept.
+    """
+    hostile = "".join(HOSTILE)
+    Intake(repository, Profile(("python", "sql"))).intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="hostile",
+            sender="recruiter@example.com",
+            subject=hostile,
+            text=JOB_TEXT.replace("IAM Architect", hostile).replace("roles/1", "roles/hostile"),
+        )
+    )
+    listed = client.json("/api/v1/communications")[1]
+    message = next(row for row in listed if row["external_id"] == "hostile")
+    assert message["subject"] == hostile, "the subject was rewritten on the way out"
+
+    detail = client.json(f"/api/v1/communications/{message['message']}")[1]
+    assert any(hostile in str(item[1]) for item in detail["items"]), "the excerpt was altered"
+
+    rows = client.json("/api/v1/opportunities?presentation=true")[1]
+    carried = next(row for row in rows if "<script>alert(1)</script>" in row["title"])
+    # A title goes through the domain's own whitespace normalisation on the way in, so it
+    # is not byte-identical to the subject. Every dangerous sequence still survives: what
+    # is stored is what is shown, and nothing is silently removed at the edge.
+    for payload in ("<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "\x1b]0;"):
+        assert payload in carried["title"], payload
+
+
+def test_a_hostile_payload_is_inert_because_of_what_it_is_served_as(client, repository):
+    """`</script>` survives json.dumps, and that is not a defect here.
+
+    Escaping it would only matter if a response were embedded inside an HTML script block,
+    which this architecture never does: the API is fetched and parsed as JSON, and the page
+    builds text nodes. What keeps the payload inert is the content type plus nosniff -- a
+    browser is never invited to read this as a document -- and a frontend with no markup
+    sink, which the frontend tests prove separately.
+    """
+    subject = "</script><script>alert(1)</script>"
+    Intake(repository, Profile(("python", "sql"))).intake_message(
+        Message(
+            namespace="gmail:operator@example.com",
+            external_id="hostile2",
+            sender="recruiter@example.com",
+            subject=subject,
+            text=JOB_TEXT.replace("roles/1", "roles/hostile2"),
+        )
+    )
+    status, payload, headers = client.send("/api/v1/communications")
+    assert status == 200
+    assert headers["Content-Type"] == "application/json; charset=utf-8"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert "text/html" not in headers["Content-Type"]
+    listed = json.loads(payload)
+    assert any(row["subject"] == subject for row in listed), "the subject did not round-trip"
 
 
 # --- under load -----------------------------------------------------------------------------------

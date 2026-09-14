@@ -59,7 +59,15 @@ from data.repository import Repository
 from system.web.server import TOKEN_HEADER, Surface
 
 packaged = sorted(entry.name for entry in (resources.files("system.web") / "static").iterdir())
-assert packaged == ["bootstrap.js", "careersignal.css", "index.html"], packaged
+assert packaged == [
+    "api.js",
+    "app.js",
+    "careersignal.css",
+    "dom.js",
+    "icon.svg",
+    "index.html",
+    "screens.js",
+], packaged
 
 surface = Surface(Repository("extraction.db"), port=0)
 threading.Thread(target=surface.serve_forever, daemon=True).start()
@@ -83,7 +91,9 @@ assert "#token=" in surface.launch_url and "?" not in surface.launch_url
 status, body = ask("/api/v1/opportunities")
 assert status == 200, (status, body)
 assert len(json.loads(body)) == 2, body
-assert ask("/")[0] == 200 and b"bootstrap.js" in ask("/")[1]
+assert ask("/")[0] == 200 and b"app.js" in ask("/")[1]
+assert ask("/screens.js")[0] == 200 and ask("/dom.js")[0] == 200
+assert ask("/icon.svg")[0] == 200
 assert ask("/careersignal.css")[0] == 200
 assert ask("/api/v1/opportunities", token=False)[0] == 401
 assert ask("/nothing-here.js")[0] == 404
@@ -114,10 +124,10 @@ def main():
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
             assert "data/migrations/0001_baseline.sql" in names
-            assert {
-                f"system/web/static/{asset}"
-                for asset in ("index.html", "bootstrap.js", "careersignal.css")
-            } <= set(names)
+            # Read from the tree rather than listed here, so an asset added to the
+            # frontend cannot be left out of the wheel and out of this check at once.
+            static = ROOT / "src/system/web/static"
+            assert {f"system/web/static/{asset.name}" for asset in static.iterdir()} <= set(names)
             assert not any(set(Path(n).parts) & {"tests", "fixtures", "var", "ops"} for n in names)
             metadata_name = next(n for n in names if n.endswith(".dist-info/METADATA"))
             metadata = archive.read(metadata_name).decode("utf-8")
