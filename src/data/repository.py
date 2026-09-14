@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 
 from data.store import connection, migrate, transaction
-from recruiting.models import Review, fingerprint
+from recruiting.models import BindingConflict, Review, fingerprint
 from recruiting.status import (
     ACTIVE,
     INITIAL,
@@ -514,6 +514,16 @@ class Repository:
             "draft": draft,
         }
 
+    @staticmethod
+    def _expectation(binding) -> dict:
+        """The four facts an approval binds, in the shape authorization() reports them."""
+        return {
+            "content_digest": binding["content_digest"],
+            "draft_digest": binding["draft_digest"],
+            "addressing_digest": binding["addressing"]["digest"],
+            "status_event_id": binding["status_event_id"],
+        }
+
     def decide(
         self,
         review_id,
@@ -522,16 +532,38 @@ class Repository:
         actor: str,
         provider: str = "controlled",
         provider_namespace: str = "controlled",
+        expected=None,
     ):
+        """Record a decision, optionally only if the review still says what was read.
+
+        `expected` is the four facts an approval binds, as the packet the operator acted on
+        reported them: content_digest, draft_digest, addressing_digest and status_event_id.
+        Supplied, the decision is recorded only while all four still hold; omitted, this is
+        the trusted-caller write it has always been, taken against whatever is current.
+
+        A rejection is not required to carry one. A rejection binds nothing and authorizes
+        nothing, so demanding a fresh packet to record one would put the safest action an
+        operator can take behind the same precondition as the riskiest.
+        """
         if type(approved) is not bool or not actor.strip():
             raise ValueError("Explicit boolean decision and actor are required")
         if not provider.strip() or not provider_namespace.strip():
             raise ValueError("A provider and a provider namespace are required")
+        expectation = None if expected is None else dict(expected)
         with connection(self.path) as conn, transaction(conn):
             advances = self._current(conn, review_id)
             if approved and not advances:
                 raise ValueError("Ineligible or below-threshold review cannot be approved")
             binding = self._binding(conn, review_id)
+            # Inside the reservation, from the same read the decision is bound from. Before
+            # this, a new message could change where the draft would be addressed between
+            # the operator reading the packet and this write, and the approval would bind
+            # an address they never saw -- while every digest they did see still matched.
+            # Reading the packet earlier cannot close that: the comparison has to happen
+            # where nothing can commit between it and the row that depends on it.
+            observed = self._expectation(binding)
+            if expectation is not None and expectation != observed:
+                raise BindingConflict(expectation, observed)
             # Approving an opportunity the operator has already ended would record an
             # authorization that can never be used. Refuse now rather than at draft time.
             if approved and binding["status"] in TERMINAL:

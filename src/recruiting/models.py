@@ -8,6 +8,35 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from recruiting.location import AMBIGUOUS, Location
 
 
+class BindingConflict(ValueError):
+    """The review moved between the packet an operator read and the decision they recorded.
+
+    An approval authorizes an outward draft to a destination. A later message about the
+    same job can move that destination without changing anything the operator would think
+    to re-read, so an approval recorded from a packet read moments earlier can authorize an
+    address nobody ever saw. Recording the decision against the packet it was taken from is
+    what closes that window: the same rule the status ledger already applies to an operator
+    write, applied where the operator approves.
+
+    Nothing is written when this is raised. No decision row is inserted or updated and no
+    audit event is appended, so an approval that already stood stands exactly as it was.
+    The operator reads the packet again and decides again.
+
+    A ValueError for the reason StatusConflict is one: a caller already refusing on a bad
+    decision refuses here too rather than continuing past a write that did not happen, and
+    a caller that can tell the operator more catches this first and reports what moved.
+    """
+
+    def __init__(self, expected, observed):
+        changed = sorted(field for field in observed if expected.get(field) != observed[field])
+        super().__init__(
+            "Review changed since the approval packet was read ("
+            + ", ".join(changed or ["no field"])
+            + "); read the review again and decide against what it says now"
+        )
+        self.expected, self.observed = expected, observed
+
+
 def fingerprint(value: object) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

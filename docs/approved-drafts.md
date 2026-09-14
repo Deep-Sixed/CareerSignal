@@ -92,6 +92,46 @@ An ordinary move through the pipeline — `interested` to `applied`, `reviewing`
 approved words became wrong. Only ending the opportunity withdraws the authority to act
 outward on its behalf.
 
+## Recording the approval against the packet that was read
+
+Binding an approval to what is current at the moment it is recorded still leaves one gap,
+and it is the same gap one step earlier. The operator reads an approval packet and decides
+from what it says; `decide()` then reads the review again, inside its own transaction, and
+binds whatever it finds. A later message arriving in between moves the recipient without
+touching the content digest, the wording or the status — so the approval binds an address
+the operator never saw, and every check afterwards passes, because each of them compares
+against the address as it now is.
+
+`decide()` therefore accepts the packet the decision was taken from:
+
+```
+expected = {
+    "content_digest":   ...,   the four values authorization() already reports,
+    "draft_digest":     ...,   read the way the operator's view reads them
+    "addressing_digest": ...,
+    "status_event_id":  ...,
+}
+```
+
+Compared inside the write reservation, against the same read the decision is bound from,
+before anything is written. If any of the four has moved, `BindingConflict` is raised and
+**nothing is recorded** — no decision row inserted or updated, no audit event appended. A
+decision that already stood stands exactly as it was. The operator reads the review again
+and decides against what it says now.
+
+Comparing earlier would only move the race: the value has to be read where nothing can
+commit between the comparison and the row that depends on it. A test asserts the comparison
+really happens under the reservation rather than trusting the order of the source.
+
+`expected` is optional. Omitted, `decide()` is the trusted-caller write it has always been.
+A rejection is not required to carry one either: a rejection binds nothing and authorizes
+nothing, so demanding a fresh packet to record one would put the safest action an operator
+can take behind the same precondition as the riskiest.
+
+This is the same rule the status ledger applies to an operator write, and that the draft
+path applies to an approval — act against a known state, refuse when the state has moved —
+applied where the operator approves.
+
 ## Provider identity
 
 One review still permits at most one external draft attempt, and everything above bound
