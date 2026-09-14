@@ -44,6 +44,60 @@ with connection("extraction.db") as conn:
 print("status history verified from the installed wheel")
 """
 
+# The read surface, started from the installed wheel with no checkout anywhere: the static
+# assets have to arrive as package resources, a read has to answer with the launch token,
+# and a write verb has to be refused. Locating assets beside __file__ passes every test in
+# the tree and fails exactly here, which is why this runs against the installed copy.
+WEB_CHECK = """
+import json
+import threading
+import urllib.error
+import urllib.request
+from importlib import resources
+
+from data.repository import Repository
+from system.web.server import TOKEN_HEADER, Surface
+
+packaged = sorted(entry.name for entry in (resources.files("system.web") / "static").iterdir())
+assert packaged == ["bootstrap.js", "careersignal.css", "index.html"], packaged
+
+surface = Surface(Repository("extraction.db"), port=0)
+threading.Thread(target=surface.serve_forever, daemon=True).start()
+
+
+def ask(path, method="GET", token=True):
+    request = urllib.request.Request(surface.origin + path, method=method)
+    if token:
+        request.add_header(TOKEN_HEADER, surface.token)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as refused:
+        return refused.code, refused.read()
+
+
+assert surface.server_address[0] == "127.0.0.1", surface.server_address
+assert surface.launch_url.startswith("http://127.0.0.1:"), surface.launch_url
+assert "#token=" in surface.launch_url and "?" not in surface.launch_url
+
+status, body = ask("/api/v1/opportunities")
+assert status == 200, (status, body)
+assert len(json.loads(body)) == 2, body
+assert ask("/")[0] == 200 and b"bootstrap.js" in ask("/")[1]
+assert ask("/careersignal.css")[0] == 200
+assert ask("/api/v1/opportunities", token=False)[0] == 401
+assert ask("/nothing-here.js")[0] == 404
+
+before = ask("/api/v1/timeline")[1]
+for method in ("POST", "PUT", "PATCH", "DELETE"):
+    status, body = ask("/api/v1/opportunities", method=method)
+    assert status == 405, (method, status, body)
+assert ask("/api/v1/timeline")[1] == before, "a refused write still moved a ledger"
+
+surface.shutdown()
+print("read surface verified from the installed wheel")
+"""
+
 
 def main():
     env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
@@ -60,6 +114,10 @@ def main():
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
             assert "data/migrations/0001_baseline.sql" in names
+            assert {
+                f"system/web/static/{asset}"
+                for asset in ("index.html", "bootstrap.js", "careersignal.css")
+            } <= set(names)
             assert not any(set(Path(n).parts) & {"tests", "fixtures", "var", "ops"} for n in names)
             metadata_name = next(n for n in names if n.endswith(".dist-info/METADATA"))
             metadata = archive.read(metadata_name).decode("utf-8")
@@ -135,12 +193,13 @@ def main():
             ".fetchall()==[('new',)]; "
             "c.__exit__(None,None,None)",
         )
-        check = folder / "status_check.py"
-        check.write_text(STATUS_CHECK, encoding="utf-8")
-        run(str(check))
+        for name, script in (("status_check.py", STATUS_CHECK), ("web_check.py", WEB_CHECK)):
+            check = folder / name
+            check.write_text(script, encoding="utf-8")
+            run(str(check))
     print(
         "PASS: pure-Python installed wheel, zero runtime dependencies, resource discovery, "
-        "golden workflow and replay"
+        "golden workflow, replay and the loopback read surface"
     )
 
 
