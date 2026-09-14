@@ -564,8 +564,13 @@ def test_a_route_this_surface_does_not_have_is_not_found(client, path):
         "/api/v1/opportunities?eligible=",
         "/api/v1/opportunities?min_coverage=",
         "/api/v1/opportunities?misspelled=",
+        "/api/v1/opportunities?unknown=",
         "/api/v1/opportunities?status=new&status=new",
         "/api/v1/opportunities?status=&status=",
+        # A blank and a value for the same parameter. The two repeats above cannot catch
+        # an implementation that takes whichever of them is non-blank; this one can.
+        "/api/v1/opportunities?eligible=&eligible=true",
+        "/api/v1/opportunities?eligible=true&eligible=",
         "/api/v1/timeline?limit=",
         "/api/v1/timeline?since=",
         "/api/v1/timeline?limit=0",
