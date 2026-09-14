@@ -14,6 +14,8 @@ treatment because json.dumps already escapes control characters.
 
 import re
 
+from recruiting.status import TERMINAL
+
 # The deliberately minimal operator list. Everything else a row carries -- location, URL,
 # score components, last status change -- is in the JSON form and in the detail view.
 COLUMNS = (
@@ -70,6 +72,50 @@ def cell(row, field) -> str:
 # How an approval and a draft attempt read to an operator. Refused and uncertain are
 # deliberately different sentences: one means nothing left this machine, the other means
 # something may have, and the operator's next move differs.
+QUEUES = ("reconcile", "created", "stale", "draft", "decide", "rejected", "none")
+
+
+def queue(summary, action) -> str:
+    """Which queue an opportunity belongs in, from state the repository already derived.
+
+    Pure. It opens nothing, decides nothing of its own, and adds no rule the write paths do
+    not already enforce -- it names what has happened so one classification can be shown in
+    a list and in a detail pane without the two disagreeing.
+
+    The order of these tests is the rule, not an implementation detail, and it mirrors
+    `_action`'s own precedence. A durable intent wins absolutely: it records an attempt
+    that was actually made, so an earlier `draft_refused` or `draft_rejected` in the audit
+    trail describes a draft that is not currently proposed rather than the current state.
+    Only once no intent exists do the decision-derived states get a say.
+    """
+    if action["draft"] in ("attempting", "uncertain"):
+        return "reconcile"
+    if action["draft"] == "confirmed":
+        return "created"
+    approved = action["decision"] == "approved"
+    if approved and not action["binds"] and not action["attempted"]:
+        return "stale"
+    if (
+        approved
+        and action["binds"]
+        and not action["attempted"]
+        and summary["status"] not in TERMINAL
+    ):
+        return "draft"
+    if (
+        summary["advances"]
+        and summary["actionable"]
+        and action["decision"] is None
+        and summary["status"] not in TERMINAL
+    ):
+        return "decide"
+    if action["decision"] == "rejected":
+        return "rejected"
+    # Everything with nothing to offer the operator right now: a review written before
+    # coverage and so unscorable, one below the threshold, an ended opportunity.
+    return "none"
+
+
 APPROVAL = {"approved": "approved by", "rejected": "rejected by", None: "not yet decided"}
 # Said once, so the three remediations differ only in the part that is actually different.
 STALE = "stale: does not bind the material below"
