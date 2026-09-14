@@ -854,3 +854,13 @@ body {
     padding: 18px 16px 32px;
   }
 }
+
+/* A queue card that is not a way in. It reports a count and does nothing, so it must not
+   look like something to press. */
+.quiet-card {
+  cursor: default;
+}
+
+.quiet-card:hover {
+  background: none;
+}

@@ -274,6 +274,69 @@ def test_the_five_frozen_screens_are_the_screens_that_exist():
     assert "contacts" not in body.lower() and "tasks" not in body.lower()
 
 
+# --- the count, the destination and the rows agree ------------------------------------------------
+
+
+def test_the_approvals_badge_is_the_approvals_screens_own_filter():
+    """One definition, or the badge promises rows the screen will not show.
+
+    The Approvals screen lists the five queues where approval state is worth reading;
+    `rejected` is deliberately not one of them. A nav badge counting every queue but
+    `none` would say "Approvals 1" and then show "Nothing matches." -- a count the operator
+    cannot reach is a worse answer than no count, so both sides call the same predicate.
+    """
+    screens, app = code(STATIC / "screens.js"), code(STATIC / "app.js")
+    assert screens.count("const APPROVAL_QUEUES") == 1, "the grouping is declared twice"
+    assert "export function inApprovals" in screens
+    assert "inApprovals" in app, "app.js counts with a filter of its own"
+    assert 'queue !== "none"' not in app, "the badge uses a grouping the screen does not"
+    # The screen itself filters through the same predicate rather than re-listing.
+    assert "filter(inApprovals)" in screens
+
+
+def test_a_queue_card_leads_only_where_its_rows_are_listed():
+    """A card for a queue Approvals does not show must not route there.
+
+    The Dashboard's rejected card would otherwise open a screen the rejected row is absent
+    from: the operator presses a count and arrives at nothing.
+    """
+    screens = code(STATIC / "screens.js")
+    assert "APPROVAL_QUEUES.includes(queue)" in screens, "every card routes the same way"
+    assert "showApprovals()" in screens
+    # The destination takes no queue argument, so it cannot pretend to filter by one.
+    assert "showQueue(" not in screens and "showQueue(" not in code(STATIC / "app.js")
+
+
+FORBIDDEN_CLAIMS = (
+    # `stale` does not say which fact moved: a later message can break the binding, and so
+    # can a status event.
+    "moved the recipient",
+    "later message moved",
+    # `reconcile()` calls finish(), which updates the intent row and appends an audit
+    # event. It creates no second draft; it does not write nothing.
+    "writes nothing new",
+    "writes nothing",
+)
+
+
+@pytest.mark.parametrize("claim", FORBIDDEN_CLAIMS)
+def test_the_attention_copy_claims_no_cause_the_queue_does_not_guarantee(claim):
+    """Display copy may name implications the server guarantees, and no others.
+
+    The queue is the only fact behind these panels. Wording that explains it by naming a
+    cause is a browser-side inference, and an operator reading a confident sentence has no
+    way to tell it was guessed.
+    """
+    body = code(STATIC / "screens.js")
+    assert claim not in body, f"the attention copy asserts: {claim}"
+
+
+def test_the_attention_copy_points_at_the_evidence_instead_of_guessing():
+    body = code(STATIC / "screens.js")
+    assert "does not create another draft" in body
+    assert "compare the approved and" in body, "stale no longer sends the operator to the digests"
+
+
 # --- one implementation of what the state means -------------------------------------------------
 
 

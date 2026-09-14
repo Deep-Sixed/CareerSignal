@@ -44,22 +44,36 @@ const QUEUE_HINTS = {
   rejected: "declined; nothing was created",
 };
 /* Which queues make approval state worth showing on the Approvals screen. Fixed by the
- * PR contract rather than derived here. */
-const APPROVAL_QUEUES = ["decide", "stale", "draft", "reconcile", "created"];
+ * PR contract rather than derived here, and exported because the nav badge and the queue
+ * cards have to agree with the screen itself: a count the operator cannot then see is a
+ * worse answer than no count at all. */
+export const APPROVAL_QUEUES = ["decide", "stale", "draft", "reconcile", "created"];
+
+export function inApprovals(row) {
+  return APPROVAL_QUEUES.includes(row.presentation.queue);
+}
+/* Copy limited to what the queue itself guarantees.
+ *
+ * The queue is the only fact behind these panels, so the wording may not name a cause the
+ * server did not report. `stale` means an approval no longer binds -- a later message can
+ * do that, and so can a status event, and the packet does not say which. `reconcile` means
+ * an attempt is unsettled; reconciliation does not create a second draft, but it does
+ * record what it finds, so it is not true that it writes nothing. Where the operator needs
+ * the cause, the before-and-now digests below say it exactly. */
 const ATTENTION = {
   reconcile: [
     "action outcome",
     "The outcome of a draft attempt is unknown",
     "A draft-create request may have reached the provider. CareerSignal never retries it " +
       "automatically; reconciliation reads the destination for this review's intent key " +
-      "and writes nothing new.",
+      "and does not create another draft.",
   ],
   stale: [
     "approval stale",
     "The approval on record no longer matches this material",
-    "A later message moved the recipient or subject after the approval was given. The " +
-      "record of who approved stays; it authorizes nothing until the current packet is " +
-      "approved.",
+    "The current packet differs from the one that was approved; compare the approved and " +
+      "now values below. The record of who approved stays -- it authorizes nothing until " +
+      "the current packet is approved.",
   ],
 };
 
@@ -194,7 +208,13 @@ function dashboard(state, actions) {
     ([queue]) => queue !== "none",
   );
   for (const [queue, count] of counted) {
-    const card = button("queue-card", () => actions.showQueue(queue));
+    /* Only a queue Approvals actually shows is a way in. A card for one it does not --
+     * `rejected` today -- reports the count and goes nowhere, because sending the
+     * operator to a screen the row is absent from is worse than not offering the trip. */
+    const routes = APPROVAL_QUEUES.includes(queue);
+    const card = routes
+      ? button("queue-card", () => actions.showApprovals())
+      : el("div", "queue-card quiet-card");
     put(
       card,
       el("span", "queue-n", count),
@@ -616,7 +636,7 @@ export function listFor(state, actions) {
   }
   const rows =
     state.screen === "approvals"
-      ? state.opportunities.filter((row) => APPROVAL_QUEUES.includes(row.presentation.queue))
+      ? state.opportunities.filter(inApprovals)
       : filtered(state);
   if (!rows.length) {
     return empty("Nothing matches.");

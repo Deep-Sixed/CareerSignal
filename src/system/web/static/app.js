@@ -8,7 +8,7 @@
 
 import { claim, connect } from "./api.js";
 import { button, clear, definitions, el, put, text } from "./dom.js";
-import { SCREENS, controlsFor, detailFor, listFor } from "./screens.js";
+import { SCREENS, controlsFor, detailFor, inApprovals, listFor } from "./screens.js";
 
 const ORDER = ["dashboard", "inbox", "opportunities", "approvals", "activity"];
 const TIMELINE_LIMIT = 200;
@@ -34,8 +34,9 @@ function counts() {
     dashboard: null,
     inbox: state.communications.length || null,
     opportunities: state.opportunities.length || null,
-    approvals:
-      state.opportunities.filter((row) => row.presentation.queue !== "none").length || null,
+    /* The same predicate the Approvals screen filters by, so the badge can never promise
+     * a row the screen will not show. */
+    approvals: state.opportunities.filter(inApprovals).length || null,
     activity: state.timeline.length || null,
   };
 }
@@ -129,9 +130,9 @@ const actions = {
       state.detail = { kind: "communication", record: await api.communication(id) };
     });
   },
-  showQueue() {
-    /* Every queue card leads to the same screen: Approvals is where approval state is
-     * read. Which rows belong there is the server's queue, not a filter invented here. */
+  showApprovals() {
+    /* Only offered by a card whose queue Approvals actually lists; the screen and the
+     * card share one definition of which those are. */
     state.screen = "approvals";
     state.selected = null;
     render();
