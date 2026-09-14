@@ -594,9 +594,14 @@ class GmailDrafts:
         """Find a draft this program already created, without repeating the write.
 
         A draft carries CareerSignal's own intent key as a header, so reconciliation is a
-        read and a comparison rather than a guess about which draft was probably ours. If
-        the window is exhausted without a match, or two drafts claim the same intent, the
-        answer is None -- unknown, not absent -- and the attempt stays uncertain.
+        read and a comparison rather than a guess about which draft was probably ours.
+
+        The answer is a receipt only when the whole listing was read and exactly one draft
+        in it claims this intent. Everything else is None -- unknown, not absent -- and the
+        attempt stays uncertain. Two claimants prove nothing, and neither does one found in
+        a window that stopped early: the draft that would have made it ambiguous may be on
+        a page this never asked for. Confirming from a partial listing would settle an
+        attempt for good on evidence that was never complete.
         """
         wanted, token, pages, matches = intent_key(key), None, 0, []
         while pages < MAX_DRAFT_PAGES:
@@ -617,4 +622,9 @@ class GmailDrafts:
             token, pages = page.get("nextPageToken"), pages + 1
             if not token:
                 break
+        # A token still in hand means the budget ran out with listing left unread, which is
+        # the one case a match count cannot be trusted in: uniqueness is a claim about the
+        # whole mailbox, and this only saw part of it.
+        if token:
+            return None
         return "gmail-draft:" + matches[0] if len(matches) == 1 else None
