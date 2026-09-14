@@ -28,10 +28,28 @@ REVIEWED_DESIGN_ARTIFACTS = frozenset(
 REVIEWED_DESIGN_DETECTOR = "Hex High Entropy String"
 
 
+def canonical_path(path: str) -> str:
+    """One slash spelling for a relative path, whichever platform reported it.
+
+    detect-secrets returns the path as the operating system spells it, so a Windows
+    runner reports docs\\ui-design\\CareerSignal-Mock.dc.html while Linux and macOS
+    report the same file with forward slashes. PurePosixPath alone does not help:
+    a backslash is an ordinary character to it, so the Windows spelling arrives as a
+    single path component and matches nothing. Separators are therefore folded before
+    the comparison.
+
+    Separator normalisation only. Case is preserved, because the allowlist is exact
+    and Windows being case-insensitive about filenames is not a reason for this gate
+    to be; and `..` is left in place rather than resolved, so a path that walks out
+    and back in does not compare equal to one that never left.
+    """
+    return PurePosixPath(path.replace("\\", "/")).as_posix()
+
+
 def reviewed_design_finding(path: str, detector: str) -> bool:
     """Whether one finding is a known-synthetic identifier in a frozen design artifact."""
-    return detector == REVIEWED_DESIGN_DETECTOR and (
-        PurePosixPath(path).as_posix() in REVIEWED_DESIGN_ARTIFACTS
+    return (
+        detector == REVIEWED_DESIGN_DETECTOR and canonical_path(path) in REVIEWED_DESIGN_ARTIFACTS
     )
 
 
