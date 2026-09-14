@@ -521,9 +521,16 @@ as it arrived, and a test asserts that — it is the premise every refusal test 
 
 Each draft carries `X-CareerSignal-Intent`, CareerSignal's own key for the attempt. If a
 response is lost, reconciliation lists drafts and matches on that header rather than
-guessing which draft was probably ours. Two drafts claiming one intent returns unknown, not
-a guess; so does exhausting the read window without a match. An uncertain attempt is never
-automatically repeated.
+guessing which draft was probably ours.
+
+A receipt is returned only when the whole listing was read and exactly one draft in it
+claims the intent. Two claimants return unknown rather than a guess — and so does a read
+window that stopped early, whatever it found in the part it saw. Uniqueness is a claim
+about the mailbox, not about the pages that happened to fit: a second draft claiming the
+same intent could be on a page the window never reached, which is the very case the
+two-claimants rule refuses. Confirming from a partial listing would settle an attempt for
+good on evidence that was never complete. An uncertain attempt is never automatically
+repeated.
 
 A 64-character intent key exceeds the header line limit and folds onto a continuation line,
 which reparses with the leading whitespace folding inserted. Both the composition check and

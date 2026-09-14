@@ -14,6 +14,7 @@ from communications.gmail_draft import (
     COMPOSE_SCOPE,
     FORBIDDEN_SEGMENTS,
     INTENT_HEADER,
+    MAX_DRAFT_PAGES,
     DraftRefused,
     GmailComposeCredentials,
     GmailDrafts,
@@ -623,6 +624,61 @@ def test_a_folded_intent_header_from_gmail_still_matches():
     )
     drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
     assert drafts.lookup(KEY) == "gmail-draft:ours"
+
+
+def test_a_draft_on_a_later_page_is_still_found():
+    """The walk is a walk: a match beyond the first page is found like any other."""
+    recorder = Recorder(
+        listings=[
+            {"drafts": [{"id": "other"}], "nextPageToken": "page-2"},
+            {"drafts": [{"id": "ours"}]},
+        ],
+        drafts={"other": metadata("other", "b" * 64), "ours": metadata("ours", KEY)},
+    )
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    assert drafts.lookup(KEY) == "gmail-draft:ours"
+
+
+def test_one_match_in_a_window_that_stopped_early_confirms_nothing():
+    """The listing outruns the window, so uniqueness was never established.
+
+    A match is found, and on its own it looks like the ordinary confirmable case. What
+    makes it unconfirmable is what was not read: a second draft claiming the same intent
+    could be sitting on a page the window never reached, and that is exactly the case the
+    two-claimants rule exists to refuse. Settling here would record a receipt for good on
+    a listing that was never finished.
+    """
+    recorder = Recorder(
+        listings=[
+            {"drafts": [{"id": "ours"}] if page == 0 else [], "nextPageToken": f"page-{page + 1}"}
+            for page in range(MAX_DRAFT_PAGES)
+        ],
+        drafts={"ours": metadata("ours", KEY)},
+    )
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    assert drafts.lookup(KEY) is None
+    assert recorder.listings == [], "the window was not filled, so this proves nothing"
+
+
+def test_a_listing_that_ends_inside_the_window_still_confirms():
+    """Reading the listing to its end is the rule, not reading few pages.
+
+    This fills the budget exactly and stops because the mailbox ran out, not because the
+    window did. A guard that refused on page count rather than on unread listing would
+    turn every large mailbox into a permanently unreconcilable one.
+    """
+    last = MAX_DRAFT_PAGES - 1
+    recorder = Recorder(
+        listings=[
+            {"drafts": [{"id": "ours"}] if page == 0 else []}
+            | ({} if page == last else {"nextPageToken": f"page-{page + 1}"})
+            for page in range(MAX_DRAFT_PAGES)
+        ],
+        drafts={"ours": metadata("ours", KEY)},
+    )
+    drafts = GmailDrafts(credentials(), create=recorder.create, read=recorder.read)
+    assert drafts.lookup(KEY) == "gmail-draft:ours"
+    assert recorder.listings == [], "the last page was never reached"
 
 
 def test_reconciliation_never_creates_anything():
