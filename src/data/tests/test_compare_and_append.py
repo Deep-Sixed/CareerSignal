@@ -14,12 +14,11 @@ import json
 
 import pytest
 
-from communications.controlled import ControlledDrafts
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
 from recruiting.status import StatusConflict
-from system.workflow import Workflow
+from system.workflow import Intake
 
 BODY = json.dumps(
     {
@@ -46,7 +45,7 @@ BODY = json.dumps(
 @pytest.fixture
 def repository(tmp_path):
     instance = Repository(tmp_path / "db")
-    Workflow(instance, ControlledDrafts(), Profile(("python", "sql"))).intake("one", BODY)
+    Intake(instance, Profile(("python", "sql"))).intake("one", BODY)
     return instance
 
 

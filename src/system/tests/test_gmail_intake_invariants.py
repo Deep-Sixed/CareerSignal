@@ -15,7 +15,7 @@ from communications.gmail import GmailCredentials, GmailReader
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 MAILBOX = "operator@example.com"
 # Bodies chosen to exercise every disposition intake can reach: a job that advances, one
@@ -95,7 +95,7 @@ def test_reading_a_mailbox_never_approves_drafts_or_calls_the_provider(tmp_path)
     for index, (shape, profile) in enumerate(itertools.product(MAILBOX_SHAPES, PROFILES)):
         path = tmp_path / f"db{index}"
         provider = ControlledDrafts()
-        flow = Workflow(Repository(path), provider, profile)
+        flow = Intake(Repository(path), profile)
         for message in reader(shape).messages():
             try:
                 flow.intake_message(message)
@@ -117,11 +117,13 @@ def test_a_drafted_review_still_requires_an_explicit_decision_afterwards(tmp_pat
     """The invariant above must not hold merely because nothing was ever draftable."""
     path = tmp_path / "db"
     provider = ControlledDrafts()
-    flow = Workflow(Repository(path), provider, PROFILES[0])
+    repository = Repository(path)
+    flow = Intake(repository, PROFILES[0])
+    actions = OutwardActions(repository, provider)
     reviews = []
     for message in reader(("advances",)).messages():
         reviews.extend(flow.intake_message(message))
     assert reviews, "no review was created; the invariant above would be vacuous"
     flow.repository.decide(reviews[0], approved=True, actor="synthetic-operator")
-    assert flow.draft(reviews[0])
+    assert actions.draft(reviews[0])
     assert provider.calls == 1

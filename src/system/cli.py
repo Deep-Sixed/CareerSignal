@@ -58,7 +58,7 @@ from recruiting.ports import DraftRefused, ProviderRejected
 from recruiting.status import StatusConflict
 from system.demo import golden_workflow
 from system.views import detail, outcome, table
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
     "accepted",
@@ -132,13 +132,13 @@ def report(record, structured: bool):
         raise SystemExit(code)
 
 
-def attempted(workflow, repository, args) -> dict:
+def attempted(actions, repository, args) -> dict:
     """Run a draft or a reconcile and describe what the durable record now says.
 
     The recorded intent decides the outcome, not the exception type. Past the claim the
-    workflow has already written what it knows -- an attempt whose result never came back
-    is uncertain, not failed -- so reading that back is the only honest answer. Before the
-    claim nothing was reserved and the refusal is certain.
+    outward action has already written what it knows -- an attempt whose result never came
+    back is uncertain, not failed -- so reading that back is the only honest answer. Before
+    the claim nothing was reserved and the refusal is certain.
 
     `attempting` and `uncertain` are both unsettled, and they are not the same answer.
     UNCERTAIN says a provider was contacted and the result is unknown, which is exactly
@@ -149,7 +149,7 @@ def attempted(workflow, repository, args) -> dict:
     review, command = args.identifier, args.command
     common = {"command": command, "review": review}
     try:
-        receipt = workflow.draft(review) if command == "draft" else workflow.reconcile(review)
+        receipt = actions.draft(review) if command == "draft" else actions.reconcile(review)
     except DraftRefused as exc:
         # Read rather than assumed: a refusal reached before any intent exists (the usual
         # case for `draft`) truly has none to report, but an identity check that fails
@@ -169,7 +169,7 @@ def attempted(workflow, repository, args) -> dict:
         }
     except ProviderRejected as exc:
         # Proven, not merely unknown: the provider was contacted and its own response is
-        # evidence nothing was created. The workflow has already released the durable
+        # evidence nothing was created. The outward action has already released the durable
         # intent this attempt reserved and recorded the rejection, so there is nothing
         # left pending here -- the approval is untouched, and retrying once the cause is
         # fixed is exactly as safe as after an ordinary refusal, just not the same fact.
@@ -307,13 +307,9 @@ def main():
                 stream.read(MAX_MESSAGE_BYTES + 1), namespace=args.namespace
             )
         repository = Repository(path)
-        workflow = Workflow(
-            repository,
-            ControlledDrafts(),
-            Profile(tuple(args.skill), tuple(args.location or ["remote"])),
-        )
+        intake = Intake(repository, Profile(tuple(args.skill), tuple(args.location or ["remote"])))
         result = {
-            "reviews": workflow.intake_message(message),
+            "reviews": intake.intake_message(message),
             "diagnostics": [
                 {"item": row[0], "reason": row[2], "review": row[4]}
                 for row in repository.extraction_evidence(message.key)
@@ -439,8 +435,8 @@ def main():
             parser.error(f"{args.command} requires a review id")
         repository = Repository(path)
         known_review(repository, args.identifier, parser)
-        workflow = Workflow(repository, _provider(args, parser), Profile(("placeholder",)))
-        report(attempted(workflow, repository, args), args.json)
+        actions = OutwardActions(repository, _provider(args, parser))
+        report(attempted(actions, repository, args), args.json)
         return
     elif args.command == "gmail-ingest":
         # The token is read from the environment only, never from a flag: a command line is
@@ -454,14 +450,10 @@ def main():
         # reader.identifiers()/fetch()/messages() already refuse to run against an
         # unverified or mismatched mailbox identity on their own; this call is the same
         # adapter-owned guarantee, invoked early so a mismatch is caught before Repository
-        # or Workflow are even constructed rather than merely before the first message.
+        # or Intake are even constructed rather than merely before the first message.
         reader.verify_identity()
         repository = Repository(path)
-        workflow = Workflow(
-            repository,
-            ControlledDrafts(),
-            Profile(tuple(args.skill), tuple(args.location or ["remote"])),
-        )
+        intake = Intake(repository, Profile(tuple(args.skill), tuple(args.location or ["remote"])))
         # Read the whole batch before writing anything: no write reservation may be held
         # across a network call, and nothing here creates or sends a draft.
         messages = reader.messages(
@@ -474,7 +466,7 @@ def main():
                 {
                     "external_id": message.external_id,
                     "message": message.key,
-                    "reviews": workflow.intake_message(message),
+                    "reviews": intake.intake_message(message),
                 }
                 for message in messages
             ],

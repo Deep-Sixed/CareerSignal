@@ -7,11 +7,16 @@ from communications.message import Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Opportunity, Profile
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 
 def workflow(path):
-    return Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    return Intake(Repository(path), Profile(("python", "sql")))
+
+
+def outward(intake):
+    """The draft half over the same repository, composed as the CLI composes it."""
+    return OutwardActions(intake.repository, ControlledDrafts())
 
 
 def test_text_html_jobs_provenance_replay_and_no_drafts(tmp_path):
@@ -35,10 +40,11 @@ def test_text_html_jobs_provenance_replay_and_no_drafts(tmp_path):
     assert flow.intake_message(message) == reviews
     assert flow.repository.extraction_evidence(message.key) == evidence
     assert workflow(tmp_path / "db").intake_message(message) == reviews
+    actions = outward(flow)
     for review in reviews:
         with pytest.raises(ValueError, match="approval"):
-            flow.draft(review)
-    assert flow.provider.calls == 0
+            actions.draft(review)
+    assert actions.provider.calls == 0
     with store.connection(flow.repository.path) as conn:
         assert conn.execute("SELECT format,parser_version FROM message_sources").fetchall() == [
             ("html", "labeled-v1")
@@ -73,13 +79,14 @@ def test_existing_baseline_database_upgrades_without_losing_reviews(tmp_path, mo
 def test_malformed_hidden_container_fails_before_any_intake(tmp_path):
     """A message that cannot be interpreted must not leave partial evidence behind."""
     flow = workflow(tmp_path / "db")
+    actions = outward(flow)
     message = Message("synthetic-mailbox", "unterminated", html="<div hidden>lost<h2>Engineer</h2>")
     with pytest.raises(ValueError, match="Malformed HTML"):
         flow.intake_message(message)
     with store.connection(flow.repository.path) as conn:
         for table in ("messages", "message_sources", "extraction_items", "reviews"):
             assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
-    assert flow.provider.calls == 0
+    assert actions.provider.calls == 0
 
 
 def legacy_database(path, monkeypatch):

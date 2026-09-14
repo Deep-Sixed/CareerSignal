@@ -10,7 +10,7 @@ from communications.gmail import GmailCredentials, GmailReader
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 MAILBOX = "operator@example.com"
 JOB = (
@@ -57,7 +57,12 @@ def reader(messages, on_request=None):
 
 
 def workflow(path):
-    return Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    return Intake(Repository(path), Profile(("python", "sql")))
+
+
+def outward(intake):
+    """The draft half over the same repository, composed as the CLI composes it."""
+    return OutwardActions(intake.repository, ControlledDrafts())
 
 
 def sources(path, message_key):
@@ -105,10 +110,11 @@ def test_intake_never_creates_a_draft(tmp_path):
     """Reading a mailbox must not be a step towards contacting anyone."""
     flow = workflow(tmp_path / "db")
     review = flow.intake_message(reader({"1111aaaa2222": raw()}).messages()[0])[0]
+    actions = outward(flow)
     assert flow.repository.intent(review) is None
-    assert flow.provider.calls == 0
+    assert actions.provider.calls == 0
     with pytest.raises(ValueError, match="approval"):
-        flow.draft(review)
+        actions.draft(review)
     assert flow.repository.audit(review) == ["review_created"]
 
 

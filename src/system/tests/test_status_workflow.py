@@ -9,7 +9,7 @@ from data import store
 from data.repository import Repository
 from recruiting.models import Profile
 from recruiting.status import STATUSES
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 BODY = json.dumps(
     {
@@ -34,7 +34,12 @@ BODY = json.dumps(
 
 
 def workflow(path):
-    return Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    return Intake(Repository(path), Profile(("python", "sql")))
+
+
+def outward(intake):
+    """The draft half over the same repository, composed as the CLI composes it."""
+    return OutwardActions(intake.repository, ControlledDrafts())
 
 
 def opportunities(path):
@@ -104,7 +109,7 @@ def test_changing_status_alters_nothing_else(tmp_path):
     flow = workflow(path)
     review = flow.intake("message-1", BODY)[0]
     flow.repository.decide(review, approved=True, actor="operator")
-    flow.draft(review)
+    outward(flow).draft(review)
     before = snapshot(path)
     for opportunity in opportunities(path):
         for status in STATUSES:
@@ -115,6 +120,7 @@ def test_changing_status_alters_nothing_else(tmp_path):
 def test_recording_a_status_never_creates_a_draft_or_an_approval(tmp_path):
     path = tmp_path / "db"
     flow = workflow(path)
+    actions = outward(flow)
     flow.intake("message-1", BODY)
     for opportunity in opportunities(path):
         for status in ("interested", "applied", "interviewing", "offer"):
@@ -122,7 +128,7 @@ def test_recording_a_status_never_creates_a_draft_or_an_approval(tmp_path):
     with store.connection(path) as conn:
         assert conn.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM draft_intents").fetchone()[0] == 0
-    assert flow.provider.calls == 0
+    assert actions.provider.calls == 0
     assert len(flow.repository.status_history(opportunities(path)[0])) == 5
 
 
@@ -130,9 +136,10 @@ def test_an_approved_review_still_needs_its_own_decision_regardless_of_status(tm
     """Status is not authorization: marking an opportunity applied approves nothing."""
     path = tmp_path / "db"
     flow = workflow(path)
+    actions = outward(flow)
     review = flow.intake("message-1", BODY)[0]
     flow.repository.record_status(opportunities(path)[0], "applied", actor="operator")
     with pytest.raises(ValueError, match="approval"):
-        flow.draft(review)
+        actions.draft(review)
     flow.repository.decide(review, approved=True, actor="operator")
-    assert flow.draft(review)
+    assert actions.draft(review)

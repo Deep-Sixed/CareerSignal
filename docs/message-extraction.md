@@ -47,6 +47,6 @@ Replay returns persisted review references and preserves the original evidence. 
 uv run careersignal ingest --message /path/to/private-message.eml --namespace local-mailbox --skill python --skill sql --db /path/to/private.db
 ```
 
-The CLI reads only the specified local file and reports review IDs plus per-item diagnostics. It has no Gmail credentials, network calls, draft action or send action. The API equivalent is `Workflow.intake_message(Message(...))`; use `Message.from_bytes` for MIME and `Repository.extraction_evidence` for persisted item evidence.
+The CLI reads only the specified local file and reports review IDs plus per-item diagnostics. It has no Gmail credentials, network calls, draft action or send action. The API equivalent is `Intake.intake_message(Message(...))`; use `Message.from_bytes` for MIME and `Repository.extraction_evidence` for persisted item evidence.
 
 The read-only Gmail adapter, status history, provider-backed approved drafts with reconciliation, and operator interface are now available; see [Gmail intake](gmail-intake.md), [status history](status-history.md), [approved drafts](approved-drafts.md), and [the operator interface](operator-interface.md). This document remains scoped to deterministic message extraction. Preserve Python >=3.11,<3.15, standard-library SQLite (3.38 or newer), and Ruff py311. Keep the historical repository reference-only. Develop through PR, independent approval and all 12 CI jobs before merge, then let actual recruiting usage determine further work.

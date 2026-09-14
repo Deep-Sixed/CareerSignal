@@ -80,7 +80,7 @@ It holds because all of it is read from **one place**: `Repository._bound()` is 
 
 The equality is established when the approval is recorded. It does not survive on its own: a later message can move the recipient and subject without touching the decision, and then the packet on screen is no longer the packet the approval binds. **The view says so rather than letting the equality quietly lapse** — see below.
 
-`provider` and `namespace` are the destination this decision names — `controlled`, or `gmail` and a mailbox such as `gmail:alice@example.com` — read straight from the decision row, the same one `claim()` re-checks. They are shown next to `approval` rather than folded into the stale/reapprove logic below: a request for a different destination is a mismatch `Workflow.draft` refuses outright, not a drift in the review's own material that this approval could still be shown as authorizing. A decision recorded before migration 0007 shows `-` for both, exactly like a missing recipient or subject. See [provider identity](approved-drafts.md#provider-identity) for the binding and verification this reports on.
+`provider` and `namespace` are the destination this decision names — `controlled`, or `gmail` and a mailbox such as `gmail:alice@example.com` — read straight from the decision row, the same one `claim()` re-checks. They are shown next to `approval` rather than folded into the stale/reapprove logic below: a request for a different destination is a mismatch `OutwardActions.draft` refuses outright, not a drift in the review's own material that this approval could still be shown as authorizing. A decision recorded before migration 0007 shows `-` for both, exactly like a missing recipient or subject. See [provider identity](approved-drafts.md#provider-identity) for the binding and verification this reports on.
 
 The wording is read from the `reviews.draft` column rather than from the copy inside the review payload. Both are written from the same value at intake, so either would look right; only the column is what the approval's draft digest is taken over.
 
@@ -176,7 +176,7 @@ An approval the decision rules refuse — an ineligible review, a review that pr
 It is a way to operate what CareerSignal already does. It adds no capability:
 
 - **No new state.** The status vocabulary, the decision record and the draft intent states are exactly the ones that existed before.
-- **No second route outward.** The commands call `Workflow.draft` and `Workflow.reconcile`; they never claim, finish, or call a provider themselves. A test asserts this against the source, because a happy-path test would not notice a second route being added beside the first.
+- **No second route outward.** The commands call `OutwardActions.draft` and `OutwardActions.reconcile`; they never claim, finish, or call a provider themselves. A test asserts this against the source, because a happy-path test would not notice a second route being added beside the first.
 - **No web interface, no TUI, no colour, no interactive display, no background work, no notifications.** Output is plain text a terminal, a pipe or a file can hold.
 - **No editing.** There is no command to change a status event, a decision or a receipt. Corrections are new events.
 

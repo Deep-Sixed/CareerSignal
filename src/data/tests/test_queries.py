@@ -17,12 +17,11 @@ JOBS = [
 
 
 def seeded(path):
-    from communications.controlled import ControlledDrafts
     from recruiting.models import Profile
-    from system.workflow import Workflow
+    from system.workflow import Intake
 
     repository = Repository(path)
-    flow = Workflow(repository, ControlledDrafts(), Profile(("python", "sql", "iam", "sailpoint")))
+    flow = Intake(repository, Profile(("python", "sql", "iam", "sailpoint")))
     flow.intake(
         "message-1",
         json.dumps(

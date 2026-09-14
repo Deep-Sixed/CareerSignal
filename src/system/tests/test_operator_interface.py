@@ -22,7 +22,7 @@ from data import store
 from data.repository import Repository
 from recruiting.models import Profile
 from system import cli
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 TOKEN = "synthetic-compose-token-value"
 MAILBOX = "operator@example.com"
@@ -52,8 +52,9 @@ TABLES = (
 
 
 def ingest(path, *, sender="recruiter@example.com"):
-    workflow = Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
-    review = workflow.intake_message(
+    repository = Repository(path)
+    workflow = OutwardActions(repository, ControlledDrafts())
+    review = Intake(repository, Profile(("python", "sql"))).intake_message(
         Message(
             namespace="gmail:operator@example.com",
             external_id="m1",
@@ -728,8 +729,8 @@ def test_the_interface_never_reaches_past_the_workflow(tmp_path):
             assert occurrences == 1, (forbidden, occurrences)
         else:
             assert occurrences == 0, (forbidden, occurrences)
-    assert source.count("workflow.draft(") == 1
-    assert source.count("workflow.reconcile(") == 1
+    assert source.count("actions.draft(") == 1
+    assert source.count("actions.reconcile(") == 1
 
 
 def test_a_fault_before_anything_was_reserved_is_not_reported_as_uncertain(
@@ -850,7 +851,7 @@ def test_a_failed_gmail_identity_check_during_reconcile_leaves_the_intent_unaffe
 
 def source(path, external_id, sender):
     """A later alert for the same opportunity, which reuses the unchanged review."""
-    Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql"))).intake_message(
+    Intake(Repository(path), Profile(("python", "sql"))).intake_message(
         Message(
             namespace="gmail:operator@example.com",
             external_id=external_id,

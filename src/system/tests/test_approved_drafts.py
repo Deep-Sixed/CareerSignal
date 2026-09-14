@@ -23,7 +23,7 @@ from data.repository import Repository
 from recruiting.models import Profile
 from recruiting.ports import DraftRefused, ProviderRejected
 from system import cli
-from system.workflow import Workflow
+from system.workflow import Intake, OutwardActions
 
 TOKEN = "synthetic-compose-token-value"
 MAILBOX = "operator@example.com"
@@ -49,9 +49,14 @@ def raw_message(sender="recruiter@example.com", subject="A role for you"):
     ).encode()
 
 
+def reingest(actions, message):
+    """Re-ingest over the same repository -- this project's only route to a new evaluation."""
+    return Intake(actions.repository, Profile(("python", "sql"))).intake_message(message)
+
+
 def ingest(path, *, sender="recruiter@example.com", subject="A role for you"):
     """Ingest one recruiter message and approve the review it produced."""
-    workflow = Workflow(Repository(path), ControlledDrafts(), Profile(("python", "sql")))
+    repository = Repository(path)
     message = Message(
         namespace="gmail:operator@example.com",
         external_id="m1",
@@ -59,8 +64,8 @@ def ingest(path, *, sender="recruiter@example.com", subject="A role for you"):
         subject=subject,
         text=JOB_TEXT,
     )
-    review = workflow.intake_message(message)[0]
-    return workflow, review
+    review = Intake(repository, Profile(("python", "sql"))).intake_message(message)[0]
+    return OutwardActions(repository, ControlledDrafts()), review
 
 
 class Recorder:
@@ -256,7 +261,7 @@ def test_a_corrected_source_can_be_drafted_after_a_refusal(tmp_path):
         subject="A role for you",
         text=JOB_TEXT,
     )
-    corrected = workflow.intake_message(message)[0]
+    corrected = reingest(workflow, message)[0]
     # The job did not change, so replay reuses the review rather than inventing a new one.
     # What changed is where it came from, and the most recent source addresses the draft.
     assert corrected == refused
@@ -298,14 +303,15 @@ def test_a_source_arriving_after_the_claim_cannot_move_the_target(tmp_path, monk
     def claim_then_race(review_id, **kwargs):
         claimed = original(review_id, **kwargs)
         # A later message about the same job, from somebody else, lands right here.
-        workflow.intake_message(
+        reingest(
+            workflow,
             Message(
                 namespace="gmail:operator@example.com",
                 external_id="m2",
                 sender="bob@example.com",
                 subject="A role for you",
                 text=JOB_TEXT,
-            )
+            ),
         )
         return claimed
 
@@ -323,14 +329,15 @@ def test_a_source_arriving_after_the_claim_cannot_move_the_target(tmp_path, monk
 
 def later_hostile_source(workflow):
     """A later alert for the same opportunity, carrying an address that would be refused."""
-    workflow.intake_message(
+    reingest(
+        workflow,
         Message(
             namespace="gmail:operator@example.com",
             external_id="m2",
             sender=HOSTILE_SENDER,
             subject="A role for you",
             text=JOB_TEXT,
-        )
+        ),
     )
 
 
@@ -819,14 +826,15 @@ def test_a_definite_rejection_still_needs_reapproval_if_the_target_moved(tmp_pat
     with pytest.raises(ProviderRejected):
         workflow.draft(review)
 
-    workflow.intake_message(
+    reingest(
+        workflow,
         Message(
             namespace="gmail:operator@example.com",
             external_id="m2",
             sender="bob@example.com",
             subject="A role for you",
             text=JOB_TEXT,
-        )
+        ),
     )
     with pytest.raises(ValueError, match="Addressing changed since approval"):
         workflow.draft(review)

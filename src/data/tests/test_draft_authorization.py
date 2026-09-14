@@ -4,12 +4,11 @@ import json
 
 import pytest
 
-from communications.controlled import ControlledDrafts
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
 from recruiting.status import TERMINAL
-from system.workflow import Workflow
+from system.workflow import Intake
 
 JOB = dict(
     title="Engineer",
@@ -26,7 +25,7 @@ def body(**changes):
 
 @pytest.fixture
 def flow(tmp_path):
-    return Workflow(Repository(tmp_path / "db"), ControlledDrafts(), Profile(("python", "sql")))
+    return Intake(Repository(tmp_path / "db"), Profile(("python", "sql")))
 
 
 @pytest.fixture
@@ -274,7 +273,7 @@ def test_the_most_recent_source_addresses_the_draft(flow):
 def test_an_unconfirmed_intent_can_never_carry_a_receipt(flow, approved):
     """Pins the invariant the replay branch leans on.
 
-    Workflow.draft returns a receipt only for a confirmed intent. That test would pass
+    OutwardActions.draft returns a receipt only for a confirmed intent. That test would pass
     even without the condition, because the schema already forbids a receipt on any other
     state -- so the condition looks redundant to a mutation run. It is kept because
     application correctness should not rest silently on a database CHECK, and this test

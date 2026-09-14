@@ -1,4 +1,11 @@
-"""Compose pure recruiting rules, real storage and controlled draft actions."""
+"""Compose pure recruiting rules, real storage and controlled draft actions.
+
+Two compositions, split by what each genuinely needs. Intake scores incoming work against
+an evaluation profile and never contacts anything outward; the outward actions reach a
+provider and have no use for a profile, because what they send was decided and approved
+long before they run. Holding both in one object meant every caller had to supply both,
+so the draft path carried a profile it never read.
+"""
 
 from communications.controlled import parse_message
 from communications.message import Message
@@ -8,9 +15,11 @@ from recruiting.models import Profile, evaluate, fingerprint
 from recruiting.ports import DraftProvider, DraftRefused, ProviderRejected
 
 
-class Workflow:
-    def __init__(self, repository: Repository, provider: DraftProvider, profile: Profile):
-        self.repository, self.provider, self.profile = repository, provider, profile
+class Intake:
+    """Turn incoming messages into stored, scored reviews. Contacts nothing outward."""
+
+    def __init__(self, repository: Repository, profile: Profile):
+        self.repository, self.profile = repository, profile
 
     def intake_message(self, message: Message) -> list[str]:
         items = extract(message.content)
@@ -39,6 +48,13 @@ class Workflow:
             [evaluate(job, self.profile) for job in unique.values()],
             items=items,
         )
+
+
+class OutwardActions:
+    """Everything that can reach a provider. Scoring is already settled before these run."""
+
+    def __init__(self, repository: Repository, provider: DraftProvider):
+        self.repository, self.provider = repository, provider
 
     def draft(self, review_id: str) -> str | None:
         # A durable intent settles this before anything else is considered. Once an
