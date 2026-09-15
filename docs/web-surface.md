@@ -33,7 +33,11 @@ decide
 
 `record_status()` appends a status event; `decide()` records an approval or a rejection. Nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential.
 
-The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention. Widening what the browser may do therefore means editing this block deliberately, in the same change — which is the point of keeping the declaration here, next to the explanation of what these commands are, rather than duplicating a machine-readable list into every file that mentions them.
+The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention.
+
+What counts as a capability is **a write entrypoint this package invokes**, not a repository member it names. The two differ, and the difference is the whole point: the outward boundary is a service, so `OutwardActions.draft()` reaches `claim`, `finish`, `refuse` and `reject` without its caller naming any of them. A rule that looked only for members of a variable called `repository` would let this surface acquire the entire outward workflow while still declaring nothing — passing, and wrong. So the derivation is seeded from the functions that open a transaction and closed over calls, and a surface that reimplements the workflow itself is caught by the same rule, because it would name those writes directly.
+
+Widening what the browser may do therefore means editing this block deliberately, in the same change — which is the point of keeping the declaration here, next to the explanation of what these commands are, rather than duplicating a machine-readable list into every file that mentions them.
 
 **It derives no fact.** Every route hands back what a repository projection already returned. The rules were settled where the storage is; a second opinion computed at the edge is how a list and a detail pane start disagreeing about the same opportunity.
 

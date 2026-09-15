@@ -434,8 +434,8 @@ def test_windows_spelled_refusal_still_stops_the_gate(scanner, monkeypatch):
 # are, and compare it against what the code can actually do.
 
 
-REPOSITORY = Path(__file__).resolve().parents[2] / "data" / "repository.py"
-WEB = Path(__file__).resolve().parents[1] / "web"
+SOURCE = Path(__file__).resolve().parents[2]
+WEB = SOURCE / "system" / "web"
 SURFACE = Path(__file__).resolve().parents[3] / "docs" / "web-surface.md"
 MANIFEST = re.compile(r"<!--[ \t]*careersignal-web-capabilities[ \t]*\n(.*?)^-->", re.S | re.M)
 
@@ -464,26 +464,42 @@ def declared(text) -> set:
     return set(names)
 
 
-def mutations() -> set:
-    """Every Repository method that opens a write transaction, delegation included.
+def _parsed(root, skip):
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.parts or skip in path.parents or path == skip:
+            continue
+        yield ast.parse(path.read_text(encoding="utf-8"))
 
-    Derived rather than listed. A hand-maintained roster of "the write methods" is one more
-    place to forget, and forgetting there would silently narrow what this guard checks. What
-    makes a method a mutation is that it opens `transaction(...)`, so that is what is read --
-    then closed over `self.<method>()` calls, so a write that delegates to another instead of
-    opening its own is still a write here.
-    """
-    found = next(
-        node
-        for node in ast.parse(REPOSITORY.read_text(encoding="utf-8")).body
-        if isinstance(node, ast.ClassDef) and node.name == "Repository"
-    )
-    methods = {
-        node.name: node
-        for node in found.body
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+
+def _calls(node) -> set:
+    """Every method name this function calls on something -- `x.claim(...)` gives `claim`."""
+    return {
+        call.func.attr
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
     }
-    assert methods, "Repository has no methods; this guard has stopped guarding anything"
+
+
+def entrypoints(source=SOURCE, web=WEB) -> set:
+    """Every name a caller can invoke that ends in a database write.
+
+    Seeded from the functions that open `transaction(...)` and closed over calls, so a
+    method is an entrypoint when it *reaches* a write, not only when it performs one. That
+    matters because the outward boundary is a service: `OutwardActions.draft()` writes
+    through `claim`, `finish`, `refuse` and `reject` without the caller naming any of them,
+    and a derivation that only looked for repository members would let a web surface acquire
+    the whole outward workflow while still declaring nothing.
+
+    The web package itself is excluded from the scan. Its own helpers are not capabilities --
+    they are how it spends the ones it has, and counting them would ask the manifest to
+    declare an implementation detail.
+    """
+    functions = {}
+    for tree in _parsed(source, web):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                functions.setdefault(node.name, []).append(node)
+    assert functions, "no source was parsed; this guard has stopped guarding anything"
 
     def opens(node) -> bool:
         return any(
@@ -493,43 +509,40 @@ def mutations() -> set:
             for call in ast.walk(node)
         )
 
-    def calls(node) -> set:
-        return {
-            call.func.attr
-            for call in ast.walk(node)
-            if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "self"
-        }
-
-    writing = {name for name, node in methods.items() if opens(node)}
+    writing = {name for name, nodes in functions.items() if any(opens(node) for node in nodes)}
+    assert writing, "nothing opens a transaction; the seed for this closure is empty"
     while True:
-        grown = writing | {name for name, node in methods.items() if calls(node) & writing}
+        grown = writing | {
+            name
+            for name, nodes in functions.items()
+            if any(_calls(node) & writing for node in nodes)
+        }
         if grown == writing:
             return writing
         writing = grown
 
 
-def reached() -> set:
-    """Every Repository member named on a `repository` value anywhere in system.web."""
-    modules = sorted(WEB.rglob("*.py"))
+def named(web=WEB) -> set:
+    """Every member name the web package invokes, on anything.
+
+    Deliberately not restricted to a variable called `repository`. What matters is which
+    write entrypoint is reached, not which local name it was reached through -- and the
+    service that owns the outward boundary is reached through a variable called something
+    else entirely.
+    """
+    modules = sorted(web.rglob("*.py"))
     assert modules, "the web package moved and this guard stopped guarding anything"
-    names = set()
+    found = set()
     for path in modules:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "repository"
-            ):
-                names.add(node.attr)
-    return names
+            if isinstance(node, ast.Attribute):
+                found.add(node.attr)
+    return found
 
 
-def capabilities() -> set:
-    """What the browser can actually change: the reachable members that are mutations."""
-    return reached() & mutations()
+def capabilities(source=SOURCE, web=WEB) -> set:
+    """What the browser can actually change: the write entrypoints this package invokes."""
+    return named(web) & entrypoints(source, web)
 
 
 def test_the_documented_capabilities_are_the_ones_the_web_package_can_reach():
@@ -552,9 +565,24 @@ def test_the_manifest_is_not_vacuous():
     assert {"claim", "finish", "draft", "reconcile"} & capabilities() == set()
 
 
-def test_every_declared_capability_is_a_real_repository_mutation():
+def test_every_declared_capability_is_a_real_write_entrypoint():
     """A typo is not a capability. `recordstatus` names nothing and must not read as nothing."""
-    assert declared(SURFACE.read_text(encoding="utf-8")) <= mutations()
+    assert declared(SURFACE.read_text(encoding="utf-8")) <= entrypoints()
+
+
+def test_the_outward_workflow_is_an_entrypoint_even_though_it_writes_indirectly():
+    """The derivation has to follow the service, not only the repository.
+
+    `OutwardActions.draft()` and `.reconcile()` reach `claim`, `finish`, `refuse` and
+    `reject` without their caller naming any of them. If the closure stopped at repository
+    members, a web surface could acquire the entire outward workflow and still declare
+    nothing -- which is exactly the change this guard exists to force.
+    """
+    reachable = entrypoints()
+    assert {"draft", "reconcile"} <= reachable
+    assert {"claim", "finish", "refuse", "reject", "record_status", "decide"} <= reachable
+    # And they are entrypoints for the right reason: the service is where they are reached.
+    assert {"intake", "intake_message"} <= reachable
 
 
 def test_the_declaration_is_a_set_rather_than_a_formatting_convention():
@@ -603,3 +631,117 @@ def test_exactly_one_document_carries_the_declaration():
         if ".git" not in path.parts and MANIFEST.findall(path.read_text(encoding="utf-8"))
     ]
     assert carrying == [SURFACE]
+
+
+# --- the shape PR 8 will actually take ----------------------------------------------------------
+
+
+def outward_tree(root) -> tuple:
+    """A miniature of this repository's real layering, for the one case that matters.
+
+    A repository whose write opens a transaction; a service that reaches that write on the
+    caller's behalf; and a web package that uses the service, never the repository. That is
+    how the outward boundary is built here, and it is the arrangement a derivation restricted
+    to repository members cannot see through.
+    """
+    source = root / "src"
+    web = source / "system" / "web"
+    web.mkdir(parents=True)
+    (source / "data").mkdir(parents=True)
+    (source / "data" / "repository.py").write_text(
+        "class Repository:\n"
+        "    def claim(self, review):\n"
+        "        with connection(self.path) as conn, transaction(conn):\n"
+        "            conn.execute('UPDATE draft_intents SET state=?', ('claimed',))\n"
+        "\n"
+        "    def opportunities(self):\n"
+        "        with connection(self.path) as conn:\n"
+        "            return conn.execute('SELECT 1').fetchall()\n",
+        encoding="utf-8",
+    )
+    (source / "system" / "workflow.py").write_text(
+        "class OutwardActions:\n"
+        "    def __init__(self, repository, provider):\n"
+        "        self.repository, self.provider = repository, provider\n"
+        "\n"
+        "    def draft(self, review):\n"
+        "        self.provider.create(review)\n"
+        "        return self.repository.claim(review)\n",
+        encoding="utf-8",
+    )
+    return source, web
+
+
+def test_a_web_surface_that_drafts_through_the_service_is_not_invisible(tmp_path):
+    """The blocker this guard exists for, proved on the shape PR 8 will use.
+
+    The web package here names no repository write at all -- it calls `actions.draft(...)`,
+    exactly as the real outward path should be written. A derivation that looked only for
+    members of a variable called `repository` would report no new capability, leave the
+    manifest agreeing with itself, and stay green while the browser gained the power to
+    create drafts. This asserts the opposite: the capability appears, and the old manifest
+    stops matching until it is updated.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import OutwardActions\n"
+        "\n"
+        "def _draft(self, review):\n"
+        "    actions = OutwardActions(self.server.repository, self.server.provider)\n"
+        "    return actions.draft(review)\n",
+        encoding="utf-8",
+    )
+    assert "repository.claim" not in (web / "server.py").read_text(encoding="utf-8")
+
+    gained = capabilities(source, web)
+    assert gained == {"draft"}
+
+    stale = "<!-- careersignal-web-capabilities\nrecord_status\ndecide\n-->"
+    assert declared(stale) != gained, "the stale manifest still matched; the guard is blind"
+    updated = "<!-- careersignal-web-capabilities\ndraft\n-->"
+    assert declared(updated) == gained
+
+
+def test_reconciling_through_the_service_is_counted_the_same_way(tmp_path):
+    """The second outward command, which reaches only `finish`."""
+    source, web = outward_tree(tmp_path)
+    (source / "system" / "workflow.py").write_text(
+        "class OutwardActions:\n"
+        "    def __init__(self, repository, provider):\n"
+        "        self.repository, self.provider = repository, provider\n"
+        "\n"
+        "    def reconcile(self, review):\n"
+        "        found = self.provider.lookup(review)\n"
+        "        return self.repository.claim(found)\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "def _reconcile(self, review):\n    return self.server.actions.reconcile(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"reconcile"}
+
+
+def test_a_web_surface_that_reimplements_the_workflow_is_also_counted(tmp_path):
+    """The other route to the same power, closed by the same rule.
+
+    A surface that skipped the service and wrote the workflow itself would name the
+    repository's own writes. Both routes have to be visible, or the guard would merely
+    choose which way round it can be defeated.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _draft(self, review):\n    return self.server.repository.claim(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"claim"}
+
+
+def test_a_web_surface_that_only_reads_declares_nothing(tmp_path):
+    """The floor. A read is not a capability, however it is reached."""
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _list(self):\n    return self.server.repository.opportunities()\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == set()
