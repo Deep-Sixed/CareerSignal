@@ -1006,18 +1006,20 @@ def routed_only(vocabulary):
     about what a row means, which is the thing being forbidden.
     """
     for name, tree in package_modules():
-        routes = set()
-        for node in ast.walk(tree):
-            # The declared route segments: COMMAND, DECISION, OUTWARD and anything added
-            # beside them, all of which are module-level tuples of plain strings.
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
-                routes.update(map(id, ast.walk(node.value)))
-            # The router itself, where an address is matched rather than interpreted.
-            if isinstance(node, ast.Match):
-                routes.update(map(id, ast.walk(node)))
+        # The router, and nothing else. An earlier version also excused any module-level
+        # tuple of strings, on the grounds that the file declares its route segments that
+        # way -- but that would have let a queue name into any constant that happened to be
+        # a tuple, which is most of them. Matching an address is the only place one of these
+        # words is not an opinion about a row.
+        routed = {
+            id(node)
+            for match in ast.walk(tree)
+            if isinstance(match, ast.Match)
+            for node in ast.walk(match)
+        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and node.value in vocabulary:
-                assert id(node) in routes, f"{name}: {node.value!r} outside a route declaration"
+                assert id(node) in routed, f"{name}: {node.value!r} outside the command router"
 
 
 def test_the_web_package_derives_presentation_only_by_calling_views():

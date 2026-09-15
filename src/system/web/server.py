@@ -97,10 +97,11 @@ COMMAND = ("opportunities", "status")
 COMMAND_FIELDS = frozenset({"status", "reason", "expected_event_id"})
 DECISION = ("reviews", "decision")
 DECISION_FIELDS = frozenset({"approved", "expected"})
-# The two outward commands. Each names a review and carries nothing else: what a draft
-# would say was approved long before this request, and reconciliation asks the provider
-# what happened rather than telling it anything.
-OUTWARD = ("reviews", "draft", "reconcile")
+# The two outward commands carry no fields at all -- what a draft would say was approved
+# long before this request, and reconciliation asks the provider what happened rather than
+# telling it anything -- so they have no constant here. Their addresses are written out in
+# the command router, which is where this file keeps them.
+#
 # Where the operator goes next, phrased for a browser. The classification is
 # `system.outward`'s, shared with the command line, so the two surfaces cannot drift into
 # describing the same durable record differently.
