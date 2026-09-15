@@ -20,8 +20,10 @@ the tree gate and a findings payload for the secret gate, so a future edit that 
 any rule fails here rather than in review.
 """
 
+import ast
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -417,3 +419,187 @@ def test_windows_reported_finding_passes_triage(scanner, monkeypatch, capsys):
 def test_windows_spelled_refusal_still_stops_the_gate(scanner, monkeypatch):
     results = {r"docs\ui-design\CareerSignal-Mock-v2.dc.html": [{"type": HEX, "line_number": 5}]}
     assert "Secret scan requires review" in scan_result(scanner, monkeypatch, results)
+
+
+# --- the documented web capability manifest -----------------------------------------------------
+#
+# The third contract in this file, and the same shape as the two above: a claim that is
+# argued for in prose, pinned mechanically so a later edit that widens it fails here rather
+# than in review.
+#
+# Three PRs in a row shipped a capability and left a claim about it behind somewhere, because
+# a capability lands in one file and is described in several. The answer is not to duplicate a
+# machine-readable list into each of them -- that trades prose drift for manifest drift. It is
+# to name one canonical declaration, in the document that already explains what these commands
+# are, and compare it against what the code can actually do.
+
+
+REPOSITORY = Path(__file__).resolve().parents[2] / "data" / "repository.py"
+WEB = Path(__file__).resolve().parents[1] / "web"
+SURFACE = Path(__file__).resolve().parents[3] / "docs" / "web-surface.md"
+MANIFEST = re.compile(r"<!--[ \t]*careersignal-web-capabilities[ \t]*\n(.*?)^-->", re.S | re.M)
+
+
+def declared(text) -> set:
+    """The capabilities docs/web-surface.md declares, as a set.
+
+    Refuses rather than guesses. A block that is missing, duplicated, or carries anything but
+    one bare identifier per line is a broken declaration, and a broken declaration must not
+    quietly become an empty one -- an empty set would compare equal to a package that had lost
+    its capabilities, which is exactly the wrong direction to fail in.
+    """
+    blocks = MANIFEST.findall(text)
+    if not blocks:
+        raise ValueError("No careersignal-web-capabilities block")
+    if len(blocks) > 1:
+        raise ValueError(f"{len(blocks)} careersignal-web-capabilities blocks; there may be one")
+    names = [line.strip() for line in blocks[0].splitlines() if line.strip()]
+    if not names:
+        raise ValueError("The capability block is empty")
+    for name in names:
+        if not name.isidentifier():
+            raise ValueError(f"Not a capability name: {name!r}")
+    if len(set(names)) != len(names):
+        raise ValueError("The capability block repeats a name")
+    return set(names)
+
+
+def mutations() -> set:
+    """Every Repository method that opens a write transaction, delegation included.
+
+    Derived rather than listed. A hand-maintained roster of "the write methods" is one more
+    place to forget, and forgetting there would silently narrow what this guard checks. What
+    makes a method a mutation is that it opens `transaction(...)`, so that is what is read --
+    then closed over `self.<method>()` calls, so a write that delegates to another instead of
+    opening its own is still a write here.
+    """
+    found = next(
+        node
+        for node in ast.parse(REPOSITORY.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.ClassDef) and node.name == "Repository"
+    )
+    methods = {
+        node.name: node
+        for node in found.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    assert methods, "Repository has no methods; this guard has stopped guarding anything"
+
+    def opens(node) -> bool:
+        return any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "transaction"
+            for call in ast.walk(node)
+        )
+
+    def calls(node) -> set:
+        return {
+            call.func.attr
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "self"
+        }
+
+    writing = {name for name, node in methods.items() if opens(node)}
+    while True:
+        grown = writing | {name for name, node in methods.items() if calls(node) & writing}
+        if grown == writing:
+            return writing
+        writing = grown
+
+
+def reached() -> set:
+    """Every Repository member named on a `repository` value anywhere in system.web."""
+    modules = sorted(WEB.rglob("*.py"))
+    assert modules, "the web package moved and this guard stopped guarding anything"
+    names = set()
+    for path in modules:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "repository"
+            ):
+                names.add(node.attr)
+    return names
+
+
+def capabilities() -> set:
+    """What the browser can actually change: the reachable members that are mutations."""
+    return reached() & mutations()
+
+
+def test_the_documented_capabilities_are_the_ones_the_web_package_can_reach():
+    """The contract, in one line, compared in both directions.
+
+    A capability the code gains without being declared fails here, and a capability declared
+    without the code being able to reach it fails here too. Either way the failure lands in
+    the change that caused it rather than three PRs later.
+    """
+    assert declared(SURFACE.read_text(encoding="utf-8")) == capabilities()
+
+
+def test_the_manifest_is_not_vacuous():
+    """Stated separately, because an equality of two empty sets would also pass.
+
+    If the derivation ever stopped finding anything -- a moved package, a renamed helper --
+    the test above would go green while proving nothing at all.
+    """
+    assert capabilities() == {"record_status", "decide"}
+    assert {"claim", "finish", "draft", "reconcile"} & capabilities() == set()
+
+
+def test_every_declared_capability_is_a_real_repository_mutation():
+    """A typo is not a capability. `recordstatus` names nothing and must not read as nothing."""
+    assert declared(SURFACE.read_text(encoding="utf-8")) <= mutations()
+
+
+def test_the_declaration_is_a_set_rather_than_a_formatting_convention():
+    """Order is not part of the contract, and neither is surrounding blank space."""
+    block = "<!-- careersignal-web-capabilities\n{}\n-->"
+    assert declared(block.format("decide\nrecord_status")) == {"record_status", "decide"}
+    assert declared(block.format("  record_status  \n\n\tdecide\t")) == {"record_status", "decide"}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    (
+        "nothing here at all",
+        "<!-- careersignal-web-capabilities\n-->",
+        "<!-- careersignal-web-capabilities\n\n  \n-->",
+        "<!-- careersignal-web-capabilities\nrecord_status\nrecord_status\n-->",
+        "<!-- careersignal-web-capabilities\nrecord status\n-->",
+        "<!-- careersignal-web-capabilities\nrecord_status()\n-->",
+        "<!-- careersignal-web-capabilities\n- record_status\n-->",
+        "<!-- careersignal-web-capabilities\ndecide\n-->\n<!-- careersignal-web-capabilities\ndecide\n-->",
+    ),
+)
+def test_a_broken_declaration_is_refused_rather_than_read_as_empty(broken):
+    with pytest.raises(ValueError):
+        declared(broken)
+
+
+def test_the_frozen_design_baseline_declares_nothing():
+    """`docs/ui-design/` is the accepted design as accepted, and is never edited.
+
+    It must not acquire a manifest, and this guard must never read one from it: the canonical
+    declaration is one document, and a second copy anywhere is the drift this exists to stop.
+    """
+    frozen = Path(__file__).resolve().parents[3] / "docs" / "ui-design"
+    for path in sorted(frozen.rglob("*")):
+        if path.is_file():
+            assert not MANIFEST.findall(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def test_exactly_one_document_carries_the_declaration():
+    """One canonical place, mechanically. A second block anywhere is a second source of truth."""
+    root = Path(__file__).resolve().parents[3]
+    carrying = [
+        path
+        for path in sorted(root.rglob("*.md"))
+        if ".git" not in path.parts and MANIFEST.findall(path.read_text(encoding="utf-8"))
+    ]
+    assert carrying == [SURFACE]

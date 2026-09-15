@@ -6,8 +6,10 @@ HEAD, and POST at exactly two addresses, and refuses every other method before r
 
 One command appends a status event; the other records a decision. Everything else it
 reaches is a read projection: no intake, no claim, no draft, no reconciliation, no provider
-and no credential. A test fails the build if that changes -- the only repository mutations
-any module in this package may name are `record_status` and `decide`.
+and no credential. What this package may change is declared once, in `docs/web-surface.md`,
+and a test compares that declaration against this package's own syntax tree -- so widening it
+means saying so there, in the same change, rather than discovering later that the code and
+the documentation stopped agreeing.
 
 An approval is recorded only while the packet it was read from still holds. The comparison
 is `decide()`'s, inside its own write transaction; nothing here re-implements it, because a

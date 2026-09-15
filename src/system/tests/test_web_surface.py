@@ -2124,3 +2124,60 @@ def test_the_expectation_the_packet_carries_is_the_one_the_binding_was_read_from
     current = repository.authorization(record["review"])
     assert bound["expected"] == {field: current[field] for field in bound["expected"]}
     assert bound["expected"]["status_event_id"] == record["status_event"]
+
+
+# --- what `serve --help` tells an operator ------------------------------------------------------
+
+
+def helped(monkeypatch, capsys, *arguments) -> str:
+    """What argparse prints under `options:`, wrapping flattened so a claim reads whole.
+
+    The usage line is dropped deliberately. It repeats every flag name, so slicing on one
+    there finds a bracketed placeholder rather than the sentence being checked -- which is
+    what the first version of this helper did.
+    """
+    monkeypatch.setattr("sys.argv", ["careersignal", *arguments])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 0
+    printed = capsys.readouterr().out
+    return " ".join(printed[printed.index("options:") :].split())
+
+
+def flag(text, name, next_name) -> str:
+    """One option's help, bounded by the option that follows it."""
+    section = text[text.index(name) :]
+    return section[: section.index(next_name)]
+
+
+def test_serve_help_distinguishes_declaring_a_destination_from_writing_to_it(monkeypatch, capsys):
+    """The one security-significant distinction in this help, pinned on purpose.
+
+    `--provider gmail` means two different things at two different commands. At `draft` it
+    creates a real draft in a real mailbox. At `serve` it only names the mailbox an approval
+    would authorize -- nothing is sent, nothing is composed, and no compose credential is
+    needed. An operator reading `serve --help` and concluding that launching the browser can
+    create a draft would have exactly the wrong model of what they just started.
+
+    Only this distinction is pinned, not the whole of argparse's output: a snapshot of every
+    string would fail on an unrelated rewording and teach the next person to re-record it
+    without reading it, which is how a guard stops being one.
+
+    PR 8 will invalidate this deliberately, when `serve` gains outward draft authority. That
+    is the point: the help and this test then have to change together, in that change, rather
+    than leaving yesterday's claim behind for review to find.
+    """
+    provider = flag(helped(monkeypatch, capsys, "serve", "--help"), "--provider", "--message")
+    # What it does at draft, and what it does not do here.
+    assert "creates a real draft" in provider
+    assert "for serve only names that mailbox" in provider
+    assert "serve writes nothing to Gmail and needs no compose token" in provider
+    # And the flag is never the default, at either command.
+    assert "Never the default" in provider
+
+
+def test_serve_help_says_where_an_approval_recorded_in_the_browser_would_point(monkeypatch, capsys):
+    """`--mailbox` is what turns the declaration into a specific destination."""
+    mailbox = flag(helped(monkeypatch, capsys, "serve", "--help"), "--mailbox", "--query")
+    assert "approve/serve" in mailbox
+    assert "where an approval says a draft may go" in mailbox

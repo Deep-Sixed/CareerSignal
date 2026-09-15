@@ -24,7 +24,16 @@ The surface is confined by construction rather than by configuration, so each of
 
 **It answers `GET`, `HEAD` and two `POST` addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly two addresses, each written out beside the reads rather than registered in a router that would accept a third the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
 
-**It reaches read projections and two mutations.** `record_status()` and `decide()`, and nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential. A test reads the package's own syntax tree and asserts the set of non-read repository members it touches is exactly `{record_status, decide}` — stated positively, so the guard says what the browser *can* do rather than only what it cannot, and against a literal, so widening it means editing the guard too.
+**It reaches read projections, and the mutations declared below.** This block is the canonical statement of what the browser may change, and it is not prose — a test parses it and compares it against what the package's own syntax tree proves it can reach:
+
+<!-- careersignal-web-capabilities
+record_status
+decide
+-->
+
+`record_status()` appends a status event; `decide()` records an approval or a rejection. Nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential.
+
+The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention. Widening what the browser may do therefore means editing this block deliberately, in the same change — which is the point of keeping the declaration here, next to the explanation of what these commands are, rather than duplicating a machine-readable list into every file that mentions them.
 
 **It derives no fact.** Every route hands back what a repository projection already returned. The rules were settled where the storage is; a second opinion computed at the edge is how a list and a detail pane start disagreeing about the same opportunity.
 
