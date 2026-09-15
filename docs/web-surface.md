@@ -1,4 +1,4 @@
-# The local read surface
+# The local surface
 
 CareerSignal's first surface that listens on a socket. It reads, and it records a status. It decides no review, creates no draft, and contacts no mailbox: approving, drafting and reconciling are still command-line actions.
 
@@ -192,4 +192,8 @@ The active evaluation profile. The session panel reports only facts that are aut
 
 `.eml` ingestion and the Gmail label read, which are write affordances and belong with intake.
 
-Write authority. Approving a review, recording a status, creating a draft and reconciling one remain command-line actions. They arrive on this surface only with the operator write path that is designed for them — including the approval binding an operator's screen has to carry — and not as a side effect of being able to see things in a browser.
+Approval and outward authority. Approving a review, creating a draft and reconciling one remain command-line actions. Recording a status is the one exception, and it is an exception on purpose: status is authority over the opportunity, which the operator already holds, and it carries the event it was decided against. Approving is authority over what leaves the machine. Each arrives here only with the write path designed for it, and not as a side effect of being able to see things in a browser.
+
+**When approval does arrive, its controls stay anchored to the approval packet.** The operator acts against the binding they were shown — the review version, its digests, what the packet says is true now — not against a row they happened to select. That rules out a generic toolbar of verbs hovering over the current selection, however convenient: a button that is always present has no particular state behind it, and an approval that cannot name what it was decided against is the failure `decide(expected=…)` exists to prevent. Status can sit in the opportunity header precisely because it is not approval authority; approval cannot.
+
+A readable database path. `/session` reports the path in full and the panel prints it in full, so a long one is the widest thing on the screen and pushes the layout around. The fix is to shorten it **in the middle**, keeping the start and the filename, since those are the parts that identify which database is open — and to keep the whole value reachable, as a title attribute and as selectable text, because a path the operator cannot read back is a fact the panel only appears to report. The truncation is presentation alone: the projection keeps serving the real value, and nothing downstream reads the shortened form.
