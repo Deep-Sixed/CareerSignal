@@ -387,8 +387,8 @@ class Repository:
             "provider_namespace": decision[5] or None if decision else None,
         }
 
-    @staticmethod
-    def _bound(review_id, binding) -> dict | None:
+    @classmethod
+    def _bound(cls, review_id, binding) -> dict | None:
         """Exactly the material an approval binds, read the way the approval reads it.
 
         Deliberately built from _binding(), the same statement decide() and claim() bind
@@ -401,6 +401,13 @@ class Repository:
         carries a copy of it, written from the same value at intake, but the copy is not
         what the approval's draft digest is taken over.
 
+        `expected` is the four facts decide() compares, taken from this same binding object
+        -- not read again. That is the whole point of it being here: a caller that renders
+        this packet and then fetches the expectation separately would be naming facts from
+        a moment it never showed anyone, which is the window an approval's expectation
+        exists to close. Attached here, whatever an operator acted on is exactly what they
+        can hand back.
+
         Returns None when the opportunity has no current review, which is also when there
         is nothing an approval could bind.
         """
@@ -412,6 +419,7 @@ class Repository:
             "to": binding["addressing"]["to"],
             "subject": binding["addressing"]["subject"],
             "wording": binding["draft"],
+            "expected": cls._expectation(binding),
         }
 
     def opportunity(self, opportunity_id) -> dict:

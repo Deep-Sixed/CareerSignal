@@ -424,7 +424,7 @@ def test_the_attention_copy_points_at_the_evidence_instead_of_guessing():
 # --- one implementation of what the state means -------------------------------------------------
 
 
-DECLARATIONS = ("QUEUE_LABELS", "QUEUE_HINTS", "ATTENTION", "APPROVAL_QUEUES")
+DECLARATIONS = ("QUEUE_LABELS", "QUEUE_HINTS", "ATTENTION", "APPROVAL_QUEUES", "DECISION_CONTROLS")
 
 
 def without_declarations(body) -> str:
@@ -502,3 +502,76 @@ def test_the_frontend_asks_for_the_rendered_strings_rather_than_the_parts():
         "presentation.attempt",
     ):
         assert supplied in body, supplied
+
+
+# --- the expectation is the one that was rendered -----------------------------------------------
+
+
+def test_the_expectation_sent_is_the_one_the_packet_rendered():
+    """The correction the PR contract turns on, asserted structurally.
+
+    Rendering the packet from one read and fetching its expectation from another would
+    reopen the exact window `decide(expected=...)` closes: the four facts posted back would
+    describe a moment the operator was never shown. So the control hands over
+    `bound.expected` -- a property of the same object whose recipient, subject and wording
+    are rendered beside it -- and there is no second read anywhere in that path.
+    """
+    screens = code(STATIC / "screens.js")
+    decision = region(screens, "function decisionAction(", "\nfunction statusAction(")
+    # The one thing handed to the action, read off the packet being displayed.
+    assert "actions.decide(bound.review, true, bound.expected)" in decision
+    assert "bound.expected" in decision
+    # The same object the visible fields come from, so the two cannot describe two moments.
+    assert "const bound = record.bound;" in decision
+    for elsewhere in ("api.", "fetch(", "authorization", "await "):
+        assert elsewhere not in decision, f"the decision control reaches {elsewhere}"
+
+
+def test_the_decision_sends_the_expectation_unchanged_and_never_rebuilds_one():
+    """No field of the expectation is named in the browser's write path.
+
+    A path that assembled `{content_digest: ..., ...}` could assemble it from anything --
+    including a fresher read -- and the server would accept it, because a well-formed
+    expectation is exactly what it is waiting for. The only safe shape is to pass through
+    the object that was rendered, so naming a field at all is the thing to forbid.
+    """
+    app = code(STATIC / "app.js")
+    decide = region(app, "  decide(review, approved, expected) {", "\n  openCommunication(")
+    assert "api.decide(review, approved ? { approved, expected } : { approved })" in decide
+    for field in ("content_digest", "draft_digest", "addressing_digest", "status_event_id"):
+        assert field not in app, f"app.js names {field}; an expectation is being assembled"
+    for field in ("content_digest", "draft_digest", "addressing_digest", "status_event_id"):
+        assert field not in code(STATIC / "api.js"), f"api.js names {field}"
+
+
+def test_the_browser_re_reads_after_a_decision_and_never_resubmits_it():
+    """Success and refusal alike, and the refusal is never retried against the newer packet.
+
+    Retrying would approve a packet nobody read, which is precisely what the expectation
+    exists to prevent -- the browser would be laundering a stale decision into a fresh one.
+    """
+    app = code(STATIC / "app.js")
+    decide = region(app, "  decide(review, approved, expected) {", "\n  openCommunication(")
+    assert "await reload();" in decide
+    assert "await opportunityDetail(id" in decide
+    # One send, so no branch resubmits.
+    assert decide.count("api.decide(") == 1
+    # Nothing local is patched into the state the engine owns.
+    for patched in ("state.opportunities[", "row.presentation", ".queue =", ".decision ="):
+        assert patched not in decide, f"the decision patches {patched} locally"
+
+
+def test_the_decision_controls_offer_nothing_the_queue_does_not_name():
+    """Which controls exist is looked up, not decided.
+
+    `views.queue()` owns that precedence and is mutation-tested in Python. A browser that
+    worked out for itself whether an approval still binds would be a second implementation
+    of the rule, and the list and the detail pane would drift apart on the first change.
+    """
+    screens = code(STATIC / "screens.js")
+    decision = region(screens, "function decisionAction(", "\nfunction statusAction(")
+    assert "DECISION_CONTROLS[record.presentation.queue]" in decision
+    for derived in (".binds", "action.decision", "advances", "TERMINAL", "attempted"):
+        assert derived not in decision, f"the decision control derives from {derived}"
+    # A queue the table does not name offers nothing, rather than falling through to a default.
+    assert "if (!bound || !target || !offered)" in decision

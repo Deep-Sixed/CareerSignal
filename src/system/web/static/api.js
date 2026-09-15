@@ -88,5 +88,10 @@ export function connect(credential) {
     statuses: () => ask("/statuses"),
     recordStatus: (id, payload) =>
       send(`/opportunities/${part(id)}/status`, credential, payload),
+    /* The caller hands over the expectation it was rendering, unchanged. Nothing here
+     * assembles one, and there is no second read to assemble it from: an expectation built
+     * anywhere but the packet on screen would name a moment nobody was shown. */
+    decide: (review, payload) =>
+      send(`/reviews/${part(review)}/decision`, credential, payload),
   };
 }

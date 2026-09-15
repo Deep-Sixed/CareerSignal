@@ -21,6 +21,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -639,6 +640,13 @@ def test_the_session_facts_report_presence_and_never_a_credential(client, monkey
         "database",
         "gmail_token",
         "gmail_compose_token",
+        "decision_target",
+    }
+    # A name, never a credential: the default launch declares the local provider, and the
+    # token set above must not appear anywhere in the target it reports.
+    assert body["decision_target"] == {
+        "provider": "controlled",
+        "provider_namespace": "controlled",
     }
 
 
@@ -1179,12 +1187,19 @@ def test_no_header_or_field_can_name_the_actor(client, repository, opportunity):
     assert history(repository, opportunity)[-1]["actor"] == "operator"
     # Stated once in the source, as a constant, so there is one place to read the answer.
     assert web.OPERATOR == "operator"
-    recorded = [
+    # Every actor this package names, not a count of them. A count has to be edited each
+    # time a command is added, and editing it is exactly how a supplied actor would get in:
+    # the number would go up either way. This says what the rule actually is, so a write
+    # that named anything else fails here however many writes there are.
+    supplied = [
         node
         for name, node in nodes(ast.keyword)
-        if node.arg == "actor" and _named(node.value, "OPERATOR")
+        if node.arg == "actor" and not _named(node.value, "OPERATOR")
     ]
-    assert len(recorded) == 1, "the actor is no longer the module's own constant"
+    assert not supplied, "an actor is coming from somewhere other than the module constant"
+    assert [node for name, node in nodes(ast.keyword) if node.arg == "actor"], (
+        "no actor is named at all; this guard has stopped guarding anything"
+    )
 
 
 def test_a_command_appends_and_says_what_it_appended(client, repository, opportunity):
@@ -1519,10 +1534,11 @@ PERMITTED_READS = frozenset(
         "path",
     }
 )
-# The one repository mutation this package may reach. Everything an operator can change
-# from the browser goes through it, so the list of what the browser can do to the database
-# is this line.
-PERMITTED_WRITES = frozenset({"record_status"})
+# The repository mutations this package may reach. Everything an operator can change from
+# the browser goes through one of these, so the list of what the browser can do to the
+# database is this line. It grew from {"record_status"} in #31 to admit `decide` and
+# nothing else: creating a draft, reconciling one and every provider call stay below.
+PERMITTED_WRITES = frozenset({"record_status", "decide"})
 # Names that decide, contact a provider, or carry a credential -- and every other mutation.
 # None may appear anywhere in this package, as a call, an attribute or an import.
 FORBIDDEN_NAMES = frozenset(
@@ -1534,7 +1550,6 @@ FORBIDDEN_NAMES = frozenset(
         "GmailCredentials",
         "GmailComposeCredentials",
         "ControlledDrafts",
-        "decide",
         "claim",
         "finish",
         "refuse",
@@ -1573,17 +1588,22 @@ def test_the_package_reaches_exactly_one_write_and_no_second_business_layer():
                 assert node.id not in FORBIDDEN_NAMES, f"{name}: {node.id}"
 
 
-def test_the_only_mutation_the_package_reaches_is_the_status_append():
+def test_the_only_mutations_the_package_reaches_are_the_append_and_the_decision():
     """Stated positively, so the guard says what the browser can do rather than only what
     it cannot. Every other way to change the database is in FORBIDDEN_NAMES above; this
-    asserts the one that is left is the one the contract names, and that it is still used.
+    asserts the ones that are left are the ones the contract names, and that both are used.
+
+    Written as an equality against a literal rather than against PERMITTED_WRITES alone, so
+    widening the capability means editing this line too. A guard that reads its own
+    expectation from the same constant the code was changed to satisfy would let the next
+    mutation in quietly.
     """
     reached = {
         node.attr
         for name, node in nodes(ast.Attribute)
         if _named(node.value, "repository") and node.attr not in PERMITTED_READS
     }
-    assert reached == PERMITTED_WRITES == {"record_status"}, reached
+    assert reached == PERMITTED_WRITES == {"record_status", "decide"}, reached
 
 
 def test_the_package_imports_no_behaviour_from_the_communications_layer():
@@ -1634,7 +1654,13 @@ def invoke(monkeypatch, *arguments):
     what the surface does with them is the rest of this file.
     """
     served = []
-    monkeypatch.setattr(cli, "serve", lambda repository, *, port: served.append((repository, port)))
+    monkeypatch.setattr(
+        cli,
+        "serve",
+        lambda repository, *, port, provider, provider_namespace: served.append(
+            (repository, port, provider, provider_namespace)
+        ),
+    )
     monkeypatch.setattr("sys.argv", ["careersignal", *arguments])
     cli.main()
     return served
@@ -1643,8 +1669,11 @@ def invoke(monkeypatch, *arguments):
 def test_the_command_serves_the_named_database_on_the_named_port(monkeypatch, capsys, tmp_path):
     served = invoke(monkeypatch, "serve", "--db", str(tmp_path / "db"), "--port", "9999")
     assert len(served) == 1
-    repository, port = served[0]
+    repository, port, provider, namespace = served[0]
     assert (repository.path, port) == (store.database_path(tmp_path / "db"), 9999)
+    # The destination an approval would name, defaulted rather than inferred: the external
+    # provider is never chosen implicitly, here or anywhere else.
+    assert (provider, namespace) == ("controlled", "controlled")
     # No JSON report: this command has no operator decision in it and blocks rather than
     # returning an outcome, so it must not fall through to the pipeline commands' print.
     assert capsys.readouterr().out == ""
@@ -1661,3 +1690,437 @@ def test_the_command_records_nothing(monkeypatch, capsys, repository):
     invoke(monkeypatch, "serve", "--db", str(repository.path))
     assert state(repository) == before
     capsys.readouterr()
+
+
+# --- the packet-bound decision ------------------------------------------------------------------
+
+
+TARGET = ("gmail", "gmail:operator@example.com")
+
+
+@pytest.fixture
+def addressed(repository):
+    """A surface launched with a declared Gmail destination and no compose credential.
+
+    The pairing is the point. Approving names where a draft may go; it has never needed the
+    ability to reach it, and a surface that could only record approvals once a credential
+    was configured would make the safe half of the workflow depend on the unsafe half.
+    """
+    running = web.Surface(repository, port=0, provider=TARGET[0], provider_namespace=TARGET[1])
+    thread = threading.Thread(target=running.serve_forever, kwargs={"poll_interval": 0.02})
+    thread.daemon = True
+    thread.start()
+    try:
+        yield running
+    finally:
+        running.shutdown()
+        running.server_close()
+        thread.join(timeout=10)
+
+
+def review_of(repository, opportunity):
+    return repository.opportunity(opportunity)["review"]
+
+
+def packet(repository, opportunity) -> dict:
+    """The expectation exactly as the detail read reports it, which is what a browser holds."""
+    return repository.opportunity(opportunity)["bound"]["expected"]
+
+
+def decisions(repository) -> dict:
+    """Every decision and every audit event, so a refusal that wrote something is visible."""
+    return {
+        "actions": {
+            row["id"]: repository.opportunity(row["id"])["action"]
+            for row in repository.opportunities()
+        },
+        "audit": [event for event in repository.timeline() if event["kind"] == "audit"],
+    }
+
+
+def decide(client, review, payload, **kwargs):
+    settings = {
+        "method": "POST",
+        "origin": True,
+        "content_type": "application/json",
+        "body": json.dumps(payload).encode("utf-8"),
+    } | kwargs
+    status, body, _ = client.send(f"/api/v1/reviews/{part(review)}/decision", **settings)
+    return status, json.loads(body)
+
+
+def part(value) -> str:
+    return quote(str(value), safe="")
+
+
+def test_an_approval_against_the_visible_packet_is_recorded_with_the_launch_destination(
+    addressed, repository, opportunity
+):
+    """The straightforward case, and the one every refusal below is measured against."""
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    status, body = decide(
+        client, review, {"approved": True, "expected": packet(repository, opportunity)}
+    )
+    assert status == 200
+    assert body == {
+        "review": review,
+        "approved": True,
+        "actor": "operator",
+        "provider": TARGET[0],
+        "provider_namespace": TARGET[1],
+    }
+    action = repository.opportunity(opportunity)["action"]
+    assert (action["decision"], action["actor"], action["binds"]) == ("approved", "operator", True)
+    # The destination came from the launch, not from anything the caller could name.
+    assert (action["provider"], action["provider_namespace"]) == TARGET
+
+
+def test_a_later_message_between_reading_the_packet_and_approving_it_refuses_the_approval(
+    addressed, repository, opportunity
+):
+    """The race this whole design exists to close.
+
+    The operator reads a packet, a message arrives that moves where a draft would be
+    addressed, and the approval they then record would bind an address nobody ever saw --
+    while every digest they *did* see still matched. The expectation they hand back is what
+    makes that detectable, and `decide()` compares it inside the write transaction.
+    """
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    held = packet(repository, opportunity)
+    before = decisions(repository)
+
+    Intake(repository, Profile(("python", "sql"))).intake_message(
+        alert(sender="someone.else@example.net", external_id="m2")
+    )
+    assert packet(repository, opportunity)["addressing_digest"] != held["addressing_digest"]
+
+    status, body = decide(client, review, {"approved": True, "expected": held})
+    assert status == 409
+    assert body["error"] == "binding_conflict"
+    # What moved, named: "something changed" is not enough to decide against.
+    moved = [
+        field for field in body["observed"] if body["expected"][field] != body["observed"][field]
+    ]
+    assert moved == ["addressing_digest"]
+    # Nothing was written -- no decision row and no audit event.
+    assert decisions(repository) == before
+
+
+def test_a_status_event_between_reading_the_packet_and_approving_it_refuses_the_approval(
+    addressed, repository, opportunity
+):
+    """The same rule, moved by the other ledger.
+
+    An approval binds the status event it was read against, so an opportunity the operator
+    has since moved is not one they can approve from the screen that predates the move.
+    """
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    held = packet(repository, opportunity)
+    before = decisions(repository)
+
+    repository.record_status(opportunity, "interested", actor="operator", reason="")
+    status, body = decide(client, review, {"approved": True, "expected": held})
+    assert status == 409 and body["error"] == "binding_conflict"
+    moved = [
+        field for field in body["observed"] if body["expected"][field] != body["observed"][field]
+    ]
+    assert moved == ["status_event_id"]
+    assert body["observed"]["status_event_id"] == held["status_event_id"] + 1
+    assert decisions(repository) == before
+
+
+def test_a_rejection_needs_no_packet_even_after_the_packet_has_moved(
+    addressed, repository, opportunity
+):
+    """The asymmetry, stated as behaviour.
+
+    A rejection binds nothing and authorizes nothing. Demanding a fresh packet to record
+    one would put the safest action an operator can take behind the same precondition as
+    the riskiest -- which is backwards where it matters most.
+    """
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    Intake(repository, Profile(("python", "sql"))).intake_message(
+        alert(sender="someone.else@example.net", external_id="m2")
+    )
+    status, body = decide(client, review, {"approved": False})
+    assert status == 200
+    assert body == {"review": review, "approved": False, "actor": "operator"}
+    # No destination is reported, because a rejection authorizes none.
+    assert "provider" not in body
+    assert repository.opportunity(opportunity)["action"]["decision"] == "rejected"
+
+
+def test_an_approval_without_its_expectation_is_refused(addressed, repository, opportunity):
+    """Not defaulted to "whatever is current": that is the unbound write this route excludes."""
+    client = Client(addressed)
+    before = decisions(repository)
+    status, body = decide(client, review_of(repository, opportunity), {"approved": True})
+    assert status == 400
+    assert "expectation" in body["error"]
+    assert decisions(repository) == before
+
+
+def test_a_rejection_carrying_an_expectation_is_refused_rather_than_ignored(
+    addressed, repository, opportunity
+):
+    """Refused, because a caller that sent one believed it was being honoured.
+
+    Silently dropping it would record a decision on terms the caller did not ask for, and
+    the caller would have no way to discover that its precondition was never applied.
+    """
+    client = Client(addressed)
+    before = decisions(repository)
+    status, body = decide(
+        client,
+        review_of(repository, opportunity),
+        {"approved": False, "expected": packet(repository, opportunity)},
+    )
+    assert status == 400
+    assert "binds nothing" in body["error"]
+    assert decisions(repository) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        {"actor": "somebody else"},
+        {"provider": "gmail"},
+        {"provider_namespace": "gmail:attacker@example.net"},
+        {"mailbox": "attacker@example.net"},
+    ),
+)
+def test_the_browser_cannot_name_the_actor_or_the_destination(
+    addressed, repository, opportunity, extra
+):
+    """Refused as unknown fields, so none of them can be quietly honoured or quietly dropped.
+
+    The destination is a launch fact for the same reason the actor is: a page that could
+    name where an approval points could point it somewhere the operator never chose.
+    """
+    client = Client(addressed)
+    before = decisions(repository)
+    status, body = decide(
+        client,
+        review_of(repository, opportunity),
+        {"approved": True, "expected": packet(repository, opportunity), **extra},
+    )
+    assert status == 400
+    assert body["error"].startswith("Unknown field")
+    assert decisions(repository) == before
+
+
+def test_an_approval_is_recorded_with_no_compose_credential_in_the_environment(
+    addressed, repository, opportunity, monkeypatch
+):
+    """Declaring a destination is not the same as being able to reach it.
+
+    `careersignal serve --provider gmail --mailbox ...` names where an approval points.
+    Requiring a working compose token to record one would tie the operator's decision to
+    whether a network client could be constructed, which approving has never needed.
+    """
+    monkeypatch.delenv(COMPOSE_TOKEN_VARIABLE, raising=False)
+    client = Client(addressed)
+    status, body = client.json("/api/v1/session")
+    assert status == 200
+    assert body["gmail_compose_token"] is False
+    assert body["decision_target"] == {"provider": TARGET[0], "provider_namespace": TARGET[1]}
+    status, _ = decide(
+        client,
+        review_of(repository, opportunity),
+        {"approved": True, "expected": packet(repository, opportunity)},
+    )
+    assert status == 200
+    assert repository.opportunity(opportunity)["action"]["provider_namespace"] == TARGET[1]
+
+
+def test_a_decision_locked_behind_a_draft_intent_is_a_conflict_not_a_bad_request(
+    addressed, repository, opportunity
+):
+    """A forged POST reaches the same refusal the screen declines to offer.
+
+    The browser shows no decision control once a draft has been attempted, but the control
+    is presentation: what actually holds the line is `decide()`, and a request that skips
+    the page entirely still gets the state's answer rather than a write.
+    """
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    assert (
+        decide(client, review, {"approved": True, "expected": packet(repository, opportunity)})[0]
+        == 200
+    )
+    # Claimed for the destination the approval actually names, so the intent exists for
+    # the right reason rather than because the provider disagreed.
+    repository.claim(review, provider=TARGET[0], provider_namespace=TARGET[1])
+    before = decisions(repository)
+    status, body = decide(
+        client, review, {"approved": True, "expected": packet(repository, opportunity)}
+    )
+    # A well-formed request the state refuses: not a malformed body, and not a moved packet.
+    assert status == 409
+    assert body["error"] == "decision_refused"
+    assert "reconciliation" in body["detail"]
+    assert decisions(repository) == before
+
+
+def test_the_decision_address_is_as_singular_as_the_status_address(
+    addressed, repository, opportunity
+):
+    """The path rules established in #31 are the router's, not one route's."""
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    payload = json.dumps({"approved": True, "expected": packet(repository, opportunity)}).encode(
+        "utf-8"
+    )
+    before = decisions(repository)
+    for path in (
+        f"/abcdef/reviews/{part(review)}/decision",
+        f"/api/v2/reviews/{part(review)}/decision",
+        f"/api/v1//reviews/{part(review)}/decision",
+        f"/api/v1/reviews//{part(review)}/decision",
+        f"/api/v1/reviews/{part(review)}/decision/",
+        f"/api/v1/reviews/{part(review)}/decisions",
+    ):
+        assert client.unread(
+            path, method="POST", origin=True, content_type="application/json", body=payload
+        ) in (405, None), path
+    assert client.unread(
+        f"http://{addressed.authority}/api/v1/reviews/{part(review)}/decision",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=payload,
+    ) in (400, None)
+    assert decisions(repository) == before
+
+
+def test_a_decision_needs_the_same_provenance_every_command_needs(
+    addressed, repository, opportunity
+):
+    """Host, Origin and token, settled before the body is read, exactly as for a status."""
+    client = Client(addressed)
+    review = review_of(repository, opportunity)
+    body = json.dumps({"approved": True, "expected": packet(repository, opportunity)}).encode()
+    before = decisions(repository)
+    sent = {"method": "POST", "content_type": "application/json", "body": body}
+    assert client.unread(
+        f"/api/v1/reviews/{part(review)}/decision", origin=True, token=False, **sent
+    ) in (401, None)
+    assert client.unread(f"/api/v1/reviews/{part(review)}/decision", **sent) in (403, None)
+    assert client.unread(
+        f"/api/v1/reviews/{part(review)}/decision", origin="http://evil.example.com", **sent
+    ) in (403, None)
+    assert client.unread(
+        f"/api/v1/reviews/{part(review)}/decision", origin=True, host="evil.example.com", **sent
+    ) in (403, None)
+    assert decisions(repository) == before
+
+
+def test_an_unknown_review_is_a_404_before_the_repository_is_asked_to_decide(addressed, repository):
+    """Absence and staleness stay distinguishable, the same rule the read routes follow."""
+    client = Client(addressed)
+    status, body = decide(client, "no-such-review", {"approved": False})
+    assert status == 404
+    assert body == {"error": "No record with that id"}
+
+
+def test_an_oversized_decision_is_refused_on_what_it_declares(addressed, repository, opportunity):
+    client = Client(addressed)
+    status, body, _ = client.send(
+        f"/api/v1/reviews/{part(review_of(repository, opportunity))}/decision",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=b'{"approved": false}',
+        length=web.MAX_BODY + 1,
+    )
+    assert status == 413
+    assert str(web.MAX_BODY) in json.loads(body)["error"]
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        {"approved": "yes", "expected": {}},
+        {"approved": 1, "expected": {}},
+        {"approved": None},
+        {"expected": {}},
+        {"approved": True, "expected": "digest"},
+        {"approved": True, "expected": []},
+        {"approved": True, "expected": {"content_digest": "a"}},
+        {
+            "approved": True,
+            "expected": {
+                "content_digest": "a",
+                "draft_digest": "b",
+                "addressing_digest": "c",
+                "status_event_id": True,
+            },
+        },
+        {
+            "approved": True,
+            "expected": {
+                "content_digest": "a",
+                "draft_digest": "b",
+                "addressing_digest": "c",
+                "status_event_id": "1",
+            },
+        },
+        {
+            "approved": True,
+            "expected": {
+                "content_digest": 1,
+                "draft_digest": "b",
+                "addressing_digest": "c",
+                "status_event_id": 1,
+            },
+        },
+        {
+            "approved": True,
+            "expected": {
+                "content_digest": "a",
+                "draft_digest": "b",
+                "addressing_digest": "c",
+                "status_event_id": 1,
+                "extra": "x",
+            },
+        },
+    ),
+)
+def test_a_malformed_decision_is_refused_before_anything_is_decided(
+    addressed, repository, opportunity, malformed
+):
+    """Shape only. What the values *mean* is decide()'s, inside the transaction."""
+    client = Client(addressed)
+    before = decisions(repository)
+    status, _ = decide(client, review_of(repository, opportunity), malformed)
+    assert status == 400, malformed
+    assert decisions(repository) == before
+
+
+def test_the_expectation_the_packet_carries_is_the_one_the_binding_was_read_from(repository):
+    """The projection change this PR turns on, asserted where it is made.
+
+    `bound` and `expected` come from one `_binding()` snapshot. If `expected` were read
+    again -- by a second query, or by a second HTTP call -- it could name a moment the
+    packet beside it never showed, which is the window the expectation exists to close.
+    """
+    record = repository.opportunity(repository.opportunities()[0]["id"])
+    bound = record["bound"]
+    assert set(bound) == {"review", "source", "to", "subject", "wording", "expected"}
+    assert set(bound["expected"]) == {
+        "content_digest",
+        "draft_digest",
+        "addressing_digest",
+        "status_event_id",
+    }
+    # The same four values decide() compares against, and the same four authorization()
+    # reports as current -- because all three read one _binding(). Compared field by field
+    # against that independent projection rather than against a literal, so a change that
+    # made the packet's expectation drift from the engine's own current view fails here.
+    current = repository.authorization(record["review"])
+    assert bound["expected"] == {field: current[field] for field in bound["expected"]}
+    assert bound["expected"]["status_event_id"] == record["status_event"]
