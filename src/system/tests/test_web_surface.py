@@ -44,7 +44,8 @@ JOB_TEXT = (
     "URL: https://jobs.example.com/roles/1\r\n"
 )
 # Every method this surface does not answer. POST is deliberately absent: it is answered,
-# on exactly one address, and `test_post_reaches_no_address_but_the_one_command` covers it.
+# only at explicitly permitted command addresses, which
+# `test_post_reaches_no_address_but_a_permitted_command` covers.
 UNANSWERED_METHODS = ("PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "FROBNICATE")
 
 
@@ -377,9 +378,9 @@ def test_every_method_but_the_three_answered_is_refused_without_reaching_a_route
 ):
     """Including verbs this server has never heard of: refusal is still the default.
 
-    POST is now answered, on exactly one address. Every other method is refused before
-    anything is routed, authenticated or read, which is why this list includes verbs
-    nobody has implemented.
+    POST is answered, but only at explicitly permitted command addresses. Every other
+    method is refused before anything is routed, authenticated or read, which is why this
+    list includes verbs nobody has implemented.
     """
     before = state(repository)
     # No body, so the refusal is the only thing in flight and this can assert it exactly.
@@ -430,7 +431,7 @@ def test_an_unanswered_verb_is_refused_before_the_token_is_even_considered(clien
     assert status == 405 and headers["Allow"] == "GET, HEAD, POST"
 
 
-def test_post_reaches_no_address_but_the_one_command(client, repository):
+def test_post_reaches_no_address_but_a_permitted_command(client, repository):
     """One command, not a command router.
 
     A POST anywhere else is refused with the read methods, which also keeps a POST from
@@ -495,7 +496,7 @@ def test_the_command_address_is_singular_rather_than_a_family_of_aliases(
 ):
     """A doubled or trailing slash is a different address, not another spelling of this one.
 
-    The contract names exactly one command address. Filtering empty path components out
+    Each command is reached at exactly one address. Filtering empty path components out
     would quietly make several spellings equal, which is how an address that was reasoned
     about once ends up with variants nobody reasoned about.
     """
@@ -1075,7 +1076,7 @@ def test_a_hostile_payload_is_inert_because_of_what_it_is_served_as(client, repo
     assert any(row["subject"] == subject for row in listed), "the subject did not round-trip"
 
 
-# --- the one command: recording a status ----------------------------------------------------------
+# --- recording a status -----------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -1574,8 +1575,8 @@ def test_the_package_reaches_exactly_one_write_and_no_second_business_layer():
 
     A route that started deciding something of its own would answer 200 exactly as before.
     What says otherwise is the source: this package may name the repository's read
-    projections and one mutation, and may not name a decision, a provider or a credential
-    at all -- so a future edit that reaches one fails here rather than at review.
+    projections and the mutations it is permitted, and may not name a provider or a
+    credential at all -- so a future edit that reaches one fails here rather than at review.
     """
     allowed = PERMITTED_READS | PERMITTED_WRITES
     for name, tree in package_modules():
@@ -1628,10 +1629,12 @@ def test_the_package_imports_no_behaviour_from_the_communications_layer():
 
 
 def test_the_package_declares_every_route_in_one_place():
-    """Nine reads in one match, and the one command in another.
+    """The reads are declared in one match statement, and the commands in another.
 
-    A tenth read, or a second command, has to be written where these are rather than
-    registered somewhere a reader would not think to look.
+    Counting the reads here is what makes that structural rather than aspirational: a route
+    added anywhere else would leave this number behind. The commands are counted where they
+    are routed, so adding one means writing it beside the others rather than registering it
+    somewhere a reader would not think to look.
     """
     tree = dict(package_modules())["server.py"]
     projection = next(
@@ -1644,7 +1647,7 @@ def test_the_package_declares_every_route_in_one_place():
     assert len(matches[0].cases) == 9
 
 
-# --- the command ----------------------------------------------------------------------------------
+# --- the serve command ------------------------------------------------------------------------
 
 
 def invoke(monkeypatch, *arguments):

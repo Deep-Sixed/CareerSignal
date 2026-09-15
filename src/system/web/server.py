@@ -1,8 +1,9 @@
-"""A loopback-only, token-authenticated HTTP projection of what is stored, plus two commands.
+"""A loopback-only, token-authenticated HTTP projection of what is stored, plus its commands.
 
 This is the first CareerSignal surface that listens on a socket, so it is defined by what
 it refuses. It binds 127.0.0.1 and offers no way to bind anything else. It answers GET and
-HEAD, and POST at exactly two addresses, and refuses every other method before routing.
+HEAD, and POST only at the addresses written out below, and refuses every other method
+before routing.
 
 One command appends a status event; the other records a decision. Everything else it
 reaches is a read projection: no intake, no claim, no draft, no reconciliation, no provider
@@ -88,7 +89,8 @@ WINDOW = ("limit", "since")
 # Opt-in, because the eight reads established in #29 are the repository's projections
 # exactly, and a caller that asked for one should keep getting one.
 PRESENTATION = "presentation"
-# The two commands this surface answers, and the whole of what each accepts.
+# The commands this surface answers, and the whole of what each accepts. Adding one means
+# adding a case beside the reads and declaring it in docs/web-surface.md, which a test checks.
 COMMAND = ("opportunities", "status")
 COMMAND_FIELDS = frozenset({"status", "reason", "expected_event_id"})
 DECISION = ("reviews", "decision")
@@ -370,9 +372,9 @@ class Handler(BaseHTTPRequestHandler):
 
         Answering here rather than enumerating PUT, PATCH and DELETE means a request does
         not need to be anticipated to be refused: the refusal is the default, and reaching
-        a route is what has to be spelled out. POST narrows that default by one command,
-        written out below, rather than replacing it with a router that would accept a
-        second command the day somebody registers one.
+        a route is what has to be spelled out. POST narrows that default only at the
+        addresses written out below, rather than replacing it with a router that would
+        accept another the day somebody registers one.
         """
         if name.startswith("do_"):
             return self._refuse_method
@@ -499,7 +501,7 @@ class Handler(BaseHTTPRequestHandler):
                 return {"statuses": list(STATUSES)}
         return None
 
-    # --- the one command ------------------------------------------------------------------
+    # --- the commands --------------------------------------------------------------------
 
     def _command(self):
         """Provenance before payload.

@@ -113,7 +113,7 @@ for method in ("POST", "PUT", "PATCH", "DELETE"):
     assert status == 405, (method, status, body)
 assert ask("/api/v1/timeline")[1] == before, "a refused write still moved a ledger"
 
-# The one command, from the installed wheel: the vocabulary is served, a status appends,
+# The status command, from the installed wheel: the vocabulary is served, a status appends,
 # and the same command sent twice is refused the second time without writing.
 vocabulary = json.loads(ask("/api/v1/statuses")[1])["statuses"]
 assert vocabulary[0] == "new" and "interviewing" in vocabulary, vocabulary
@@ -189,7 +189,7 @@ assert status == 200, (status, body)
 assert json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]["decision"] == "rejected"
 
 surface.shutdown()
-print("read surface, the status command and the decision command verified from the wheel")
+print("read surface and every command it answers verified from the installed wheel")
 """
 
 
@@ -293,7 +293,7 @@ def main():
             run(str(check))
     print(
         "PASS: pure-Python installed wheel, zero runtime dependencies, resource discovery, "
-        "golden workflow, replay, the loopback surface and both of its commands"
+        "golden workflow, replay, the loopback surface and the commands it answers"
     )
 
 
