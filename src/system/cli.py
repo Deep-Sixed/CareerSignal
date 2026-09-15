@@ -61,20 +61,21 @@ from communications.message import MAX_MESSAGE_BYTES, Message
 from data.repository import Repository
 from data.store import database_path, migrate, verify_contract
 from recruiting.models import Profile
-from recruiting.ports import DraftRefused, ProviderRejected
 from recruiting.status import StatusConflict
+from system import outward
 from system.demo import golden_workflow
+from system.outward import ACCEPTED, PROVIDER_REJECTED, REFUSED, UNCERTAIN
 from system.views import detail, outcome, table
 from system.web import DEFAULT_PORT, serve
 from system.workflow import Intake, OutwardActions
 
-ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
-    "accepted",
-    "refused",
-    "provider_rejected",
-    "uncertain",
-)
 CODES = {ACCEPTED: 0, REFUSED: 1, PROVIDER_REJECTED: 1, UNCERTAIN: 3}
+# Where the operator goes next, phrased for a terminal. The classification itself is shared
+# with the web surface; only these two sentences are about the surface being used.
+GUIDANCE = {
+    outward.RECONCILE: "Run: careersignal reconcile {review}",
+    outward.IN_PROGRESS: "Inspect the opportunity, or run: careersignal reconcile {review}",
+}
 # Written out rather than built from the command name: "reject" + "d" is not a word, and a
 # message the operator reads should not be assembled by string arithmetic.
 DECIDED = {"approve": "approved", "reject": "rejected"}
@@ -143,101 +144,20 @@ def report(record, structured: bool):
 def attempted(actions, repository, args) -> dict:
     """Run a draft or a reconcile and describe what the durable record now says.
 
-    The recorded intent decides the outcome, not the exception type. Past the claim the
-    outward action has already written what it knows -- an attempt whose result never came
-    back is uncertain, not failed -- so reading that back is the only honest answer. Before
-    the claim nothing was reserved and the refusal is certain.
-
-    `attempting` and `uncertain` are both unsettled, and they are not the same answer.
-    UNCERTAIN says a provider was contacted and the result is unknown, which is exactly
-    what makes reconciliation the next move. An `attempting` row says only that the write
-    was reserved; whether anything was contacted is not recorded, so reporting it as
-    uncertain claims more than the record holds.
+    The call to the service is written here rather than passed in as a name, because that
+    is what makes this surface's outward authority visible: the capability guard reads this
+    package's syntax tree, and an outward action reached through a helper defined elsewhere
+    would not appear in it. The classification of the result is `system.outward`'s, shared
+    with the web surface, so the two cannot drift into describing the same record
+    differently.
     """
     review, command = args.identifier, args.command
-    common = {"command": command, "review": review}
-    try:
-        receipt = actions.draft(review) if command == "draft" else actions.reconcile(review)
-    except DraftRefused as exc:
-        # Read rather than assumed: a refusal reached before any intent exists (the usual
-        # case for `draft`) truly has none to report, but an identity check that fails
-        # while reconciling an already-unsettled intent leaves that intent exactly as it
-        # was. Reporting it as None either time would say less than the record holds, or
-        # -- if this were a fault instead -- more than it does.
-        state = repository.intent(review)
-        return {
-            **common,
-            "outcome": REFUSED,
-            "state": state[0] if state else None,
-            "receipt": state[1] if state else None,
-            "message": str(exc),
-            "next": "The existing draft intent is unaffected; correct the credential and try again."
-            if state
-            else "Nothing was created and nothing was sent; the approval still stands.",
-        }
-    except ProviderRejected as exc:
-        # Proven, not merely unknown: the provider was contacted and its own response is
-        # evidence nothing was created. The outward action has already released the durable
-        # intent this attempt reserved and recorded the rejection, so there is nothing
-        # left pending here -- the approval is untouched, and retrying once the cause is
-        # fixed is exactly as safe as after an ordinary refusal, just not the same fact.
-        return {
-            **common,
-            "outcome": PROVIDER_REJECTED,
-            "state": None,
-            "receipt": None,
-            "message": str(exc),
-            "next": "Nothing was created; correct the cause and run draft again.",
-        }
-    except (ValueError, KeyError) as exc:
-        # Raised before any intent is reserved: missing approval, a changed review, a
-        # changed address, an ended opportunity, or nothing to reconcile.
-        return {**common, "outcome": REFUSED, "state": None, "receipt": None, "message": str(exc)}
-    except (RuntimeError, OSError) as exc:
-        state = repository.intent(review)
-        if not state:
-            # Nothing was reserved, so this is not an uncertain external result and must
-            # not be reported as one. It is a fault, and a fault is not a state.
-            raise
-        return {
-            **common,
-            "outcome": UNCERTAIN,
-            "state": state[0],
-            "receipt": state[1],
-            "message": f"the provider was contacted and the outcome is unknown: {exc}",
-            "next": f"Run: careersignal reconcile {review}",
-        }
-    state = repository.intent(review)
-    if receipt:
-        return {
-            **common,
-            "outcome": ACCEPTED,
-            "state": state[0] if state else None,
-            "receipt": receipt,
-            "message": f"draft confirmed; receipt {receipt}",
-        }
-    if command == "draft" and state and state[0] == "attempting":
-        # This invocation reserved nothing, contacted nothing and wrote nothing: a claim
-        # already stood, so it stopped. That is a refusal. Only `draft` reads this way --
-        # `reconcile` does contact the provider to look, so its answer is about what the
-        # lookup found, and refusing it here would close the one route out of this state.
-        return {
-            **common,
-            "outcome": REFUSED,
-            "state": state[0],
-            "receipt": None,
-            "message": "a draft attempt is already in progress; it is never retried automatically",
-            "next": f"Inspect the opportunity, or run: careersignal reconcile {review}",
-        }
-    return {
-        **common,
-        "outcome": UNCERTAIN,
-        "state": state[0] if state else None,
-        "receipt": None,
-        "message": "a draft was attempted and its outcome is unknown; it is never retried "
-        "automatically",
-        "next": f"Run: careersignal reconcile {review}",
-    }
+    run = (
+        (lambda: actions.draft(review))
+        if command == "draft"
+        else (lambda: actions.reconcile(review))
+    )
+    return outward.attempt(repository, command, review, run, GUIDANCE)
 
 
 def main():
