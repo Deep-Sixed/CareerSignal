@@ -67,14 +67,14 @@ const DECISION_CONTROLS = {
     approve: "Re-approve",
   },
   draft: {
-    note: "Approved and still binding. Creating the draft is a command-line action.",
+    note: "Approved and still binding. Creating the draft is the next step.",
     negative: "Withdraw approval",
     reapprove: "Re-approve",
   },
   reconcile: {
     note:
       "A draft was attempted and its outcome is unknown, so the decision is locked until " +
-      "it is reconciled. Reconciling is a command-line action.",
+      "it is reconciled.",
   },
   created: {
     note: "A draft exists in the destination mailbox; the decision is locked.",
@@ -83,6 +83,33 @@ const DECISION_CONTROLS = {
     note:
       "Declined; nothing was created. Approving it after that is a command-line action " +
       "in this release.",
+  },
+};
+
+/* Which outward command a queue offers, and the copy for each. Keyed by a name the server
+ * sent, exactly like the decision controls above: a queue absent from this table offers no
+ * outward control at all, so the default when the engine grows a state this file has not been
+ * taught is to offer nothing.
+ *
+ * `created` is deliberately absent. A confirmed draft needs neither command, and drafting
+ * again would return the same receipt anyway -- offering a button for it would suggest there
+ * is a second draft to be made when there is not.
+ *
+ * `reconcile` is the only way out of an unknown outcome, and there is no Draft again beside
+ * it. That absence is the rule this whole surface is built around: until reconciliation has
+ * established what happened, a second draft is not something the operator may ask for. */
+const OUTWARD_CONTROLS = {
+  draft: {
+    command: "draft",
+    label: "Create draft",
+    note: "This creates a draft in the destination below. It is never sent.",
+  },
+  reconcile: {
+    command: "reconcile",
+    label: "Reconcile",
+    note:
+      "This reads the destination for this review's intent key and records what it finds. " +
+      "It never creates a draft.",
   },
 };
 
@@ -382,6 +409,73 @@ function decisionAction(record, extra, actions) {
   return holder;
 }
 
+function outwardAction(record, extra, actions) {
+  /* Create a draft, or reconcile one, from the packet the decision was taken on.
+   *
+   * Which command exists is looked up by the queue the server already decided, exactly as the
+   * decision controls are. Nothing here reads a draft state, a receipt or `binds` to work out
+   * whether an attempt may be made: `views.queue()` owns that precedence and the outward
+   * action rechecks every part of it inside its own write transaction. An unrecognised queue
+   * offers nothing.
+   *
+   * There is never a Draft again control. After an unknown outcome the only command offered
+   * is Reconcile, because until reconciliation has established what happened a second draft is
+   * not something this surface may be asked for.
+   */
+  const bound = record.bound;
+  const offered = OUTWARD_CONTROLS[record.presentation.queue];
+  if (!bound || !offered) {
+    return null;
+  }
+  const holder = el("div", "action outward");
+  if (!extra.outward) {
+    /* A launch that may record decisions and may not act on them. Said plainly rather than
+     * shown as a button that could only ever refuse: a control that always fails teaches the
+     * operator to stop reading refusals. */
+    put(
+      holder,
+      el(
+        "p",
+        "action-note",
+        "This launch records decisions only. " + offered.label +
+          " needs a provider credential, and is available on the command line.",
+      ),
+    );
+    return holder;
+  }
+  put(holder, el("p", "action-note", offered.note));
+  const act = button("primary", () => actions.outward(bound.review, offered.command));
+  text(act, offered.label);
+  put(holder, act);
+  return holder;
+}
+
+function attemptReport(extra) {
+  /* What the last outward command found, in the server's own words.
+   *
+   * The outcome name, the description and the instruction all arrive already written, by the
+   * same code the command line reports from. Nothing here paraphrases any of them: a proven
+   * rejection and an unknown outcome are different facts about a mailbox, and a browser
+   * rewording either would be deciding what might exist out there.
+   *
+   * The class is keyed on the outcome name the server sent, which is styling, not judgement.
+   */
+  const attempt = extra.attempt;
+  if (!attempt || !attempt.outcome) {
+    return null;
+  }
+  const holder = el("div", "attempt " + attempt.outcome);
+  put(holder, el("p", "attempt-outcome", attempt.outcome));
+  put(holder, el("p", "attempt-message", attempt.message || ""));
+  if (attempt.next) {
+    put(holder, el("p", "attempt-next", attempt.next));
+  }
+  if (attempt.receipt) {
+    put(holder, definitions([["receipt", attempt.receipt]], "facts strong"));
+  }
+  return holder;
+}
+
 function statusAction(record, extra, actions) {
   /* The one thing this surface can change, anchored to the opportunity rather than to the
    * approval packet below: a status is opportunity authority, and an approval is not.
@@ -521,6 +615,10 @@ function opportunityDetail(record, extra, actions) {
       extra.decisionRefusal
         ? el("p", "action-refusal", extra.decisionRefusal)
         : null,
+      /* Below the decision, because the order is the workflow: what was authorized, then
+       * what was done about it, then what that turned out to be. */
+      outwardAction(record, extra, actions),
+      attemptReport(extra),
     ),
   );
 

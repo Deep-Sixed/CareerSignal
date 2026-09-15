@@ -29,6 +29,9 @@ const state = {
   /* The launch's approval destination, read once from /session. Null until then, which is
    * why the packet withholds its controls rather than guessing a destination. */
   target: null,
+  /* Whether this launch can reach that destination. False until /session says otherwise, so
+   * the outward controls are withheld rather than offered on an assumption. */
+  outward: false,
 };
 
 let api = null;
@@ -135,9 +138,11 @@ async function opportunityDetail(id, extra = {}) {
      * read once at start and never from a control: the packet shows it so the operator can
      * see what they are authorizing, and the server uses its own copy regardless. */
     target: state.target,
+    outward: state.outward,
     composing: false,
     refusal: null,
     decisionRefusal: null,
+    attempt: null,
     ...extra,
   };
 }
@@ -249,6 +254,25 @@ const actions = {
       });
     });
   },
+  outward(review, command) {
+    /* Create a draft, or reconcile one, then re-read -- on every outcome alike.
+     *
+     * Nothing here decides what the answer meant. The outcome name, the sentence describing
+     * it and the sentence saying what to do next are all the server's, written by the same
+     * code the command line reports from: an unknown outcome and a proven rejection are
+     * different facts about a mailbox, and a browser paraphrasing either is a second opinion
+     * about whether something exists out there.
+     *
+     * Nothing is ever retried here. A repeat is the operator asking again, deliberately,
+     * which is the only way a second attempt may ever begin.
+     */
+    const id = state.selected;
+    guard(async () => {
+      const answer = command === "draft" ? await api.draft(review) : await api.reconcile(review);
+      await reload();
+      state.detail = await opportunityDetail(id, { attempt: answer.body });
+    });
+  },
   openCommunication(id) {
     guard(async () => {
       state.selected = id;
@@ -296,6 +320,10 @@ async function start() {
     ]);
     renderSession(session);
     state.target = session.decision_target;
+    /* Whether this launch can reach that destination at all. Approving never needed a
+     * credential and still does not, so a launch may record decisions and not act on them;
+     * the controls say so rather than offering a button that could only ever refuse. */
+    state.outward = session.outward;
     state.communications = communications;
     state.statuses = vocabulary.statuses;
     await reload();

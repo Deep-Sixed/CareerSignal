@@ -21,7 +21,7 @@ from communications.message import Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from recruiting.ports import DraftRefused, ProviderRejected
+from recruiting.ports import DraftRefused, DraftUncertain, ProviderRejected
 from system import cli
 from system.workflow import Intake, OutwardActions
 
@@ -383,8 +383,12 @@ def test_an_uncertain_draft_stays_reconcilable_after_a_later_hostile_source(tmp_
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=reader
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert workflow.repository.intent(review)[0] == "uncertain"
 
     later_hostile_source(workflow)
@@ -455,8 +459,12 @@ def test_a_failure_after_the_provider_was_contacted_stays_uncertain(tmp_path):
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert workflow.repository.intent(review)[0] == "uncertain"
     assert "draft_uncertain" in workflow.repository.audit(review)
     # And it is never blindly retried.
@@ -607,8 +615,12 @@ def test_reconciling_an_uncertain_gmail_intent_with_the_wrong_mailbox_is_refused
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert workflow.repository.intent(review)[0] == "uncertain"
 
     recorder = Recorder()
@@ -633,8 +645,12 @@ def test_reconciling_an_uncertain_gmail_intent_with_the_verified_mailbox_proceed
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
 
     recorder = Recorder()
     workflow.provider = GmailDrafts(
@@ -660,8 +676,12 @@ def test_reconciling_refuses_a_credential_that_verifies_as_someone_else(tmp_path
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert workflow.repository.intent(review)[0] == "uncertain"
 
     recorder = Recorder(identity="someone-else@example.com")
@@ -871,9 +891,12 @@ def test_an_unproven_create_failure_stays_uncertain_not_rejected(tmp_path, statu
         GmailComposeCredentials(TOKEN, MAILBOX), create=recorder.create, read=recorder.read
     )
     approve(workflow, review)
-    with pytest.raises(gmail_draft.GmailError) as caught:
+    with pytest.raises(DraftUncertain) as caught:
         workflow.draft(review)
-    assert not isinstance(caught.value, ProviderRejected)
+    # The boundary declares uncertainty; what Gmail actually raised is kept as the cause, and
+    # the claim that matters is that it was never promoted to a proven rejection.
+    assert isinstance(caught.value.__cause__, gmail_draft.GmailError)
+    assert not isinstance(caught.value.__cause__, ProviderRejected)
     assert workflow.repository.intent(review)[0] == "uncertain"
 
 
@@ -888,8 +911,12 @@ def test_a_transport_break_during_create_stays_uncertain_not_rejected(tmp_path):
         GmailComposeCredentials(TOKEN, MAILBOX), create=explode, read=Recorder().read
     )
     approve(workflow, review)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         workflow.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert workflow.repository.intent(review)[0] == "uncertain"
 
 

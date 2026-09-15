@@ -56,7 +56,9 @@ import urllib.request
 from importlib import resources
 
 from data.repository import Repository
+from communications.controlled import ControlledDrafts
 from system.web.server import TOKEN_HEADER, Surface
+from system.workflow import OutwardActions
 
 packaged = sorted(entry.name for entry in (resources.files("system.web") / "static").iterdir())
 assert packaged == [
@@ -187,6 +189,63 @@ assert ask("/api/v1/reviews/nope/decision", method="POST", body=b'{"approved": f
 status, body = ask(verdict, method="POST", body=b'{"approved": false}')
 assert status == 200, (status, body)
 assert json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]["decision"] == "rejected"
+
+# The outward commands, from the installed wheel. This launch declares a Gmail destination
+# and holds no compose credential, so it may record decisions and may not act on them: both
+# addresses answer honestly, nothing is created, and the provenance guards hold exactly as
+# they do for every other command.
+assert facts["outward"] is False, facts
+for command in ("draft", "reconcile"):
+    outward = "/api/v1/reviews/" + review + "/" + command
+    status, body = ask(outward, method="POST", body=b"{}")
+    assert status == 409, (command, status, body)
+    assert json.loads(body)["outcome"] == "refused", body
+    # The address carries nothing. A field is refused rather than ignored.
+    assert ask(outward, method="POST", body=b'{"actor": "somebody"}')[0] == 400, command
+    assert ask(outward, method="POST", body=b"{}", origin=False)[0] == 403, command
+    assert ask(outward, method="POST", body=b"{}", token=False)[0] == 401, command
+    # Reading a command address is 404 rather than 405: the read router simply has no
+    # such route, and these two answer POST only.
+    assert ask(outward, method="GET")[0] == 404, command
+assert ask("/api/v1/reviews/nope/draft", method="POST", body=b"{}")[0] == 404
+
+surface.shutdown()
+
+# And the same two commands on a launch that can reach a provider, so the accepted path is
+# exercised from the wheel rather than only its refusal. The service is built here, outside
+# system.web, exactly as the command line builds it.
+store = Repository("extraction.db")
+surface = Surface(
+    store,
+    port=0,
+    provider="controlled",
+    provider_namespace="controlled",
+    actions=OutwardActions(store, ControlledDrafts()),
+)
+threading.Thread(target=surface.serve_forever, daemon=True).start()
+assert json.loads(ask("/api/v1/session")[1])["outward"] is True
+
+# The same opportunity the decision block finished with. The other one in this fixture is
+# below threshold and cannot be approved at all, which is itself the engine refusing
+# correctly -- it is simply not the review this check is about.
+detail = json.loads(ask("/api/v1/opportunities/" + chosen)[1])
+approval = json.dumps({"approved": True, "expected": detail["bound"]["expected"]}).encode()
+verdict = "/api/v1/reviews/" + detail["review"] + "/decision"
+status, body = ask(verdict, method="POST", body=approval)
+assert status == 200, (status, body)
+
+drafting = "/api/v1/reviews/" + detail["review"] + "/draft"
+status, body = ask(drafting, method="POST", body=b"{}")
+assert status == 200, (status, body)
+created = json.loads(body)
+assert created["outcome"] == "accepted", created
+assert created["receipt"].startswith("controlled-"), created
+
+# Asking again returns the receipt that already exists rather than making a second draft.
+status, body = ask(drafting, method="POST", body=b"{}")
+assert status == 200, (status, body)
+assert json.loads(body)["receipt"] == created["receipt"], body
+assert json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]["draft"] == "confirmed"
 
 surface.shutdown()
 print("read surface and every command it answers verified from the installed wheel")

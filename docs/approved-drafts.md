@@ -390,8 +390,26 @@ attempt to draft
   ├─ draft-create request sent;
   │  response proves it failed           → ProviderRejected   (certain: nothing created)
   └─ draft-create request sent;
-     outcome unknown                     → ordinary exception (uncertain: reconcile)
+     outcome unknown                     → DraftUncertain     (uncertain: reconcile)
 ```
+
+**All three are declared, never deduced.** The third was once whatever the provider happened
+to raise, which asked every reader to work out for itself which side of the provider-write
+boundary a failure had fallen on — and that cannot be done from an exception class. A
+`ValueError` raised inside `create()` and a `ValueError` raised by a missing approval are the
+same class and opposite facts. A reader that guessed reported "nothing was created" while the
+row said `uncertain`, which is not merely a wrong label: it is an invitation to draft again.
+
+So `OutwardActions` raises `DraftUncertain` for every failure past `create()`, keeping the
+original as `__cause__`. That includes a failure to persist the receipt of a draft that *was*
+made — uncertainty about our own record rather than about the mailbox, and no safer — and a
+reconciliation that breaks after the destination was searched, because a lookup that failed is
+not evidence the draft is absent.
+
+What it promises is that a durable intent stands, not which unsettled state it is in. Normally
+the intent is recorded `uncertain`; where the settling write is itself what failed, the
+reserved intent stays `attempting`. Both queue as `reconcile`, and `draft()` refuses to create
+a second artifact against either, so the narrower promise is not one worth making.
 
 **The narrowest provable set.** `REJECTED_CREATE_STATUSES = {400, 401, 403}` in
 `gmail_draft.py`, grounded in what each status is documented to mean in general -- never in

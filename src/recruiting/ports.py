@@ -54,6 +54,37 @@ class ProviderRejected(RuntimeError):
     """
 
 
+class DraftUncertain(RuntimeError):
+    """A draft-create request was sent and its outcome cannot be established.
+
+    The third answer, raised only from beyond the provider-write boundary, and only where a
+    durable intent already stands. That is the whole value of the type: a caller receiving
+    this knows, without inspecting anything, that a request may have landed and that the
+    record holds an unsettled intent to read.
+
+    Which unsettled state it holds is not promised, and the difference is real. Normally the
+    intent is recorded `uncertain`. But a failure to persist the receipt of a draft that
+    *was* created leaves the reserved intent `attempting`, because the settling write is the
+    one that failed. Both are unsettled, both queue as `reconcile`, and `draft()` refuses to
+    create a second artifact against either -- so the invariant holds while the narrower
+    claim would not.
+
+    It exists because inferring this from an exception class does not work. `DraftRefused`
+    and `ProviderRejected` are certain by construction, but everything else a provider can
+    raise is only uncertain *if it happened after contact*, and the exception itself does not
+    carry that fact. A `ValueError` from inside `create()` and a `ValueError` from a missing
+    approval are the same class and opposite answers, and a classifier that guessed would
+    tell an operator nothing was created while the database said otherwise.
+
+    So the boundary declares it rather than the reader deducing it. Every failure past
+    `create()` becomes this, whatever the provider raised -- including a failure to persist
+    the receipt of a draft that was made, which is uncertainty about our own record rather
+    than about the mailbox, and is no safer. The original is kept as `__cause__`.
+
+    Never retried automatically. Only reconciliation resolves it.
+    """
+
+
 class DraftProvider(Protocol):
     # Which implementation owns the external action this provider takes, e.g. "controlled"
     # or "gmail". Fixed per implementation: it names what the provider is, not what mailbox
