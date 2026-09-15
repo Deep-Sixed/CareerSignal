@@ -647,8 +647,12 @@ def test_the_manifest_is_not_vacuous():
     If the derivation ever stopped finding anything -- a moved package, a renamed helper --
     the test above would go green while proving nothing at all.
     """
-    assert capabilities() == {"record_status", "decide"}
-    assert {"claim", "finish", "draft", "reconcile"} & capabilities() == set()
+    assert capabilities() == {"record_status", "decide", "draft", "reconcile"}
+    # The outward workflow is reached through the service that owns it. These are the writes
+    # `draft` and `reconcile` perform on the caller's behalf, and the browser reaching one of
+    # them directly would mean this surface had reimplemented the workflow rather than asked
+    # for it -- a different and much wider capability than the one PR 8 granted.
+    assert {"claim", "finish", "refuse", "reject", "ingest"} & capabilities() == set()
 
 
 def test_every_declared_capability_is_a_real_write_entrypoint():

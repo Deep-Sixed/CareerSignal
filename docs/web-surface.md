@@ -29,6 +29,8 @@ The surface is confined by construction rather than by configuration, so each of
 <!-- careersignal-web-capabilities
 record_status
 decide
+draft
+reconcile
 -->
 
 `record_status()` appends a status event; `decide()` records an approval or a rejection. Nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential.

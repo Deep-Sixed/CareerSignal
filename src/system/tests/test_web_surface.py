@@ -642,6 +642,7 @@ def test_the_session_facts_report_presence_and_never_a_credential(client, monkey
         "gmail_token",
         "gmail_compose_token",
         "decision_target",
+        "outward",
     }
     # A name, never a credential: the default launch declares the local provider, and the
     # token set above must not appear anywhere in the target it reports.
@@ -987,6 +988,31 @@ def test_presentation_composes_with_the_filters(client, repository):
     assert rows[0]["id"] == opportunity and "presentation" in rows[0]
 
 
+def routed_only(vocabulary):
+    """Every string from `vocabulary` in this package must be part of a route declaration.
+
+    `draft` and `reconcile` name two outward commands and also two queues. The collision is
+    real and cannot be spelled away, so it is resolved by where the string sits rather than by
+    excusing the word: inside the command router's match statement, or inside the tuple of
+    route segments declared beside the other commands, it is an address. Anywhere else -- a
+    comparison, a lookup table, a response body -- it would be this layer forming an opinion
+    about what a row means, which is the thing being forbidden.
+    """
+    for name, tree in package_modules():
+        routes = set()
+        for node in ast.walk(tree):
+            # The declared route segments: COMMAND, DECISION, OUTWARD and anything added
+            # beside them, all of which are module-level tuples of plain strings.
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
+                routes.update(map(id, ast.walk(node.value)))
+            # The router itself, where an address is matched rather than interpreted.
+            if isinstance(node, ast.Match):
+                routes.update(map(id, ast.walk(node)))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in vocabulary:
+                assert id(node) in routes, f"{name}: {node.value!r} outside a route declaration"
+
+
 def test_the_web_package_derives_presentation_only_by_calling_views():
     """Mechanical, because the alternative is a second implementation nobody notices.
 
@@ -998,9 +1024,13 @@ def test_the_web_package_derives_presentation_only_by_calling_views():
     used = {node.attr for name, node in nodes(ast.Attribute) if _named(node.value, "views")}
     assert used == {"coverage", "queue", "approval", "attempt"}, used
     written = {node.value for name, node in nodes(ast.Constant) if isinstance(node.value, str)}
-    assert not written & set(views.QUEUES), "a queue name is written into the web layer"
     assert not written & set(STATUSES), "the status vocabulary is copied into the web layer"
     assert not written & set(views.DRAFTS.values()), "draft wording is copied into the web layer"
+    # A queue name in this package would be this layer deciding what a row means. Two of them
+    # are also the names of the outward commands, which are addresses rather than states -- so
+    # the rule is about position, not spelling: a queue-named string is permitted only where a
+    # route is declared, and `routed_only` fails on one used anywhere a decision could be made.
+    routed_only(set(views.QUEUES))
 
 
 # --- hostile content ------------------------------------------------------------------------------
@@ -1542,6 +1572,14 @@ PERMITTED_READS = frozenset(
 PERMITTED_WRITES = frozenset({"record_status", "decide"})
 # Names that decide, contact a provider, or carry a credential -- and every other mutation.
 # None may appear anywhere in this package, as a call, an attribute or an import.
+#
+# `draft` and `reconcile` left this set in PR 8, and nothing else did. What that admits is
+# narrow and worth stating exactly: this package may now *invoke* the two outward commands on
+# a service it was handed. It still may not name `OutwardActions`, so it cannot construct one;
+# it still may not name `claim`, `finish`, `refuse` or `reject`, so it cannot reimplement what
+# the service does; and it still may not name a provider or a credential class, so it cannot
+# reach a mailbox except through the service that owns that authority. The capability the
+# browser gained is the service's, exercised, not the workflow's, copied.
 FORBIDDEN_NAMES = frozenset(
     {
         "Intake",
@@ -1558,8 +1596,6 @@ FORBIDDEN_NAMES = frozenset(
         "ingest",
         "intake",
         "intake_message",
-        "draft",
-        "reconcile",
         "migrate",
         "execute",
         "executemany",
@@ -1660,8 +1696,8 @@ def invoke(monkeypatch, *arguments):
     monkeypatch.setattr(
         cli,
         "serve",
-        lambda repository, *, port, provider, provider_namespace: served.append(
-            (repository, port, provider, provider_namespace)
+        lambda repository, *, port, provider, provider_namespace, actions: served.append(
+            (repository, port, provider, provider_namespace, actions)
         ),
     )
     monkeypatch.setattr("sys.argv", ["careersignal", *arguments])
@@ -1672,7 +1708,7 @@ def invoke(monkeypatch, *arguments):
 def test_the_command_serves_the_named_database_on_the_named_port(monkeypatch, capsys, tmp_path):
     served = invoke(monkeypatch, "serve", "--db", str(tmp_path / "db"), "--port", "9999")
     assert len(served) == 1
-    repository, port, provider, namespace = served[0]
+    repository, port, provider, namespace, _ = served[0]
     assert (repository.path, port) == (store.database_path(tmp_path / "db"), 9999)
     # The destination an approval would name, defaulted rather than inferred: the external
     # provider is never chosen implicitly, here or anywhere else.
@@ -1692,6 +1728,60 @@ def test_the_command_records_nothing(monkeypatch, capsys, repository):
     before = state(repository)
     invoke(monkeypatch, "serve", "--db", str(repository.path))
     assert state(repository) == before
+    capsys.readouterr()
+
+
+def test_the_local_provider_gives_the_surface_outward_authority(monkeypatch, capsys, tmp_path):
+    """The controlled provider stays on this machine, so there is nothing to be without."""
+    served = invoke(monkeypatch, "serve", "--db", str(tmp_path / "db"))
+    assert served[0][4] is not None
+    capsys.readouterr()
+
+
+def test_gmail_without_a_compose_credential_still_serves_and_cannot_draft(
+    monkeypatch, capsys, tmp_path
+):
+    """The pairing PR 7 established, kept intact now that drafting is reachable from here.
+
+    An operator serving the UI to record decisions has not asked to create anything. Refusing
+    to start without a compose credential would make the safe half of the workflow depend on
+    the unsafe half -- the dependency that was deliberately removed -- and an approval still
+    only names where a draft may go.
+    """
+    monkeypatch.delenv(COMPOSE_TOKEN_VARIABLE, raising=False)
+    served = invoke(
+        monkeypatch,
+        "serve",
+        "--db",
+        str(tmp_path / "db"),
+        "--provider",
+        "gmail",
+        "--mailbox",
+        "operator@example.com",
+    )
+    repository, _, provider, namespace, actions = served[0]
+    # The destination is still declared, so approvals recorded here still name it.
+    assert (provider, namespace) == TARGET
+    # And there is no service behind them, so nothing here can reach that mailbox.
+    assert actions is None
+    capsys.readouterr()
+
+
+def test_gmail_with_a_compose_credential_gives_the_surface_outward_authority(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setenv(COMPOSE_TOKEN_VARIABLE, "ya29-not-a-real-compose-credential")
+    served = invoke(
+        monkeypatch,
+        "serve",
+        "--db",
+        str(tmp_path / "db"),
+        "--provider",
+        "gmail",
+        "--mailbox",
+        "operator@example.com",
+    )
+    assert served[0][4] is not None
     capsys.readouterr()
 
 

@@ -42,7 +42,7 @@ from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
 from data.store import sqlite_report
 from recruiting.models import BindingConflict
 from recruiting.status import STATUSES, StatusConflict
-from system import views
+from system import outward, views
 
 # The only address this surface knows how to bind. There is no --host and no fallback: an
 # interface is not a setting when the whole security model is "nothing off this machine".
@@ -95,6 +95,19 @@ COMMAND = ("opportunities", "status")
 COMMAND_FIELDS = frozenset({"status", "reason", "expected_event_id"})
 DECISION = ("reviews", "decision")
 DECISION_FIELDS = frozenset({"approved", "expected"})
+# The two outward commands. Each names a review and carries nothing else: what a draft
+# would say was approved long before this request, and reconciliation asks the provider
+# what happened rather than telling it anything.
+OUTWARD = ("reviews", "draft", "reconcile")
+# Where the operator goes next, phrased for a browser. The classification is
+# `system.outward`'s, shared with the command line, so the two surfaces cannot drift into
+# describing the same durable record differently.
+GUIDANCE = {
+    outward.RECONCILE: "Reconcile this attempt. A draft is never created again from here "
+    "until reconciliation has established what happened.",
+    outward.IN_PROGRESS: "A draft attempt is already under way; reconcile it rather than "
+    "drafting again.",
+}
 # The four facts an approval binds, named here only to refuse a body that is not shaped
 # like one. What they mean is decide()'s to judge, inside the transaction that depends on
 # the answer.
@@ -135,12 +148,18 @@ def assets() -> dict:
     return found
 
 
-def session(repository, target) -> dict:
+def session(repository, target, outward_authority=False) -> dict:
     """What this machine is set up with. Presence booleans only, never a credential value.
 
     `decision_target` is where an approval recorded here would say a draft may go. It is a
     name, not a credential, and it is fixed for the process: approving declares a
     destination, and declaring one has never needed the ability to reach it.
+
+    `outward` says whether this launch can reach that destination at all. Approving has
+    never required a working compose credential and still does not, so a launch can be
+    authorized to record decisions and not to act on them. The browser is told which,
+    because offering a control that can only ever refuse teaches the operator to ignore
+    refusals. It is a boolean about capability, never the credential itself.
     """
     provider, namespace = target
     return {
@@ -149,6 +168,7 @@ def session(repository, target) -> dict:
         "gmail_token": bool(os.getenv(TOKEN_VARIABLE, "").strip()),
         "gmail_compose_token": bool(os.getenv(COMPOSE_TOKEN_VARIABLE, "").strip()),
         "decision_target": {"provider": provider, "provider_namespace": namespace},
+        "outward": outward_authority,
     }
 
 
@@ -258,6 +278,22 @@ def command(payload) -> dict:
         "reason": reason,
         "expected_event_id": payload["expected_event_id"],
     }
+
+
+def empty(payload) -> dict:
+    """A command whose whole meaning is its address, so its body carries nothing.
+
+    Refused rather than ignored, on the same ground as a rejection that carries an
+    expectation: a caller that sent a field believed it was being honoured, and a draft is
+    exactly the request where quietly dropping one would matter. What this draft says was
+    settled by the approval; there is nothing left for a request to add.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("The request body must be a JSON object")
+    unknown = sorted(payload)
+    if unknown:
+        raise ValueError(f"Unknown field: {', '.join(unknown)}")
+    return {}
 
 
 def decision(payload) -> dict:
@@ -461,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
         match segments:
             case ["session"]:
                 accepted(query, ())
-                return session(repository, self.server.decision_target)
+                return session(repository, self.server.decision_target, bool(self.server.actions))
             case ["opportunities"]:
                 rows = repository.opportunities(**filters(query))
                 return enriched(repository, rows) if presenting(query) else rows
@@ -529,6 +565,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._record_status(identifier, parsed.query)
             case ["reviews", identifier, "decision"]:
                 return self._decide(identifier, parsed.query)
+            # Each outward address names the one service call it means, written out here
+            # beside the other commands. A handler that took the address and worked out which
+            # method it stood for would be a router with a lookup in it, and the address would
+            # stop being the whole of what distinguishes these two commands.
+            case ["reviews", identifier, "draft"]:
+                return self._outward(
+                    identifier, "draft", parsed.query, lambda actions: actions.draft(identifier)
+                )
+            case ["reviews", identifier, "reconcile"]:
+                return self._outward(
+                    identifier,
+                    "reconcile",
+                    parsed.query,
+                    lambda actions: actions.reconcile(identifier),
+                )
         # Every other address reads -- including a path outside the API root, for which
         # `tail` returns None and no sequence pattern above can match. Saying so with Allow
         # rather than 404 keeps a POST from reporting which read routes exist.
@@ -612,6 +663,77 @@ class Handler(BaseHTTPRequestHandler):
         if supplied["approved"]:
             recorded |= {"provider": provider, "provider_namespace": namespace}
         return (HTTPStatus.OK, JSON, json.dumps(recorded).encode("utf-8"), None)
+
+    def _outward(self, identifier, command, query, run):
+        """Create a draft, or reconcile one that was attempted, and report what is now true.
+
+        Every rule this obeys belongs to `OutwardActions`, which owns the outward authority:
+        whether an approval exists, whether it still binds the packet on screen, whether the
+        destination matches, whether an intent already stands. Nothing here pre-checks any of
+        it. A check at this layer could only read outside the transaction that depends on the
+        answer, which is the race the claim exists to close -- the same reason `_decide` does
+        not compare bindings and `_record_status` does not compare events.
+
+        The service call is written here, on `self.server.actions`, rather than reached
+        through a helper. That is what makes this surface's outward authority visible to the
+        capability guard, which reads this package's syntax tree: a draft reached indirectly
+        would be a capability the manifest never saw.
+
+        The safety property this address is judged by: after an uncertain attempt there is no
+        route from here that creates a second draft. `draft()` stops on the existing intent
+        before it composes anything, so a repeated request writes nothing and contacts
+        nothing, and the record it reports back still says reconcile.
+        """
+        repository = self.server.repository
+        try:
+            accepted(parse_qs(query, keep_blank_values=True), ())
+            empty(self._body())
+        except Oversized as refused:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(refused))
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        try:
+            # Absence first, so a review id naming nothing is a 404 rather than the outward
+            # action's refusal about a review that was never there.
+            repository.review(identifier)
+        except KeyError:
+            return self._error(HTTPStatus.NOT_FOUND, "No record with that id")
+        actions = self.server.actions
+        if actions is None:
+            # A launch that may record decisions and may not act on them. Nothing was
+            # contacted, so this is a local refusal in the exact sense the outcomes define:
+            # certain, nothing created, the approval untouched.
+            return self._attempted(
+                {
+                    "command": command,
+                    "review": identifier,
+                    "outcome": outward.REFUSED,
+                    "state": None,
+                    "receipt": None,
+                    "message": "this launch has no outward authority, so nothing was contacted",
+                    "next": "Restart with a provider credential, or use the command line.",
+                }
+            )
+        return self._attempted(
+            outward.attempt(repository, command, identifier, lambda: run(actions), GUIDANCE)
+        )
+
+    def _attempted(self, record):
+        """One outward record, under the status that says whether the attempt ran.
+
+        REFUSED is the one outcome CareerSignal itself decided, before contacting anything:
+        a stale approval, a destination that is not the approved one, an intent already
+        standing, a launch with no outward authority. That is a conflict with what is
+        stored rather than a malformed request, so it answers 409 exactly as a refused
+        decision does -- and it is what the losing side of two simultaneous drafts receives.
+
+        The other three ran. ACCEPTED, PROVIDER_REJECTED and UNCERTAIN are answers about an
+        attempt that happened, not errors, and each carries different instructions; collapsing
+        any of them into a failure is how an operator ends up retrying a draft that may
+        already exist.
+        """
+        status = HTTPStatus.CONFLICT if record["outcome"] == outward.REFUSED else HTTPStatus.OK
+        return (status, JSON, json.dumps(record).encode("utf-8"), None)
 
     def _body(self) -> dict:
         """The declared length, the ceiling, then exactly that many bytes, then JSON."""
@@ -727,8 +849,16 @@ class Surface(ThreadingHTTPServer):
         port=DEFAULT_PORT,
         provider=DEFAULT_PROVIDER,
         provider_namespace=DEFAULT_PROVIDER,
+        actions=None,
     ):
         self.repository = repository
+        # The outward service, already constructed by the caller that parsed the command
+        # line, or None when this launch has no way to reach a provider. Nothing here builds
+        # one: this package imports no adapter and no credential class, and whether a
+        # compose credential exists is a question answered before the socket was bound.
+        # None is not a degraded mode to work around -- it is a launch that may record
+        # decisions and may not act on them, which is exactly what PR 7 made possible.
+        self.actions = actions
         # Two strings, decided at launch and never afterwards. They arrive already chosen
         # by the caller that parsed the command line, so nothing here imports a provider,
         # constructs a credential, or learns what reaching that destination would involve.
@@ -761,6 +891,7 @@ def serve(
     port=DEFAULT_PORT,
     provider=DEFAULT_PROVIDER,
     provider_namespace=DEFAULT_PROVIDER,
+    actions=None,
     announce=print,
 ) -> None:
     """Bind, print where to go, and serve until interrupted.
@@ -774,10 +905,19 @@ def serve(
     token anyway, so a page left open cannot act against a target chosen after it loaded.
     """
     surface = Surface(
-        repository, port=port, provider=provider, provider_namespace=provider_namespace
+        repository,
+        port=port,
+        provider=provider,
+        provider_namespace=provider_namespace,
+        actions=actions,
     )
     announce(f"CareerSignal is reading {surface.repository.path}")
     announce(f"Approvals recorded here will name {provider_namespace}")
+    announce(
+        f"Drafts may be created in {provider_namespace} from this surface"
+        if actions
+        else "This launch records decisions only; creating a draft needs a compose credential"
+    )
     announce(f"Open {surface.launch_url}")
     announce("This address is valid for this process only. Stop with Ctrl-C.")
     with surface:

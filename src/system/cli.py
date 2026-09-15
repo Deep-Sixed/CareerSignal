@@ -93,6 +93,26 @@ def _provider(args, parser):
     return GmailDrafts(GmailComposeCredentials(token, args.mailbox))
 
 
+def _outward_possible(args) -> bool:
+    """Whether this launch could reach a provider at all, asked without building one.
+
+    The controlled provider is local and always available. Gmail needs a compose credential
+    and a mailbox, and their absence is not an error here the way it is for `draft`: an
+    operator serving the UI to record decisions has not asked to create anything, and
+    stopping them would be refusing the safe action because the unsafe one is unavailable.
+    """
+    if args.provider != "gmail":
+        return True
+    return bool(os.getenv(COMPOSE_TOKEN_VARIABLE, "").strip()) and bool(args.mailbox)
+
+
+def _outward_provider(args):
+    """The provider for a launch that has one. Only ever called after _outward_possible."""
+    if args.provider != "gmail":
+        return ControlledDrafts()
+    return GmailDrafts(GmailComposeCredentials(os.getenv(COMPOSE_TOKEN_VARIABLE, ""), args.mailbox))
+
+
 def _declared_identity(args, parser):
     """The provider identity an approval declares, without a credential.
 
@@ -424,7 +444,24 @@ def main():
         # go, and naming a destination has never required the ability to reach it. Only the
         # two resulting strings cross into system.web.
         provider, namespace = _declared_identity(args, parser)
-        serve(Repository(path), port=args.port, provider=provider, provider_namespace=namespace)
+        repository = Repository(path)
+        # Outward authority is separate from that declaration, and deliberately optional.
+        # Creating a draft does need a credential that can reach the mailbox, so a launch
+        # without one records decisions and refuses to act on them rather than failing to
+        # start: making the safe half of the workflow depend on the unsafe half is the
+        # dependency PR 7 removed, and requiring a compose token to open the Approvals screen
+        # would put it back. The service is constructed here, where the adapters already live,
+        # and handed over already built -- system.web imports no provider and no credential.
+        actions = (
+            OutwardActions(repository, _outward_provider(args)) if _outward_possible(args) else None
+        )
+        serve(
+            repository,
+            port=args.port,
+            provider=provider,
+            provider_namespace=namespace,
+            actions=actions,
+        )
         return
     elif args.command == "init":
         result = {"applied": migrate(path)}
