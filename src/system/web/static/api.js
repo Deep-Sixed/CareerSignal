@@ -93,5 +93,11 @@ export function connect(credential) {
      * anywhere but the packet on screen would name a moment nobody was shown. */
     decide: (review, payload) =>
       send(`/reviews/${part(review)}/decision`, credential, payload),
+    /* The two outward commands. Each is the address and nothing else: what a draft would say
+     * was settled by the approval, and reconciliation asks the destination what happened
+     * rather than telling it anything. An empty object, not a payload with fields the server
+     * would have to refuse. */
+    draft: (review) => send(`/reviews/${part(review)}/draft`, credential, {}),
+    reconcile: (review) => send(`/reviews/${part(review)}/reconcile`, credential, {}),
   };
 }

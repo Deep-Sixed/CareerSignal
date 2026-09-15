@@ -425,7 +425,18 @@ def test_the_attention_copy_points_at_the_evidence_instead_of_guessing():
 # --- one implementation of what the state means -------------------------------------------------
 
 
-DECLARATIONS = ("QUEUE_LABELS", "QUEUE_HINTS", "ATTENTION", "APPROVAL_QUEUES", "DECISION_CONTROLS")
+# OUTWARD_CONTROLS joined these in PR 8, and is the same shape as DECISION_CONTROLS beside it:
+# a flat table keyed by a queue name the server sent, with no precedence, no fallthrough and no
+# arithmetic. A queue absent from it offers no outward control, so the default when the engine
+# grows a state this file has not been taught is to offer nothing.
+DECLARATIONS = (
+    "QUEUE_LABELS",
+    "QUEUE_HINTS",
+    "ATTENTION",
+    "APPROVAL_QUEUES",
+    "DECISION_CONTROLS",
+    "OUTWARD_CONTROLS",
+)
 
 
 def without_declarations(body) -> str:
@@ -576,3 +587,82 @@ def test_the_decision_controls_offer_nothing_the_queue_does_not_name():
         assert derived not in decision, f"the decision control derives from {derived}"
     # A queue the table does not name offers nothing, rather than falling through to a default.
     assert "if (!bound || !target || !offered)" in decision
+
+
+# --- the outward commands -------------------------------------------------------------------
+
+
+def test_the_two_outward_commands_are_addressed_to_the_routes_the_server_answers():
+    """Two more functions in the file that holds the credential, not a helper taking a name.
+
+    `test_exactly_one_command_is_sent_...` above still holds: all four commands share one
+    `send`, so `POST` is written once and there is nothing a screen could hand a verb to.
+    What grows is the number of named functions, which is the shape that makes a reader
+    notice a command being added.
+    """
+    body = code(STATIC / "api.js")
+    assert "/draft`" in body and "/reconcile`" in body
+    assert "draft:" in body and "reconcile:" in body
+    # Each sends an empty object. A payload with fields would be refused by the server, and
+    # assembling one here would suggest the browser gets to say something about the draft.
+    assert body.count("credential, {})") == 2
+
+
+def test_the_outward_controls_are_keyed_by_the_queue_the_server_decided():
+    """The same shape as the decision controls: a flat table, no precedence, no arithmetic."""
+    body = code(STATIC / "screens.js")
+    table = region(body, "const OUTWARD_CONTROLS = {", "};")
+    assert "draft:" in table and "reconcile:" in table
+    # A confirmed draft offers neither command; drafting again would return the same receipt
+    # and offering a button for it would suggest there is a second draft to be made.
+    assert "created:" not in table
+
+
+def test_the_browser_never_offers_a_second_draft_after_an_unknown_outcome():
+    """The rule this whole surface is built around, as a property of the shipped file.
+
+    After an uncertain attempt the only outward control offered is Reconcile. There is no
+    Draft again, no retry, and no timer: a second draft is not something the operator may ask
+    for until reconciliation has established what happened.
+    """
+    body = code(STATIC / "screens.js")
+    table = region(body, "const OUTWARD_CONTROLS = {", "};")
+    reconcile = region(table, "reconcile:", "},")
+    assert "Create draft" not in reconcile
+    assert "never creates a draft" in reconcile
+    for absent in ("retry", "again", "setTimeout", "setInterval"):
+        assert absent not in region(body, "function outwardAction(", "\n}"), absent
+
+
+def test_nothing_in_the_shell_retries_an_outward_command():
+    """A repeat has to be the operator asking again, deliberately."""
+    body = code(STATIC / "app.js")
+    outward = region(body, "  outward(review, command) {", "\n  },")
+    for absent in ("setTimeout", "setInterval", "while", "for (", "catch"):
+        assert absent not in outward, f"the outward action contains {absent}"
+    # Send, then re-read. Nothing patches the row from the answer.
+    assert "await reload()" in outward
+
+
+def test_the_attempt_report_repeats_the_servers_words_rather_than_judging_them():
+    """Four outcomes, four different facts about a mailbox. None of them is reworded here.
+
+    A browser that paraphrased a proven rejection as an unknown outcome -- or the reverse --
+    would be deciding what might exist in the operator's mailbox. The name, the description
+    and the instruction all arrive already written by the same code the CLI reports from.
+    """
+    body = code(STATIC / "screens.js")
+    report = region(body, "function attemptReport(", "\n}")
+    for field in ("attempt.outcome", "attempt.message", "attempt.next", "attempt.receipt"):
+        assert field in report, field
+    # No vocabulary of its own: no outcome name is written into the branch logic.
+    for outcome in ("accepted", "refused", "provider_rejected", "uncertain"):
+        assert f'"{outcome}"' not in report, f"{outcome} is decided in the browser"
+
+
+def test_a_launch_without_outward_authority_says_so_instead_of_offering_a_button():
+    """A control that could only ever refuse teaches the operator to ignore refusals."""
+    body = code(STATIC / "screens.js")
+    action = region(body, "function outwardAction(", "\n}")
+    assert "extra.outward" in action
+    assert "records decisions only" in action

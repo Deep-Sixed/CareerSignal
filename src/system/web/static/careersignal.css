@@ -865,10 +865,73 @@ body {
   background: none;
 }
 
-/* --- the one command ------------------------------------------------------------------- */
+/* --- the commands --------------------------------------------------------------------- */
 
 .action {
   margin: 16px 0 4px;
+}
+
+/* The outward commands sit under the decision, separated from it, because authorizing an
+   action and performing it are different steps and should not read as one control group. */
+.outward {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--edge);
+}
+
+/* What the last attempt found. Four outcomes, four different things to do next, so each is
+   given its own colour rather than a shared success/failure pair -- an unknown outcome that
+   looked like a failure would invite exactly the retry that must not happen. */
+.attempt {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--edge);
+  border-left-width: 3px;
+  border-radius: 3px;
+  background: #fbfbf9;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.attempt-outcome {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.attempt-message,
+.attempt-next {
+  margin: 0;
+}
+
+.attempt-next {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.attempt.accepted {
+  border-left-color: #2f7a4f;
+  background: #f2f8f4;
+}
+
+.attempt.refused {
+  border-left-color: #8a6d1f;
+  background: #fbf7ec;
+}
+
+.attempt.provider_rejected {
+  border-left-color: #8a1f1f;
+  background: #fbf0f0;
+}
+
+/* Deliberately the most prominent of the four. An unknown outcome is the only state that
+   needs a further action before anything else may happen. */
+.attempt.uncertain {
+  border-left-color: #a8560f;
+  background: #fdf3ea;
+  font-weight: 500;
 }
 
 .primary,
