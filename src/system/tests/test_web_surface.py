@@ -116,6 +116,25 @@ class Client:
         status, payload, headers = self.send(path, **kwargs)
         return status, json.loads(payload)
 
+    def unread(self, path, **kwargs):
+        """Send a body to an address that refuses before reading it, and report the status.
+
+        This surface settles a refusal without touching the body, which is the property the
+        callers below are about. That leaves the sent bytes unread in the receive buffer,
+        and closing on unread bytes is a reset rather than a clean shutdown on Windows -- so
+        whether the refusal or the reset reaches the client first is a race no test should
+        be made to win. `None` means the response was lost to a reset, which is itself only
+        possible if the body went unread.
+
+        What a caller asserts either way is that nothing was written. A body that *would*
+        have been appended had the address matched makes that assertion the strong one: no
+        reset can hide a row, because the digest is read from the database afterwards.
+        """
+        try:
+            return self.send(path, **kwargs)[0]
+        except ConnectionError:
+            return None
+
     def command(self, opportunity, payload, **kwargs):
         """A well-formed status command, so a test varies only what it is about."""
         settings = {
@@ -362,10 +381,37 @@ def test_every_method_but_the_three_answered_is_refused_without_reaching_a_route
     nobody has implemented.
     """
     before = state(repository)
-    status, payload, headers = client.send(method=method, path="/api/v1/opportunities", body=b"{}")
+    # No body, so the refusal is the only thing in flight and this can assert it exactly.
+    # That a body is refused unread is the test below, where it cannot be asserted exactly.
+    status, payload, headers = client.send(method=method, path="/api/v1/opportunities")
     assert status == 405
     assert headers["Allow"] == "GET, HEAD, POST"
     assert json.loads(payload) == {"error": "This surface reads, and records a status"}
+    assert state(repository) == before
+
+
+@pytest.mark.parametrize("method", UNANSWERED_METHODS)
+def test_an_unanswered_verb_carrying_a_command_shaped_body_writes_nothing(
+    client, repository, opportunity, method
+):
+    """The body of a refused method is never read, so it can never be acted on.
+
+    The payload is the one that would genuinely append if this verb reached the command, so
+    the digest is what proves it did not. The response is not asserted: a refusal settled
+    without reading the body leaves those bytes unread, and on Windows the close that
+    follows resets the connection, which can outrun the response. Nothing about that race
+    changes whether a row was written.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    before = state(repository)
+    status = client.unread(
+        f"/api/v1/opportunities/{opportunity}/status",
+        method=method,
+        origin=True,
+        content_type="application/json",
+        body=json.dumps({"status": "applied", "expected_event_id": event}).encode("utf-8"),
+    )
+    assert status in (405, None), status
     assert state(repository) == before
 
 
@@ -404,9 +450,9 @@ def test_post_reaches_no_address_but_the_one_command(client, repository):
         f"/api/v1/reviews/{repository.opportunity(opportunity)['review']}/status",
         "/",
     ):
-        status, payload, headers = client.send(
-            path, method="POST", origin=True, body=b'{"status": "applied", "expected_event_id": 1}'
-        )
+        # Body-free, so the refusal is the only thing in flight and Allow can be asserted
+        # exactly. That a command-shaped body is refused unread is pinned separately.
+        status, payload, headers = client.send(path, method="POST", origin=True)
         assert status == 405, path
         assert headers["Allow"] == "GET, HEAD", path
         assert json.loads(payload) == {"error": "No command at this address"}, path
@@ -436,11 +482,10 @@ def test_the_command_address_is_not_reachable_by_a_lookalike_prefix(
         f"/api/v1x/opportunities/{opportunity}/status",
         f"/x/api/v1/opportunities/{opportunity}/status",
     ):
-        status, body, headers = client.send(
+        status = client.unread(
             path, method="POST", origin=True, content_type="application/json", body=payload
         )
-        assert status == 405, path
-        assert headers["Allow"] == "GET, HEAD", path
+        assert status in (405, None), (path, status)
     assert state(repository) == before
 
 
@@ -462,11 +507,10 @@ def test_the_command_address_is_singular_rather_than_a_family_of_aliases(
         f"/api/v1/opportunities/{opportunity}//status",
         f"/api/v1/opportunities/{opportunity}/status/",
     ):
-        status, body, headers = client.send(
+        status = client.unread(
             path, method="POST", origin=True, content_type="application/json", body=payload
         )
-        assert status == 405, path
-        assert headers["Allow"] == "GET, HEAD", path
+        assert status in (405, None), (path, status)
     assert state(repository) == before
     # And the canonical spelling still works, so the rule above narrowed nothing it should
     # not have.
@@ -491,10 +535,10 @@ def test_a_target_naming_its_own_authority_is_refused(client, surface, repositor
         f"https://{surface.authority}/api/v1/opportunities/{opportunity}/status",
         f"http://elsewhere.example/api/v1/opportunities/{opportunity}/status",
     ):
-        status, _, _ = client.send(
+        status = client.unread(
             target, method="POST", origin=True, content_type="application/json", body=payload
         )
-        assert status == 400, target
+        assert status in (400, None), (target, status)
     assert state(repository) == before
     # The reads refuse it on the same rule rather than a separate one.
     assert client.send(f"http://{surface.authority}/api/v1/session")[0] == 400
