@@ -20,8 +20,10 @@ the tree gate and a findings payload for the secret gate, so a future edit that 
 any rule fails here rather than in review.
 """
 
+import ast
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -417,3 +419,534 @@ def test_windows_reported_finding_passes_triage(scanner, monkeypatch, capsys):
 def test_windows_spelled_refusal_still_stops_the_gate(scanner, monkeypatch):
     results = {r"docs\ui-design\CareerSignal-Mock-v2.dc.html": [{"type": HEX, "line_number": 5}]}
     assert "Secret scan requires review" in scan_result(scanner, monkeypatch, results)
+
+
+# --- the documented web capability manifest -----------------------------------------------------
+#
+# The third contract in this file, and the same shape as the two above: a claim that is
+# argued for in prose, pinned mechanically so a later edit that widens it fails here rather
+# than in review.
+#
+# Three PRs in a row shipped a capability and left a claim about it behind somewhere, because
+# a capability lands in one file and is described in several. The answer is not to duplicate a
+# machine-readable list into each of them -- that trades prose drift for manifest drift. It is
+# to name one canonical declaration, in the document that already explains what these commands
+# are, and compare it against what the code can actually do.
+
+
+SOURCE = Path(__file__).resolve().parents[2]
+WEB = SOURCE / "system" / "web"
+SURFACE = Path(__file__).resolve().parents[3] / "docs" / "web-surface.md"
+MANIFEST = re.compile(r"<!--[ \t]*careersignal-web-capabilities[ \t]*\n(.*?)^-->", re.S | re.M)
+
+
+def declared(text) -> set:
+    """The capabilities docs/web-surface.md declares, as a set.
+
+    Refuses rather than guesses. A block that is missing, duplicated, or carries anything but
+    one bare identifier per line is a broken declaration, and a broken declaration must not
+    quietly become an empty one -- an empty set would compare equal to a package that had lost
+    its capabilities, which is exactly the wrong direction to fail in.
+    """
+    blocks = MANIFEST.findall(text)
+    if not blocks:
+        raise ValueError("No careersignal-web-capabilities block")
+    if len(blocks) > 1:
+        raise ValueError(f"{len(blocks)} careersignal-web-capabilities blocks; there may be one")
+    names = [line.strip() for line in blocks[0].splitlines() if line.strip()]
+    if not names:
+        raise ValueError("The capability block is empty")
+    for name in names:
+        if not name.isidentifier():
+            raise ValueError(f"Not a capability name: {name!r}")
+    if len(set(names)) != len(names):
+        raise ValueError("The capability block repeats a name")
+    return set(names)
+
+
+MODULE = "<module>"
+
+
+def _parsed(root, skip):
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.parts or skip in path.parents or path == skip:
+            continue
+        yield ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _owned(tree):
+    """Every *invocable* function in one module, paired with the class that owns it.
+
+    Direct class members and module-level functions only. A closure defined inside another
+    function is not something a receiver can be called on, so counting it would invent an
+    owner -- and did: a nested `finish()` in the extraction parser collided with
+    `Repository.finish` and made that name look ambiguous when it is not.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            yield node, MODULE
+        elif isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                    yield child, node.name
+
+
+def _calls(node) -> set:
+    """Every method name this function calls on something -- `x.claim(...)` gives `claim`."""
+    return {
+        call.func.attr
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+    }
+
+
+def entrypoints(source=SOURCE, web=WEB) -> dict:
+    """Every name a caller can invoke that ends in a database write, and who owns it.
+
+    Seeded from the definitions that open `transaction(...)` and closed over calls, so a
+    method is an entrypoint when it *reaches* a write, not only when it performs one. That
+    matters because the outward boundary is a service: `OutwardActions.draft()` writes
+    through `claim`, `finish`, `refuse` and `reject` without the caller naming any of them,
+    and a derivation that only looked for repository members would let a web surface acquire
+    the whole outward workflow while still declaring nothing.
+
+    The closure runs over *definitions*, not names, so ownership is earned rather than
+    inherited: a second class with a method spelled `draft` becomes an entrypoint only if
+    its own body reaches a write. Keying owners by name alone let an unrelated `draft()`
+    borrow the service's authority, which is the mis-attribution this is built to avoid.
+
+    The web package itself is excluded from the scan. Its own helpers are not capabilities --
+    they are how it spends the ones it has, and counting them would ask the manifest to
+    declare an implementation detail.
+    """
+    definitions = {}
+    for tree in _parsed(source, web):
+        for node, owner in _owned(tree):
+            definitions.setdefault((owner, node.name), []).append(node)
+    assert definitions, "no source was parsed; this guard has stopped guarding anything"
+
+    def opens(node) -> bool:
+        return any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "transaction"
+            for call in ast.walk(node)
+        )
+
+    writing = {pair for pair, nodes in definitions.items() if any(opens(node) for node in nodes)}
+    assert writing, "nothing opens a transaction; the seed for this closure is empty"
+    while True:
+        reached = {name for _, name in writing}
+        grown = writing | {
+            pair
+            for pair, nodes in definitions.items()
+            if any(_calls(node) & reached for node in nodes)
+        }
+        if grown == writing:
+            break
+        writing = grown
+    owners = {}
+    for owner, name in writing:
+        owners.setdefault(name, set()).add(owner)
+    return owners
+
+
+def _aliases(tree) -> dict:
+    """Imported names, mapped back to what they are called where they are defined.
+
+    `from system.workflow import OutwardActions as OA` binds `OA` in this module, but the
+    owner this guard derives from the source tree is `OutwardActions`. Recording the local
+    spelling would match no owner, and an unmatched owner does not fall back -- it omits the
+    capability. An alias in an import line would then quietly shrink the manifest while the
+    browser kept the power, which is the wrong direction to fail in.
+    """
+    return {
+        name.asname: name.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for name in node.names
+        if name.asname
+    }
+
+
+def _bindings(tree) -> dict:
+    """Local names bound to a constructor call: `actions = OutwardActions(...)`.
+
+    The one receiver shape worth resolving, because it is the shape the outward boundary is
+    used through. Resolving it turns a name match into an attribution: an unrelated object
+    that happens to have a method called `draft` is then not outward authority.
+
+    The constructor is recorded under its defining name rather than its local one, so the
+    attribution is about the class and not about the word at the call site -- in both
+    directions. An alias is a spelling, and resolving it neither hides the service behind a
+    shorter name nor lends its authority to whatever borrows the longer one.
+    """
+    aliases = _aliases(tree)
+    bound = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+        ):
+            constructor = node.value.func.id
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bound[target.id] = aliases.get(constructor, constructor)
+    return bound
+
+
+def invoked(web=WEB, reachable=None) -> set:
+    """Which write entrypoints the web package invokes, attributed to their owner where it can be.
+
+    A receiver resolved to a constructor is judged against the owners of that name: a call
+    on an `OutwardActions` counts as `draft` only because `OutwardActions` is what defines
+    the `draft` that reaches a write. A receiver this cannot resolve -- an injected
+    `repository`, a parameter, an attribute chain -- falls back to the name, which is the
+    safe direction: it can ask for a declaration that was not needed, never omit one that
+    was. `test_no_entrypoint_name_is_owned_by_two_classes` is what keeps that fallback from
+    quietly attributing a capability to the wrong thing.
+    """
+    reachable = entrypoints() if reachable is None else reachable
+    modules = sorted(web.rglob("*.py"))
+    assert modules, "the web package moved and this guard stopped guarding anything"
+    found = set()
+    for path in modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bound = _bindings(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in reachable:
+                continue
+            receiver = node.value
+            if isinstance(receiver, ast.Name) and receiver.id in bound:
+                if bound[receiver.id] in reachable[node.attr]:
+                    found.add(node.attr)
+                continue
+            found.add(node.attr)
+    return found
+
+
+def capabilities(source=SOURCE, web=WEB) -> set:
+    """What the browser can actually change: the write entrypoints this package invokes."""
+    return invoked(web, entrypoints(source, web))
+
+
+def test_the_documented_capabilities_are_the_ones_the_web_package_can_reach():
+    """The contract, in one line, compared in both directions.
+
+    A capability the code gains without being declared fails here, and a capability declared
+    without the code being able to reach it fails here too. Either way the failure lands in
+    the change that caused it rather than three PRs later.
+    """
+    assert declared(SURFACE.read_text(encoding="utf-8")) == capabilities()
+
+
+def test_the_manifest_is_not_vacuous():
+    """Stated separately, because an equality of two empty sets would also pass.
+
+    If the derivation ever stopped finding anything -- a moved package, a renamed helper --
+    the test above would go green while proving nothing at all.
+    """
+    assert capabilities() == {"record_status", "decide"}
+    assert {"claim", "finish", "draft", "reconcile"} & capabilities() == set()
+
+
+def test_every_declared_capability_is_a_real_write_entrypoint():
+    """A typo is not a capability. `recordstatus` names nothing and must not read as nothing."""
+    assert declared(SURFACE.read_text(encoding="utf-8")) <= set(entrypoints())
+
+
+def test_the_outward_workflow_is_an_entrypoint_even_though_it_writes_indirectly():
+    """The derivation has to follow the service, not only the repository.
+
+    `OutwardActions.draft()` and `.reconcile()` reach `claim`, `finish`, `refuse` and
+    `reject` without their caller naming any of them. If the closure stopped at repository
+    members, a web surface could acquire the entire outward workflow and still declare
+    nothing -- which is exactly the change this guard exists to force.
+    """
+    reachable = set(entrypoints())
+    assert {"draft", "reconcile"} <= reachable
+    assert {"claim", "finish", "refuse", "reject", "record_status", "decide"} <= reachable
+    # And they are entrypoints for the right reason: the service is where they are reached.
+    assert {"intake", "intake_message"} <= reachable
+
+
+def test_the_declaration_is_a_set_rather_than_a_formatting_convention():
+    """Order is not part of the contract, and neither is surrounding blank space."""
+    block = "<!-- careersignal-web-capabilities\n{}\n-->"
+    assert declared(block.format("decide\nrecord_status")) == {"record_status", "decide"}
+    assert declared(block.format("  record_status  \n\n\tdecide\t")) == {"record_status", "decide"}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    (
+        "nothing here at all",
+        "<!-- careersignal-web-capabilities\n-->",
+        "<!-- careersignal-web-capabilities\n\n  \n-->",
+        "<!-- careersignal-web-capabilities\nrecord_status\nrecord_status\n-->",
+        "<!-- careersignal-web-capabilities\nrecord status\n-->",
+        "<!-- careersignal-web-capabilities\nrecord_status()\n-->",
+        "<!-- careersignal-web-capabilities\n- record_status\n-->",
+        "<!-- careersignal-web-capabilities\ndecide\n-->\n<!-- careersignal-web-capabilities\ndecide\n-->",
+    ),
+)
+def test_a_broken_declaration_is_refused_rather_than_read_as_empty(broken):
+    with pytest.raises(ValueError):
+        declared(broken)
+
+
+def test_the_frozen_design_baseline_declares_nothing():
+    """`docs/ui-design/` is the accepted design as accepted, and is never edited.
+
+    It must not acquire a manifest, and this guard must never read one from it: the canonical
+    declaration is one document, and a second copy anywhere is the drift this exists to stop.
+    """
+    frozen = Path(__file__).resolve().parents[3] / "docs" / "ui-design"
+    for path in sorted(frozen.rglob("*")):
+        if path.is_file():
+            assert not MANIFEST.findall(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def test_exactly_one_document_carries_the_declaration():
+    """One canonical place, mechanically. A second block anywhere is a second source of truth."""
+    root = Path(__file__).resolve().parents[3]
+    carrying = [
+        path
+        for path in sorted(root.rglob("*.md"))
+        if ".git" not in path.parts and MANIFEST.findall(path.read_text(encoding="utf-8"))
+    ]
+    assert carrying == [SURFACE]
+
+
+# --- the shape PR 8 will actually take ----------------------------------------------------------
+
+
+def outward_tree(root) -> tuple:
+    """A miniature of this repository's real layering, for the one case that matters.
+
+    A repository whose write opens a transaction; a service that reaches that write on the
+    caller's behalf; and a web package that uses the service, never the repository. That is
+    how the outward boundary is built here, and it is the arrangement a derivation restricted
+    to repository members cannot see through.
+    """
+    source = root / "src"
+    web = source / "system" / "web"
+    web.mkdir(parents=True)
+    (source / "data").mkdir(parents=True)
+    (source / "data" / "repository.py").write_text(
+        "class Repository:\n"
+        "    def claim(self, review):\n"
+        "        with connection(self.path) as conn, transaction(conn):\n"
+        "            conn.execute('UPDATE draft_intents SET state=?', ('claimed',))\n"
+        "\n"
+        "    def opportunities(self):\n"
+        "        with connection(self.path) as conn:\n"
+        "            return conn.execute('SELECT 1').fetchall()\n",
+        encoding="utf-8",
+    )
+    (source / "system" / "workflow.py").write_text(
+        "class OutwardActions:\n"
+        "    def __init__(self, repository, provider):\n"
+        "        self.repository, self.provider = repository, provider\n"
+        "\n"
+        "    def draft(self, review):\n"
+        "        self.provider.create(review)\n"
+        "        return self.repository.claim(review)\n",
+        encoding="utf-8",
+    )
+    return source, web
+
+
+def test_a_web_surface_that_drafts_through_the_service_is_not_invisible(tmp_path):
+    """The blocker this guard exists for, proved on the shape PR 8 will use.
+
+    The web package here names no repository write at all -- it calls `actions.draft(...)`,
+    exactly as the real outward path should be written. A derivation that looked only for
+    members of a variable called `repository` would report no new capability, leave the
+    manifest agreeing with itself, and stay green while the browser gained the power to
+    create drafts. This asserts the opposite: the capability appears, and the old manifest
+    stops matching until it is updated.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import OutwardActions\n"
+        "\n"
+        "def _draft(self, review):\n"
+        "    actions = OutwardActions(self.server.repository, self.server.provider)\n"
+        "    return actions.draft(review)\n",
+        encoding="utf-8",
+    )
+    assert "repository.claim" not in (web / "server.py").read_text(encoding="utf-8")
+
+    gained = capabilities(source, web)
+    assert gained == {"draft"}
+
+    stale = "<!-- careersignal-web-capabilities\nrecord_status\ndecide\n-->"
+    assert declared(stale) != gained, "the stale manifest still matched; the guard is blind"
+    updated = "<!-- careersignal-web-capabilities\ndraft\n-->"
+    assert declared(updated) == gained
+
+
+def test_reconciling_through_the_service_is_counted_the_same_way(tmp_path):
+    """The second outward command, which reaches only `finish`."""
+    source, web = outward_tree(tmp_path)
+    (source / "system" / "workflow.py").write_text(
+        "class OutwardActions:\n"
+        "    def __init__(self, repository, provider):\n"
+        "        self.repository, self.provider = repository, provider\n"
+        "\n"
+        "    def reconcile(self, review):\n"
+        "        found = self.provider.lookup(review)\n"
+        "        return self.repository.claim(found)\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "def _reconcile(self, review):\n    return self.server.actions.reconcile(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"reconcile"}
+
+
+def test_a_web_surface_that_reimplements_the_workflow_is_also_counted(tmp_path):
+    """The other route to the same power, closed by the same rule.
+
+    A surface that skipped the service and wrote the workflow itself would name the
+    repository's own writes. Both routes have to be visible, or the guard would merely
+    choose which way round it can be defeated.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _draft(self, review):\n    return self.server.repository.claim(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"claim"}
+
+
+def test_a_web_surface_that_only_reads_declares_nothing(tmp_path):
+    """The floor. A read is not a capability, however it is reached."""
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _list(self):\n    return self.server.repository.opportunities()\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == set()
+
+
+def test_an_unrelated_method_of_the_same_name_is_not_outward_authority(tmp_path):
+    """The failure a flat name scan would produce, and does not.
+
+    `draft` is a capability because `OutwardActions.draft` reaches a write. A different
+    object that happens to have a method spelled the same way is not outward authority, and
+    counting it would demand a declaration for something the browser cannot do -- teaching
+    the next person that the manifest is noise to be silenced rather than a statement to be
+    read.
+    """
+    source, web = outward_tree(tmp_path)
+    (source / "system" / "letters.py").write_text(
+        "class Letterhead:\n    def draft(self, text):\n        return text.strip()\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "from system.letters import Letterhead\n"
+        "\n"
+        "def _preview(self, text):\n"
+        "    letterhead = Letterhead()\n"
+        "    return letterhead.draft(text)\n",
+        encoding="utf-8",
+    )
+    # The name is in the vocabulary, because the service's own `draft` reaches a write.
+    assert "draft" in entrypoints(source, web)
+    # It is still not a capability here: this receiver is not what owns that draft.
+    assert capabilities(source, web) == set()
+
+
+def test_the_same_call_on_the_service_is_counted(tmp_path):
+    """The other half of the pair, so the discrimination is shown rather than assumed."""
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import OutwardActions\n"
+        "\n"
+        "def _draft(self, review):\n"
+        "    actions = OutwardActions(self.repository, self.provider)\n"
+        "    return actions.draft(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"draft"}
+
+
+def test_the_service_imported_under_another_name_is_counted(tmp_path):
+    """An import alias is a spelling, not a different class.
+
+    `from system.workflow import OutwardActions as OA` is legal and ordinary, and a surface
+    written that way reaches exactly the same authority. Judging the local spelling would
+    find no owner for it, and an unmatched owner is dropped rather than fallen back on -- so
+    the manifest would stay agreeing with itself while the browser gained `draft`.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import OutwardActions as OA\n"
+        "\n"
+        "def _draft(self, review):\n"
+        "    actions = OA(self.server.repository, self.server.provider)\n"
+        "    return actions.draft(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"draft"}
+
+    stale = "<!-- careersignal-web-capabilities\nrecord_status\ndecide\n-->"
+    assert declared(stale) != capabilities(source, web), "an alias hid the capability"
+
+
+def test_an_alias_does_not_lend_authority_to_an_unrelated_class(tmp_path):
+    """The other direction of the same resolution, so it is a mapping and not a loophole.
+
+    A `Letterhead` imported *as* `OutwardActions` is still a `Letterhead`, and its `draft`
+    still reaches no write. Resolving the import is what keeps that judgement about the
+    class rather than about the name in front of the parentheses.
+    """
+    source, web = outward_tree(tmp_path)
+    (source / "system" / "letters.py").write_text(
+        "class Letterhead:\n    def draft(self, text):\n        return text.strip()\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "from system.letters import Letterhead as OutwardActions\n"
+        "\n"
+        "def _preview(self, text):\n"
+        "    letterhead = OutwardActions()\n"
+        "    return letterhead.draft(text)\n",
+        encoding="utf-8",
+    )
+    assert "draft" in entrypoints(source, web)
+    assert capabilities(source, web) == set()
+
+
+def test_no_entrypoint_name_is_owned_by_two_classes():
+    """What keeps the unresolved-receiver fallback from attributing to the wrong owner.
+
+    A receiver this cannot resolve is judged by name alone. That is sound only while each
+    entrypoint name belongs to one owner, which is true today. If a second class ever
+    defines a method sharing one of these names, this fails and says so -- turning a silent
+    mis-attribution into a specific instruction to disambiguate, rather than leaving the
+    guard quietly wrong in whichever direction the collision happened to fall.
+    """
+    shared = {name: sorted(owners) for name, owners in entrypoints().items() if len(owners) > 1}
+    assert not shared, f"these entrypoint names have more than one owner: {shared}"
+
+
+def test_an_unresolved_receiver_still_counts(tmp_path):
+    """The fallback itself, stated as behaviour rather than left implicit.
+
+    `repository` is handed to the surface; it is never constructed there, so its receiver
+    cannot be resolved to a class. Falling back to the name is what keeps the injected case
+    visible, and erring toward asking for a declaration is the direction to err in.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _claim(self, review):\n"
+        "    repository = self.server.repository\n"
+        "    return repository.claim(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"claim"}

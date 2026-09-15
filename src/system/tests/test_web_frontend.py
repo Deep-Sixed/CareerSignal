@@ -150,7 +150,7 @@ def test_exactly_one_command_is_sent_and_only_from_the_module_that_holds_the_cre
         sent = body.count(f'"{COMMAND_METHOD}"') + body.count(f"'{COMMAND_METHOD}'")
         assert sent == (1 if path.name == "api.js" else 0), path.name
     body = code(STATIC / "api.js")
-    assert body.count("method:") == 1, "a method is chosen somewhere other than the one command"
+    assert body.count("method:") == 1, "a method is chosen outside the shared command helper"
     assert "X-CareerSignal-Token" in body
     assert 'credentials: "omit"' in body
 
@@ -220,7 +220,8 @@ def test_a_refused_command_is_shown_and_never_retried():
 
 
 def test_every_read_goes_through_the_same_module():
-    """`fetch` appears twice in api.js -- one read helper, one command -- and nowhere else."""
+    """`fetch` appears twice in api.js -- one read helper, one command helper -- and nowhere
+    else. Every command shares the second, so this count does not move when one is added."""
     for path in SCRIPTS:
         found = code(path).count("fetch(")
         assert found == (2 if path.name == "api.js" else 0), path.name

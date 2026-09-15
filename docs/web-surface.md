@@ -22,9 +22,24 @@ The surface is confined by construction rather than by configuration, so each of
 
 **It binds loopback only.** `127.0.0.1`, with no parameter that accepts another interface.
 
-**It answers `GET`, `HEAD` and two `POST` addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly two addresses, each written out beside the reads rather than registered in a router that would accept a third the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
+**It answers `GET`, `HEAD` and explicitly permitted `POST` command addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows that default only at the explicitly listed command addresses, each written out beside the reads rather than registered in a router that would accept another the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
 
-**It reaches read projections and two mutations.** `record_status()` and `decide()`, and nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential. A test reads the package's own syntax tree and asserts the set of non-read repository members it touches is exactly `{record_status, decide}` — stated positively, so the guard says what the browser *can* do rather than only what it cannot, and against a literal, so widening it means editing the guard too.
+**It reaches read projections, and the mutations declared below.** This block is the canonical statement of what the browser may change, and it is not prose — a test parses it and compares it against what the package's own syntax tree proves it can reach:
+
+<!-- careersignal-web-capabilities
+record_status
+decide
+-->
+
+`record_status()` appends a status event; `decide()` records an approval or a rejection. Nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential.
+
+The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention.
+
+What counts as a capability is **a write entrypoint this package invokes**, not a repository member it names. The two differ, and the difference is the whole point: the outward boundary is a service, so `OutwardActions.draft()` reaches `claim`, `finish`, `refuse` and `reject` without its caller naming any of them. A rule that looked only for members of a variable called `repository` would let this surface acquire the entire outward workflow while still declaring nothing — passing, and wrong. So the derivation is seeded from the definitions that open a transaction and closed over calls, and a surface that reimplements the workflow itself is caught by the same rule, because it would name those writes directly.
+
+An entrypoint is attributed to the class that owns it, so this is not a search for a method name. `draft` is a capability when it is reached on an `OutwardActions`; an unrelated object with a method spelled the same way is not outward authority. Ownership is earned per definition rather than shared by name, and a receiver that cannot be resolved — an injected `repository`, a parameter — falls back to the name, which errs toward asking for a declaration rather than omitting one. A test proves no entrypoint name has two owners, so that fallback cannot quietly attribute a capability to the wrong thing.
+
+Widening what the browser may do therefore means editing this block deliberately, in the same change — which is the point of keeping the declaration here, next to the explanation of what these commands are, rather than duplicating a machine-readable list into every file that mentions them.
 
 **It derives no fact.** Every route hands back what a repository projection already returned. The rules were settled where the storage is; a second opinion computed at the edge is how a list and a detail pane start disagreeing about the same opportunity.
 
@@ -124,7 +139,7 @@ The browser may fetch, select a row, filter rows it already has, count statuses 
 
 Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
 
-The browser may write two things: a status, and a decision. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; both commands are described below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
+The browser may write only what the capability block above declares. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; every command it may send is written out below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
 
 ## The commands
 
