@@ -1,6 +1,6 @@
 # The local surface
 
-CareerSignal's first surface that listens on a socket. It reads, it records a status, and it records a decision. It creates no draft and contacts no mailbox: drafting and reconciling are still command-line actions.
+CareerSignal's first surface that listens on a socket. It reads, it records a status, it records a decision, and it runs the two outward commands — creating a draft and reconciling one. It never sends: a draft is left in the destination mailbox for the operator to send by hand.
 
 ```sh
 uv run careersignal serve --db /path/to/private.db
@@ -33,7 +33,7 @@ draft
 reconcile
 -->
 
-`record_status()` appends a status event; `decide()` records an approval or a rejection. Nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential.
+`record_status()` appends a status event; `decide()` records an approval or a rejection; `draft()` and `reconcile()` are the outward workflow, reached on the service that owns it. Nothing else: no intake, and no `claim()`, `finish()`, `refuse()` or `reject()` — this surface asks `OutwardActions` for the workflow rather than reimplementing it, and constructs no provider and holds no credential of its own.
 
 The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention.
 
@@ -141,7 +141,7 @@ The browser may fetch, select a row, filter rows it already has, count statuses 
 
 Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
 
-The browser may write only what the capability block above declares. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; every command it may send is written out below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
+The browser may write only what the capability block above declares. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; every command it may send is written out below. **Create draft** and **Reconcile** are here too, below the decision rather than beside it, because authorizing an action and performing it are different steps and should not read as one control group. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
 
 ## The commands
 
@@ -227,6 +227,69 @@ A state refusal — a terminal opportunity, a below-threshold review, a decision
 
 Nothing is written when it is raised: no decision row, no audit event. An approval that already stood stands exactly as it was.
 
+## The outward commands
+
+```
+POST /api/v1/reviews/{review_id}/draft
+POST /api/v1/reviews/{review_id}/reconcile
+```
+
+Both carry `{}`. The address is the whole of the request: what a draft would say was settled by the approval, and reconciliation asks the destination what happened rather than telling it anything. A body carrying any field at all is refused rather than ignored — `actor`, `provider` and `expected` are all things this surface decides for itself, and accepting them silently would read as though a page could choose them.
+
+**Every rule belongs to `OutwardActions`.** Whether an approval exists, whether it still binds the packet on screen, whether the destination matches, whether an intent already stands — none of it is pre-checked here. A check at this layer could only read outside the transaction that depends on the answer, which is the race the claim exists to close. It is the same reason the decision command does not compare bindings and the status command does not compare events.
+
+### Four outcomes, never two
+
+A draft attempt has four possible answers and they are not degrees of success. Each says something different about whether a draft now exists in the operator's mailbox, and each calls for a different move:
+
+| Outcome | What it means | What the operator does |
+| --- | --- | --- |
+| `accepted` | The provider confirmed creation, and the receipt is known | Read the draft in the mailbox and send it by hand |
+| `refused` | CareerSignal refused locally; no draft-create request was ever sent | Correct the cause — the approval still stands — and try again |
+| `provider_rejected` | A request was sent and the provider's own answer proves nothing was created | Correct the cause and draft again; no reconciliation is needed |
+| `uncertain` | A request was sent and the outcome cannot be established | **Reconcile.** Never draft again first |
+
+`refused` and `provider_rejected` share the property that nothing exists out there. They are reported separately because they are not the same fact: one means no request was ever sent, the other means one was sent and came back proving it failed. A provider may only report the second where its own documented contract says a response proves non-creation; anything it cannot prove that way falls to `uncertain`, because fewer proven rejections is always the safe direction to be wrong in.
+
+`uncertain` is the one that matters. It is not a failure — it is the honest answer when a draft-create request may or may not have landed.
+
+### After an uncertain attempt, nothing creates a second draft
+
+This is the property the surface is built around.
+
+An unresolved attempt leaves a durable intent, and `draft()` stops on that intent before it composes anything. Asking again writes nothing and contacts nothing; it reports the same unresolved state and points at reconciliation. There is no retry, no timer, no automatic repeat, and no **Draft again** control anywhere in the browser — the absence is deliberate, and a test asserts it against the shipped file.
+
+**Reconciliation never creates a draft.** Its authority over the provider is read-only: it searches the destination for this review's own intent key and records what it finds.
+
+- **Found** — the existing intent is confirmed with its receipt. Nothing is created.
+- **Not found** — the attempt stays `uncertain`. Unknown is not evidence of absence: a search that found nothing has established that *this search* did not find it, and turning that into permission to draft again is the single most dangerous thing this surface could do.
+- **Cannot verify the destination** — `refused`, and the existing intent is untouched. A lookup made with a credential that cannot be proven would search a mailbox the attempt was never made against and report its silence as evidence.
+
+**A confirmed attempt is idempotent.** Drafting or reconciling again returns the receipt that already exists and contacts the provider for nothing new.
+
+### Two operators, one review
+
+The reservation is the database's to grant, not the web server's. Two simultaneous drafts produce exactly one provider draft: the claim is a write the database serialises, and the losing request is told the attempt is already under way rather than being given one to make. There is no in-process lock — a mutex in the handler would hold for one process, and the repository is the source of truth.
+
+| Condition | Response |
+| --- | --- |
+| the attempt ran — `accepted`, `provider_rejected` or `uncertain` | `200` with the record |
+| CareerSignal refused locally — `refused` | `409` with the record |
+| malformed body, any field, or an unknown parameter | `400` |
+| bad/missing launch token | `401` |
+| bad/missing `Origin` | `403` |
+| review does not exist | `404` |
+| oversized body | `413` |
+| any other method, or `GET` on either address | `405` |
+
+`refused` answers `409` because it is a conflict with what is stored — a stale approval, a destination that is not the approved one, an intent already standing — exactly as a refused decision is. The other three ran, and they are answers rather than errors.
+
+### Outward authority is optional at launch
+
+Recording a decision has never needed a credential that can reach the mailbox; creating a draft does. So a Gmail launch without a compose token serves decisions and refuses to act on them, rather than refusing to start — making the safe half of the workflow depend on the unsafe half is the dependency that was deliberately removed. `/session` reports `outward` as a boolean, never a credential, and the browser says so plainly instead of offering a control that could only ever refuse.
+
+**CareerSignal never sends.** `draft` creates a draft and stops. The operator reads it in the mailbox and sends it themselves.
+
 ## Where an approval points
 
 The destination is a **launch fact**, declared the way the command line already declares one:
@@ -280,7 +343,7 @@ The active evaluation profile. The session panel reports only facts that are aut
 
 `.eml` ingestion and the Gmail label read, which are write affordances and belong with intake.
 
-Outward authority. Creating a draft and reconciling one remain command-line actions, and they are the ones that actually reach a mailbox. Approving now happens here, bound to the packet it was read from; what an approval does is authorize, and authorizing is not the same as acting. That separation is the point rather than a staging accident: the operator says yes in one place, and the thing that leaves the machine is still started deliberately somewhere else.
+Sending. CareerSignal stops at draft creation and always has. The draft is left in the destination mailbox and the operator sends it themselves, from the mailbox, after reading it. No surface here has ever had a send path and none is planned; a machine that could both decide to write to someone and then send it is a different product.
 
 Reversing a decision to decline. A rejected review can be approved again from the command line; this surface reports the decision and offers no control for it. A first write surface should not also be the place that quietly re-opens something an operator deliberately closed.
 

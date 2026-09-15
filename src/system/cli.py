@@ -35,11 +35,18 @@ still emit a JSON document. They report no outcome because they have no operator
 in them.
 
 `serve` is neither. It binds a loopback socket and blocks, printing one address and then
-serving until it is stopped, so it has no single outcome to report. What it serves is reads,
-one status append and one decision -- each bounded where it is implemented rather than here:
-a status carries the event it was recorded against, and an approval carries the packet it
-was read from. Creating a draft and reconciling one stay on the command line, because those
-are the actions that reach a mailbox, and authorizing one is not the same as doing it.
+serving until it is stopped, so it has no single outcome to report. What it serves is reads
+and the four commands -- each bounded where it is implemented rather than here: a status
+carries the event it was recorded against, an approval carries the packet it was read from,
+and the two outward commands carry nothing, because what they would say was settled by the
+approval. The outward pair reports the same four outcomes listed above, from the same code,
+so a draft attempted from a browser and one attempted here cannot be described differently.
+
+Outward authority is optional at that launch and is decided here, not there. Creating a draft
+needs a credential that can reach the mailbox; recording a decision never has. A Gmail launch
+without a compose token therefore serves decisions and refuses to act on them, rather than
+refusing to start -- making the safe half of the workflow depend on the unsafe half is the
+dependency that was deliberately removed.
 
 This module composes and prints. It holds no rule of its own: every refusal below comes
 from the layer that owns it, and nothing here decides whether an action is authorized.
@@ -435,7 +442,8 @@ def main():
         }
     elif args.command == "serve":
         # Loopback-only by construction: the surface offers no way to bind another
-        # interface, and it reads, records a status and records a decision -- nothing else.
+        # interface, and it reads and answers the four commands declared in
+        # docs/web-surface.md -- nothing else.
         # It blocks here until the operator stops it, so it returns rather than falling
         # through to the JSON report the pipeline commands print.
         #

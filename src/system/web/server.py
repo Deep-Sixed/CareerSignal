@@ -5,9 +5,11 @@ it refuses. It binds 127.0.0.1 and offers no way to bind anything else. It answe
 HEAD, and POST only at the addresses written out below, and refuses every other method
 before routing.
 
-One command appends a status event; the other records a decision. Everything else it
-reaches is a read projection: no intake, no claim, no draft, no reconciliation, no provider
-and no credential. What this package may change is declared once, in `docs/web-surface.md`,
+One command appends a status event and one records a decision; two more run the outward
+workflow -- creating a draft and reconciling one -- by asking the service that owns that
+authority rather than performing it here. Everything else it reaches is a read projection:
+no intake, no claim, no finish, no refuse, no reject, and no provider or credential of its
+own. What this package may change is declared once, in `docs/web-surface.md`,
 and a test compares that declaration against this package's own syntax tree -- so widening it
 means saying so there, in the same change, rather than discovering later that the code and
 the documentation stopped agreeing.
