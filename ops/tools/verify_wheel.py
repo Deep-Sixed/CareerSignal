@@ -73,10 +73,14 @@ surface = Surface(Repository("extraction.db"), port=0)
 threading.Thread(target=surface.serve_forever, daemon=True).start()
 
 
-def ask(path, method="GET", token=True):
-    request = urllib.request.Request(surface.origin + path, method=method)
+def ask(path, method="GET", token=True, body=None, origin=True):
+    request = urllib.request.Request(surface.origin + path, method=method, data=body)
     if token:
         request.add_header(TOKEN_HEADER, surface.token)
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    if origin:
+        request.add_header("Origin", surface.origin)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, response.read()
@@ -104,8 +108,34 @@ for method in ("POST", "PUT", "PATCH", "DELETE"):
     assert status == 405, (method, status, body)
 assert ask("/api/v1/timeline")[1] == before, "a refused write still moved a ledger"
 
+# The one command, from the installed wheel: the vocabulary is served, a status appends,
+# and the same command sent twice is refused the second time without writing.
+vocabulary = json.loads(ask("/api/v1/statuses")[1])["statuses"]
+assert vocabulary[0] == "new" and "interviewing" in vocabulary, vocabulary
+listed = json.loads(ask("/api/v1/opportunities")[1])
+chosen, event = listed[0]["id"], listed[0]["status_event"]
+address = "/api/v1/opportunities/" + chosen + "/status"
+order = json.dumps({"status": "applied", "expected_event_id": event}).encode()
+
+status, body = ask(address, method="POST", body=order)
+assert status == 200, (status, body)
+assert json.loads(body)["status"] == "applied", body
+
+status, body = ask(address, method="POST", body=order)
+assert status == 409, (status, body)
+assert json.loads(body)["error"] == "status_conflict", body
+
+assert ask(address, method="POST", body=order, origin=False)[0] == 403
+assert ask(address, method="POST", body=order, token=False)[0] == 401
+assert ask(address, method="POST", body=b"{oops", origin=True)[0] == 400
+
+history = json.loads(ask("/api/v1/opportunities/" + chosen)[1])["history"]
+assert [row["status"] for row in history][-1] == "applied", history
+assert sum(1 for row in history if row["status"] == "applied") == 1, history
+assert history[-1]["actor"] == "operator", history
+
 surface.shutdown()
-print("read surface verified from the installed wheel")
+print("read surface and the status command verified from the installed wheel")
 """
 
 
@@ -209,7 +239,7 @@ def main():
             run(str(check))
     print(
         "PASS: pure-Python installed wheel, zero runtime dependencies, resource discovery, "
-        "golden workflow, replay and the loopback read surface"
+        "golden workflow, replay, the loopback read surface and its one command"
     )
 
 

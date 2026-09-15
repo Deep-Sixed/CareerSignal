@@ -23,7 +23,7 @@ from system import views
 STATIC = Path(__file__).resolve().parents[1] / "web" / "static"
 SCRIPTS = sorted(STATIC.glob("*.js"))
 # Every route the server actually has, as the first segment under /api/v1.
-ROUTES = ("session", "opportunities", "communications", "reviews", "timeline")
+ROUTES = ("session", "opportunities", "communications", "reviews", "timeline", "statuses")
 # Sinks that parse a string as markup or as code. None may appear anywhere.
 SINKS = (
     "innerHTML",
@@ -36,7 +36,9 @@ SINKS = (
     "srcdoc",
     "javascript:",
 )
-WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+# The one verb the frontend may send, and every verb it may not.
+COMMAND_METHOD = "POST"
+FORBIDDEN_METHODS = ("PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 COMMENT = re.compile(r"/\*.*?\*/|(?<![:\"'])//[^\n]*", re.S)
 
 
@@ -123,23 +125,105 @@ def test_an_href_is_the_one_value_checked_rather_than_only_written():
 
 
 @pytest.mark.parametrize("path", SCRIPTS, ids=lambda path: path.name)
-def test_no_script_can_make_a_request_that_is_not_a_get(path):
+def test_no_script_names_a_verb_this_surface_does_not_answer(path):
+    """One command exists; nothing else may even be spelled.
+
+    A frontend that never writes the word cannot send the request, so this is checked as a
+    property of the source rather than of what happened to be exercised at runtime.
+    """
     body = code(path)
-    for method in WRITE_METHODS:
+    for method in FORBIDDEN_METHODS:
         assert f'"{method}"' not in body and f"'{method}'" not in body, path.name
-    assert "method:" not in body.replace(" ", ""), path.name
     assert "XMLHttpRequest" not in body and "sendBeacon" not in body
     assert "<form" not in body and "requestSubmit" not in body
 
 
-def test_every_request_goes_through_the_one_module_that_holds_the_credential():
-    """`fetch` appears once, in api.js, inside a helper with no method parameter."""
+def test_exactly_one_command_is_sent_and_only_from_the_module_that_holds_the_credential():
+    """The write surface of this whole application, as a count.
+
+    `POST` is written once, in one file, in a helper with no method parameter -- so there
+    is nothing a screen could hand a different verb to. A second command means a second
+    function here, which means this number changes and a reader is made to notice.
+    """
     for path in SCRIPTS:
-        found = code(path).count("fetch(")
-        assert found == (1 if path.name == "api.js" else 0), path.name
+        body = code(path)
+        sent = body.count(f'"{COMMAND_METHOD}"') + body.count(f"'{COMMAND_METHOD}'")
+        assert sent == (1 if path.name == "api.js" else 0), path.name
     body = code(STATIC / "api.js")
+    assert body.count("method:") == 1, "a method is chosen somewhere other than the one command"
     assert "X-CareerSignal-Token" in body
     assert 'credentials: "omit"' in body
+
+
+def test_the_command_is_addressed_to_the_one_route_the_server_answers():
+    body = code(STATIC / "api.js")
+    assert "/status`" in body, "the command no longer names the status address"
+    assert "recordStatus" in body
+    # Sent as JSON, because the server refuses anything else and a silently dropped header
+    # would turn every write into a 400 the operator could not explain.
+    assert "Content-Type" in body and "application/json" in body
+
+
+def test_the_command_carries_the_event_the_operator_was_shown():
+    """A blind append is the race `expected_event_id` exists to close.
+
+    The value has to come from the record on screen. A literal, a cached number, or the
+    newest event re-read at submit time would each turn a compare-and-append back into an
+    ordinary append that happens to carry a number.
+    """
+    body = code(STATIC / "screens.js")
+    assert "expected_event_id: record.status_event" in body, (
+        "the command no longer binds to the event in the detail the operator is reading"
+    )
+
+
+def region(body, opening, closing):
+    """The text between a declaration and the line that closes it.
+
+    Slicing to the end of the file would let a later function satisfy an assertion about
+    this one -- which is exactly how the first version of the test below passed against a
+    `recordStatus` that had stopped re-reading.
+    """
+    start = body.index(opening)
+    end = body.index(closing, start)
+    return body[start:end]
+
+
+def test_the_browser_re_reads_after_a_command_rather_than_patching_what_it_has():
+    """What the row, the queue and the counts become is the engine's answer.
+
+    A local patch would be the browser forming a second opinion about state it had just
+    asked the server to change -- the same duplication the presentation seam exists to
+    prevent, arriving through the back door.
+    """
+    body = code(STATIC / "app.js")
+    command = region(body, "recordStatus(payload)", "\n  },")
+    assert "await reload()" in command, "a command no longer re-reads"
+    assert "await opportunityDetail(" in command, "the detail pane is not rebuilt from the server"
+    # One assembler for the pane, so the view after a command is built exactly as the view
+    # after a click is.
+    assert body.count("async function opportunityDetail(") == 1
+
+
+def test_a_refused_command_is_shown_and_never_retried():
+    body = code(STATIC / "app.js")
+    command = region(body, "recordStatus(payload)", "\n  },")
+    assert "refused(answer)" in command, "a refusal is not surfaced to the operator"
+    assert "answer.ok" in command
+    described = region(body, "function refused(", "\n}")
+    assert "409" in described and "observed_event_id" in described, (
+        "the refusal no longer says what the server found"
+    )
+    # Nothing re-sends. A retry against the newer event would be this surface deciding on
+    # the operator's behalf, which is exactly what the compare-and-append refuses to do.
+    assert "recordStatus(" not in command[command.index("await api.recordStatus") + 30 :]
+
+
+def test_every_read_goes_through_the_same_module():
+    """`fetch` appears twice in api.js -- one read helper, one command -- and nowhere else."""
+    for path in SCRIPTS:
+        found = code(path).count("fetch(")
+        assert found == (2 if path.name == "api.js" else 0), path.name
 
 
 def test_every_path_the_frontend_asks_for_is_a_route_the_server_has():

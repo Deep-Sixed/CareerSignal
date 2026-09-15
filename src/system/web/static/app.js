@@ -25,6 +25,7 @@ const state = {
   activeOnly: false,
   floor: 0,
   failure: null,
+  statuses: [],
 };
 
 let api = null;
@@ -88,6 +89,65 @@ function show(name) {
   render();
 }
 
+async function reload() {
+  /* One re-read of everything a status change can move, so no screen is left describing a
+   * state that no longer exists. */
+  const [opportunities, timeline] = await Promise.all([
+    api.opportunities(),
+    api.timeline(TIMELINE_LIMIT),
+  ]);
+  state.opportunities = opportunities;
+  state.timeline = timeline;
+  state.byId = new Map(opportunities.map((row) => [row.id, row]));
+}
+
+
+async function opportunityDetail(id, extra = {}) {
+  /* One assembler for the detail pane, so the pane after a command is built exactly the
+   * way the pane after a click is. Two paths would be two chances to disagree. */
+  const record = await api.opportunity(id);
+  const sources = await api.sources(id);
+  const audit = state.timeline.filter(
+    (event) => event.kind === "audit" && event.review === record.review,
+  );
+  let authorization = null;
+  if (record.review) {
+    try {
+      authorization = await api.authorization(record.review);
+    } catch {
+      /* A superseded review is refused by the engine in its own words. The rest of the
+       * opportunity is still worth reading, so the digests block is simply absent rather
+       * than the whole pane failing. */
+      authorization = null;
+    }
+  }
+  return {
+    kind: "opportunity",
+    record,
+    sources,
+    audit,
+    authorization,
+    statuses: state.statuses,
+    composing: false,
+    refusal: null,
+    ...extra,
+  };
+}
+
+function refused(answer) {
+  /* What the server found, in the operator's terms. A conflict is not a failure of the
+   * request: it says the thing they were looking at has moved. */
+  if (answer.status === 409) {
+    return (
+      "This opportunity changed since it was shown: it is now " +
+      `${answer.body.status} at event ${answer.body.observed_event_id}. ` +
+      "Nothing was written. Decide again against what it says now."
+    );
+  }
+  return answer.body.error || "The command was refused.";
+}
+
+
 async function guard(work) {
   try {
     await work();
@@ -102,26 +162,38 @@ const actions = {
   openOpportunity(id) {
     guard(async () => {
       state.selected = id;
-      const record = await api.opportunity(id);
-      const sources = await api.sources(id);
-      const audit = state.timeline.filter(
-        (event) => event.kind === "audit" && event.review === record.review,
-      );
-      let authorization = null;
-      if (record.review) {
-        try {
-          authorization = await api.authorization(record.review);
-        } catch {
-          /* A superseded review is refused by the engine in its own words. The rest of
-           * the opportunity is still worth reading, so the digests block is simply absent
-           * rather than the whole pane failing. */
-          authorization = null;
-        }
-      }
-      state.detail = { kind: "opportunity", record, sources, audit, authorization };
+      state.detail = await opportunityDetail(id);
       if (state.screen === "inbox" || state.screen === "activity") {
         state.screen = "opportunities";
       }
+    });
+  },
+  composeStatus() {
+    state.detail = { ...state.detail, composing: true, refusal: null };
+    render();
+  },
+  cancelStatus() {
+    state.detail = { ...state.detail, composing: false, refusal: null };
+    render();
+  },
+  recordStatus(payload) {
+    /* Send, then re-read. Nothing here patches the row, the status, the queue or a count:
+     * what those become is the engine's to decide, and a local edit would be this browser
+     * forming a second opinion about state it just asked the server to change.
+     *
+     * A refusal is re-read too, and the form stays open on the new state. The operator was
+     * acting on something that has moved, so the first thing they need is what it moved
+     * to -- and the command is never retried against the newer event, because deciding
+     * again is theirs to do.
+     */
+    const id = state.selected;
+    guard(async () => {
+      const answer = await api.recordStatus(id, payload);
+      await reload();
+      state.detail = await opportunityDetail(id, {
+        composing: !answer.ok,
+        refusal: answer.ok ? null : refused(answer),
+      });
     });
   },
   openCommunication(id) {
@@ -164,17 +236,15 @@ async function start() {
   }
   api = connect(credential);
   await guard(async () => {
-    const [session, opportunities, communications, timeline] = await Promise.all([
+    const [session, communications, vocabulary] = await Promise.all([
       api.session(),
-      api.opportunities(),
       api.communications(),
-      api.timeline(TIMELINE_LIMIT),
+      api.statuses(),
     ]);
     renderSession(session);
-    state.opportunities = opportunities;
     state.communications = communications;
-    state.timeline = timeline;
-    state.byId = new Map(opportunities.map((row) => [row.id, row]));
+    state.statuses = vocabulary.statuses;
+    await reload();
   });
 }
 

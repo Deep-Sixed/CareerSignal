@@ -864,3 +864,95 @@ body {
 .quiet-card:hover {
   background: none;
 }
+
+/* --- the one command ------------------------------------------------------------------- */
+
+.action {
+  margin: 16px 0 4px;
+}
+
+.primary,
+.secondary {
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.secondary {
+  background: var(--pane);
+  color: var(--accent-ink);
+  border-color: var(--edge);
+  font-weight: 400;
+}
+
+.action-form {
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  padding: 14px 16px;
+  background: #fbfbf9;
+}
+
+.action-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.status-choice,
+.status-reason {
+  width: 100%;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: var(--pane);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.status-reason {
+  resize: vertical;
+  min-height: 3em;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.action-refusal {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #e7c9c9;
+  border-radius: 3px;
+  background: #fbf0f0;
+  color: #8a1f1f;
+  font-size: 13px;
+  line-height: 1.5;
+}

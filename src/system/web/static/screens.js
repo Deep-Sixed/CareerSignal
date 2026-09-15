@@ -273,7 +273,70 @@ function attention(record) {
   );
 }
 
-function opportunityDetail(record, extra) {
+function statusAction(record, extra, actions) {
+  /* The one thing this surface can change, anchored to the opportunity rather than to the
+   * approval packet below: a status is opportunity authority, and an approval is not.
+   */
+  const holder = el("div", "action");
+  if (!extra.composing) {
+    const open = button("primary", () => actions.composeStatus());
+    text(open, "Change status");
+    return put(holder, open);
+  }
+  const form = el("div", "action-form");
+  put(
+    form,
+    el(
+      "p",
+      "action-note",
+      `Recorded against event ${record.status_event} (${record.status}). This appends a ` +
+        "history event; it does not edit what is already there. If the opportunity has " +
+        "moved since this was read, nothing is written.",
+    ),
+  );
+
+  const chooser = el("label", "field");
+  put(chooser, el("span", "field-label", "Status"));
+  const choices = el("select", "status-choice");
+  for (const name of extra.statuses || []) {
+    const option = el("option", null, name);
+    option.value = name;
+    if (name === record.status) {
+      option.selected = true;
+    }
+    choices.append(option);
+  }
+  put(chooser, choices);
+
+  const note = el("label", "field");
+  // What the engine actually does with it: `record_status` strips surrounding whitespace
+  // and stores the rest unchanged, so the line breaks inside a note survive.
+  put(note, el("span", "field-label", "Reason (optional, line breaks kept)"));
+  const reason = el("textarea", "status-reason");
+  reason.rows = 3;
+  reason.value = extra.reason || "";
+  put(note, reason);
+
+  const cancel = button("secondary", () => actions.cancelStatus());
+  text(cancel, "Cancel");
+  const record_ = button("primary", () =>
+    actions.recordStatus({
+      status: choices.value,
+      reason: reason.value,
+      expected_event_id: record.status_event,
+    }),
+  );
+  text(record_, "Record status");
+
+  put(form, chooser, note, put(el("div", "action-buttons"), cancel, record_));
+  if (extra.refusal) {
+    put(form, el("p", "action-refusal", extra.refusal));
+  }
+  return put(holder, form);
+}
+
+
+function opportunityDetail(record, extra, actions) {
   const body = el("div", "detail-pane");
   put(
     body,
@@ -291,6 +354,7 @@ function opportunityDetail(record, extra) {
     put(tags, chip(record.advances ? "advances" : "does not advance", "quiet"));
   }
   put(body, tags, put(el("div", "detail-url"), link(record.url)));
+  put(body, statusAction(record, extra, actions));
   put(body, attention(record));
 
   const packet = record.packet;
@@ -663,7 +727,7 @@ export function detailFor(state, actions) {
   if (state.detail.kind === "communication") {
     return communicationDetail(state.detail.record, state, actions);
   }
-  return opportunityDetail(state.detail.record, state.detail);
+  return opportunityDetail(state.detail.record, state.detail, actions);
 }
 
 export function controlsFor(state, actions) {

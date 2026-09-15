@@ -1,11 +1,13 @@
-"""A loopback-only, token-authenticated, read-only HTTP projection of what is stored.
+"""A loopback-only, token-authenticated HTTP projection of what is stored, plus one command.
 
 This is the first CareerSignal surface that listens on a socket, so it is defined by what
 it refuses. It binds 127.0.0.1 and offers no way to bind anything else. It answers GET and
-HEAD and refuses every other method before routing, so no request shape can reach a write.
-It reaches the repository's read projections and nothing else: no intake, no decision, no
-claim, no provider, no credential. Write authority is a later change and is deliberately
-not reachable from here.
+HEAD, and POST at exactly one address, and refuses every other method before routing.
+
+The single command appends a status event. Everything else it reaches is a read projection:
+no intake, no decision, no claim, no provider, no credential. Approval and outward authority
+are deliberately not reachable from here, and a test fails the build if that changes -- the
+only repository mutation any module in this package may name is `record_status`.
 
 Authority is a token generated once per launch and held in process memory. It is never
 stored, never logged and never reported by the API. It travels to the browser in the URL
@@ -27,6 +29,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from communications.gmail import TOKEN_VARIABLE
 from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
 from data.store import sqlite_report
+from recruiting.status import STATUSES, StatusConflict
 from system import views
 
 # The only address this surface knows how to bind. There is no --host and no fallback: an
@@ -74,6 +77,19 @@ WINDOW = ("limit", "since")
 # Opt-in, because the eight reads established in #29 are the repository's projections
 # exactly, and a caller that asked for one should keep getting one.
 PRESENTATION = "presentation"
+# The one command this surface answers, and the whole of what it accepts.
+COMMAND = ("opportunities", "status")
+COMMAND_FIELDS = frozenset({"status", "reason", "expected_event_id"})
+# Three short fields and an operator's note. The ceiling exists so an oversized request is
+# refused on what it declares rather than after it has been read into memory.
+MAX_BODY = 16 * 1024
+# Never taken from the request. The authenticated local browser is the operator, and an
+# actor supplied by JavaScript would let presentation input rewrite audit identity.
+OPERATOR = "operator"
+# What this surface answers at all. A command path narrows further; everything else is
+# still refused by default.
+METHODS = "GET, HEAD, POST"
+READ_METHODS = "GET, HEAD"
 
 
 def assets() -> dict:
@@ -103,6 +119,26 @@ def session(repository) -> dict:
         "gmail_token": bool(os.getenv(TOKEN_VARIABLE, "").strip()),
         "gmail_compose_token": bool(os.getenv(COMPOSE_TOKEN_VARIABLE, "").strip()),
     }
+
+
+def tail(path):
+    """The address beneath the API root, or None for a path that is not beneath it.
+
+    The prefix is proven rather than assumed. Slicing by `len(API_ROOT)` alone strips any
+    seven characters, so `/abcdef/opportunities/x/status` would present exactly the
+    segments `/api/v1/opportunities/x/status` does, and an address outside the API would
+    reach whatever that address routes to.
+
+    Empty components are kept rather than filtered out, so a doubled or trailing slash is
+    a different address than the one the contract names instead of an alias for it. Each
+    component is unquoted after the split, so a `%2F` inside an identifier stays one
+    component rather than dividing the address.
+    """
+    if path == API_ROOT:
+        return []
+    if not path.startswith(API_ROOT + "/"):
+        return None
+    return [unquote(part) for part in path[len(API_ROOT) + 1 :].split("/")]
 
 
 def one(query, name) -> str:
@@ -157,6 +193,42 @@ def window(query) -> dict:
     return {name: whole(query, name) for name in WINDOW if name in query}
 
 
+class Oversized(ValueError):
+    """A request declaring more bytes than this command could ever need."""
+
+
+def command(payload) -> dict:
+    """The three fields this command accepts, and nothing else.
+
+    Every refusal here is about shape. What a value *means* -- whether the status is in the
+    vocabulary, whether the event is still the newest one -- belongs to record_status(),
+    which judges it inside the transaction that depends on the answer. Checking either here
+    would be a second opinion that could disagree with the one that counts.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("The request body must be a JSON object")
+    unknown = sorted(set(payload) - COMMAND_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown field: {', '.join(unknown)}")
+    for name in ("status", "expected_event_id"):
+        if name not in payload:
+            raise ValueError(f"{name} is required")
+    if not isinstance(payload["status"], str):
+        raise ValueError("status must be text")
+    # `type(...) is not int` rather than isinstance, because bool is a subclass of int and
+    # `true` is not an event id.
+    if type(payload["expected_event_id"]) is not int:
+        raise ValueError("expected_event_id must be a whole number")
+    reason = payload.get("reason", "")
+    if not isinstance(reason, str):
+        raise ValueError("reason must be text")
+    return {
+        "status": payload["status"],
+        "reason": reason,
+        "expected_event_id": payload["expected_event_id"],
+    }
+
+
 def presenting(query) -> bool:
     """Whether this request asked for the rendered strings as well as the stored facts."""
     return PRESENTATION in query and boolean(query, PRESENTATION)
@@ -209,11 +281,13 @@ class Handler(BaseHTTPRequestHandler):
         """
 
     def __getattr__(self, name):
-        """Every method but GET and HEAD, including verbs this has never heard of.
+        """Every method but the three below, including verbs this has never heard of.
 
-        Answering here rather than enumerating POST, PUT, PATCH and DELETE means a request
-        does not need to be anticipated to be refused: the refusal is the default, and
-        reaching a route is what has to be spelled out.
+        Answering here rather than enumerating PUT, PATCH and DELETE means a request does
+        not need to be anticipated to be refused: the refusal is the default, and reaching
+        a route is what has to be spelled out. POST narrows that default by one command,
+        written out below, rather than replacing it with a router that would accept a
+        second command the day somebody registers one.
         """
         if name.startswith("do_"):
             return self._refuse_method
@@ -223,9 +297,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(
             HTTPStatus.METHOD_NOT_ALLOWED,
             JSON,
-            json.dumps({"error": "This surface is read-only"}).encode("utf-8"),
+            json.dumps({"error": "This surface reads, and records a status"}).encode("utf-8"),
             body=True,
-            extra={"Allow": "GET, HEAD"},
+            extra={"Allow": METHODS},
         )
 
     def do_GET(self):
@@ -233,6 +307,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         self._send(*self._resolve(), body=False)
+
+    def do_POST(self):
+        self._send(*self._command(), body=True)
 
     # --- the boundary ---------------------------------------------------------------------
 
@@ -246,9 +323,23 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is not None and origin != self.server.origin:
             return self._error(HTTPStatus.FORBIDDEN, "Unexpected Origin")
-        if parsed.path == API_ROOT or parsed.path.startswith(API_ROOT + "/"):
-            return self._api(parsed)
+        if not self._origin_form(parsed):
+            return self._error(HTTPStatus.BAD_REQUEST, "Unsupported request target")
+        segments = tail(parsed.path)
+        if segments is not None:
+            return self._api(parsed, segments)
         return self._static(parsed.path)
+
+    def _origin_form(self, parsed) -> bool:
+        """A request target this surface answers: a path, carrying no scheme and no authority.
+
+        A target in absolute form -- `http://127.0.0.1:8765/api/v1/...` -- names its own
+        authority, and HTTP makes that authority, not the Host header, the one that
+        identifies the server. This surface settles identity on Host, so honouring absolute
+        form would mean routing by one authority while checking another, and would give the
+        single command address a second spelling. It is refused rather than half-honoured.
+        """
+        return not parsed.scheme and not parsed.netloc
 
     def _authorized(self) -> bool:
         presented = self.headers.get(TOKEN_HEADER, "")
@@ -258,10 +349,9 @@ class Handler(BaseHTTPRequestHandler):
             presented.encode("utf-8", "surrogateescape"), self.server.token.encode("utf-8")
         )
 
-    def _api(self, parsed):
+    def _api(self, parsed, segments):
         if not self._authorized():
             return self._error(HTTPStatus.UNAUTHORIZED, "A valid launch token is required")
-        segments = [unquote(part) for part in parsed.path[len(API_ROOT) :].split("/") if part]
         try:
             # keep_blank_values, because the default drops `?status=` entirely and this
             # route's whole query contract is fail-closed: a parameter that disappears
@@ -315,7 +405,119 @@ class Handler(BaseHTTPRequestHandler):
                 return repository.authorization(review_id)
             case ["timeline"]:
                 return repository.timeline(**window(query))
+            case ["statuses"]:
+                accepted(query, ())
+                # The vocabulary itself, so a <select> can be filled without the browser
+                # holding a second copy that could fall out of step with the engine. The
+                # order is the module's presentation order; it carries no rule, and
+                # transitions are deliberately unrestricted.
+                return {"statuses": list(STATUSES)}
         return None
+
+    # --- the one command ------------------------------------------------------------------
+
+    def _command(self):
+        """Provenance before payload.
+
+        Host, Origin and token are settled before a byte of the body is read, so a request
+        that cannot prove where it came from never gets as far as being parsed. Origin is
+        required here rather than merely checked when present: a read with no Origin is an
+        ordinary same-document fetch, but a write with none has nothing to say for itself.
+        """
+        parsed = urlsplit(self.path)
+        if self.headers.get("Host") != self.server.authority:
+            return self._error(HTTPStatus.FORBIDDEN, "Unexpected Host")
+        if self.headers.get("Origin") != self.server.origin:
+            return self._error(
+                HTTPStatus.FORBIDDEN, "A command must carry this surface's own Origin"
+            )
+        if not self._authorized():
+            return self._error(HTTPStatus.UNAUTHORIZED, "A valid launch token is required")
+        # After the provenance checks, so the ordering above is the ordering the contract
+        # names: this is a question about the request line, not about who is asking.
+        if not self._origin_form(parsed):
+            return self._error(HTTPStatus.BAD_REQUEST, "Unsupported request target")
+        match tail(parsed.path):
+            case ["opportunities", identifier, "status"]:
+                return self._record_status(identifier, parsed.query)
+        # Every other address reads -- including a path outside the API root, for which
+        # `tail` returns None and no sequence pattern above can match. Saying so with Allow
+        # rather than 404 keeps a POST from reporting which read routes exist.
+        return (
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            JSON,
+            json.dumps({"error": "No command at this address"}).encode("utf-8"),
+            {"Allow": READ_METHODS},
+        )
+
+    def _body(self) -> dict:
+        """The declared length, the ceiling, then exactly that many bytes, then JSON."""
+        media = self.headers.get("Content-Type", "").split(";")[0].strip().casefold()
+        if media != "application/json":
+            raise ValueError("A command must be sent as application/json")
+        declared = self.headers.get("Content-Length", "")
+        if not (declared.isascii() and declared.isdigit()):
+            # Without a length there is nothing to bound, and this surface does not decode
+            # a chunked body: an unbounded read is exactly what the ceiling exists to stop.
+            raise ValueError("Content-Length is required")
+        length = int(declared)
+        if length > MAX_BODY:
+            raise Oversized(f"A command may not exceed {MAX_BODY} bytes")
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"The request body is not valid JSON: {exc}") from exc
+
+    def _record_status(self, identifier, query):
+        """Append one status event, or refuse and append nothing.
+
+        The compare-and-append lives in record_status(), which reads the newest event
+        inside the write transaction and refuses there. Nothing here re-implements that
+        comparison: a second one at this layer could only be read outside the transaction,
+        which is the race it exists to close.
+        """
+        repository = self.server.repository
+        try:
+            accepted(parse_qs(query, keep_blank_values=True), ())
+            supplied = command(self._body())
+        except Oversized as refused:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(refused))
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        try:
+            # Absence decided first, exactly as the read routes decide it, so an id naming
+            # nothing is a 404 rather than the repository's own refusal.
+            repository.opportunity(identifier)
+        except KeyError:
+            return self._error(HTTPStatus.NOT_FOUND, "No record with that id")
+        try:
+            recorded = repository.record_status(
+                identifier,
+                supplied["status"],
+                actor=OPERATOR,
+                reason=supplied["reason"],
+                expected_event_id=supplied["expected_event_id"],
+            )
+        except StatusConflict as conflict:
+            # Caught by type, never by reading a message. The request was well formed and
+            # the operator's authority was real; what moved was the state they acted on,
+            # which is a different answer from "this request was wrong".
+            return (
+                HTTPStatus.CONFLICT,
+                JSON,
+                json.dumps(
+                    {
+                        "error": "status_conflict",
+                        "expected_event_id": conflict.expected,
+                        "observed_event_id": conflict.observed,
+                        "status": conflict.status,
+                    }
+                ).encode("utf-8"),
+                None,
+            )
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        return (HTTPStatus.OK, JSON, json.dumps(recorded).encode("utf-8"), None)
 
     def _static(self, path):
         name = "index.html" if path == "/" else path[1:]

@@ -5,6 +5,7 @@
  */
 
 const HEADER = "X-CareerSignal-Token";
+const JSON_MEDIA = "application/json";
 const STORAGE_NAME = "careersignal.launch";
 const MARKER = "#token=";
 const ROOT = "/api/v1";
@@ -45,6 +46,27 @@ async function read(path, credential) {
   return body;
 }
 
+async function send(path, credential, payload) {
+  /* The one request on this surface that is not a read.
+   *
+   * It is written out here rather than reached through a method parameter, so there is no
+   * helper a screen could hand a different verb to: adding a second command means adding a
+   * second function, in this file, where the credential lives.
+   *
+   * The refusal is returned rather than thrown. A 409 is not an error in the sense a
+   * failed request is -- the command was well formed and the operator's authority was
+   * real, and what the caller needs is what the server found, not a message.
+   */
+  const response = await fetch(ROOT + path, {
+    method: "POST",
+    headers: { [HEADER]: credential, "Content-Type": JSON_MEDIA },
+    cache: "no-store",
+    credentials: "omit",
+    body: JSON.stringify(payload),
+  });
+  return { ok: response.ok, status: response.status, body: await response.json() };
+}
+
 export function connect(credential) {
   /* One object carrying the credential, so no screen handles it directly. */
   const ask = (path) => read(path, credential);
@@ -61,5 +83,10 @@ export function connect(credential) {
     communication: (id) => ask(`/communications/${part(id)}`),
     authorization: (review) => ask(`/reviews/${part(review)}/authorization`),
     timeline: (limit) => ask(`/timeline?limit=${part(limit)}`),
+    /* The vocabulary comes from the engine, so the control below is filled with what
+     * recruiting.status actually governs rather than a copy kept here. */
+    statuses: () => ask("/statuses"),
+    recordStatus: (id, payload) =>
+      send(`/opportunities/${part(id)}/status`, credential, payload),
   };
 }
