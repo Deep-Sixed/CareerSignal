@@ -996,39 +996,58 @@ def test_presentation_composes_with_the_filters(client, repository):
     assert rows[0]["id"] == opportunity and "presentation" in rows[0]
 
 
+def router(tree):
+    """The one match statement that dispatches a command address, or None.
+
+    Identified by what it matches *on* -- `tail(parsed.path)` -- rather than by being a match
+    inside `_command`, because "a match in that function" is not the same claim. A second
+    match beside the router, or one nested inside a route case, is ordinary code that happens
+    to sit in the same function, and a queue name in its patterns would be exactly the local
+    interpretation this forbids. Exactly one is expected, and finding two is itself a failure:
+    the address is dispatched in one place or the rule has stopped meaning anything.
+    """
+    routers = [
+        node
+        for command in ast.walk(tree)
+        if isinstance(command, ast.FunctionDef | ast.AsyncFunctionDef)
+        and command.name == "_command"
+        for node in ast.walk(command)
+        if isinstance(node, ast.Match)
+        and isinstance(node.subject, ast.Call)
+        and isinstance(node.subject.func, ast.Name)
+        and node.subject.func.id == "tail"
+    ]
+    assert len(routers) <= 1, f"{len(routers)} command routers; the address is dispatched once"
+    return routers[0] if routers else None
+
+
 def routed_only(vocabulary):
-    """Every string from `vocabulary` in this package must be part of a route declaration.
+    """Every string from `vocabulary` in this package must be a command route pattern.
 
     `draft` and `reconcile` name two outward commands and also two queues. The collision is
     real and cannot be spelled away, so it is resolved by where the string sits rather than by
-    excusing the word: inside the command router's match statement, or inside the tuple of
-    route segments declared beside the other commands, it is an address. Anywhere else -- a
-    comparison, a lookup table, a response body -- it would be this layer forming an opinion
-    about what a row means, which is the thing being forbidden.
+    excusing the word: in a `case` pattern of the command router it is an address. Anywhere
+    else -- a comparison, a lookup table, a response body -- it would be this layer forming an
+    opinion about what a row means, which is the thing being forbidden.
+
+    Three earlier versions were too wide, each in a way that looked right at the time. The
+    first excused any module-level tuple of strings, which is most of the constants in that
+    file. The second excused everything beneath any `ast.Match`, but a match *body* is
+    ordinary code, so a queue name compared inside `_projection` would have been waved
+    through. The third narrowed to `case` patterns under `_command` -- and still trusted
+    *every* match in that function, so a second one beside the router, or one nested inside a
+    route case, would have been read as routing.
+
+    The whitelist is now the patterns of the router itself: not the guard, not the body, not a
+    neighbouring match, not a nested one, and not another function's.
     """
     for name, tree in package_modules():
-        # The route patterns of the command router, and nothing else.
-        #
-        # Two earlier versions of this were too wide, each in a way that looked right. The
-        # first excused any module-level tuple of strings, which is most of the constants in
-        # this file. The second excused everything beneath any `ast.Match` -- but there are
-        # several match statements here, and a match *body* is ordinary code: a queue name
-        # compared inside `_projection`, or inside a command case, would have been waved
-        # through as "routed" while being exactly the opinion this forbids.
-        #
-        # A `case` pattern is the one position where one of these words is an address rather
-        # than a judgement about a row, so the whitelist is the pattern nodes alone -- not the
-        # guard, not the body, and not another function's match.
-        routed = {
-            id(node)
-            for command in ast.walk(tree)
-            if isinstance(command, ast.FunctionDef | ast.AsyncFunctionDef)
-            and command.name == "_command"
-            for match in ast.walk(command)
-            if isinstance(match, ast.Match)
-            for case in match.cases
-            for node in ast.walk(case.pattern)
-        }
+        dispatch = router(tree)
+        routed = (
+            {id(node) for case in dispatch.cases for node in ast.walk(case.pattern)}
+            if dispatch
+            else set()
+        )
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and node.value in vocabulary:
                 assert id(node) in routed, f"{name}: {node.value!r} outside a command route pattern"
@@ -3160,8 +3179,21 @@ def test_a_receipt_that_cannot_be_recorded_is_uncertain_rather_than_lost(
     assert provider.creates == 1
     assert body["outcome"] == "uncertain"
     assert "reconcile" in body["next"].casefold()
-    # The intent was never settled, so nothing reads as though a draft is confirmed.
-    assert repository.intent(review)[0] != "confirmed"
+    # It was the settling write that failed, so the reserved intent is still `attempting`
+    # rather than `uncertain`. `DraftUncertain` promises an unsettled intent, not which one --
+    # and this is the case that keeps the narrower promise from being made.
+    state = repository.intent(review)[0]
+    assert state == "attempting"
+    # What makes that safe, asserted rather than assumed: both unsettled states queue as
+    # reconcile, and neither lets a second artifact be created.
+    assert (
+        views.queue(
+            repository.opportunity(opportunity), repository.opportunity(opportunity)["action"]
+        )
+        == "reconcile"
+    )
+    outward(client, review, "draft")
+    assert provider.creates == 1
 
 
 class _Recording:

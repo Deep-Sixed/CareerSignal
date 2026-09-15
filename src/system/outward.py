@@ -94,8 +94,10 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
         }
     except DraftUncertain as exc:
         # Declared by the boundary that knows, never inferred here. A request was sent, its
-        # outcome cannot be established, and the uncertainty is already recorded. This is the
-        # one outcome that must never suggest drafting again.
+        # outcome cannot be established, and an unsettled intent already stands -- `uncertain`
+        # normally, or `attempting` where it was the settling write itself that failed. Which
+        # one is read back rather than assumed, and both queue as reconcile. This is the one
+        # outcome that must never suggest drafting again.
         state, held = recorded(repository, review)
         return {
             **common,
