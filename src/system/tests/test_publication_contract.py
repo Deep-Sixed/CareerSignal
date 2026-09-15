@@ -551,13 +551,37 @@ def entrypoints(source=SOURCE, web=WEB) -> dict:
     return owners
 
 
+def _aliases(tree) -> dict:
+    """Imported names, mapped back to what they are called where they are defined.
+
+    `from system.workflow import OutwardActions as OA` binds `OA` in this module, but the
+    owner this guard derives from the source tree is `OutwardActions`. Recording the local
+    spelling would match no owner, and an unmatched owner does not fall back -- it omits the
+    capability. An alias in an import line would then quietly shrink the manifest while the
+    browser kept the power, which is the wrong direction to fail in.
+    """
+    return {
+        name.asname: name.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for name in node.names
+        if name.asname
+    }
+
+
 def _bindings(tree) -> dict:
     """Local names bound to a constructor call: `actions = OutwardActions(...)`.
 
     The one receiver shape worth resolving, because it is the shape the outward boundary is
     used through. Resolving it turns a name match into an attribution: an unrelated object
     that happens to have a method called `draft` is then not outward authority.
+
+    The constructor is recorded under its defining name rather than its local one, so the
+    attribution is about the class and not about the word at the call site -- in both
+    directions. An alias is a spelling, and resolving it neither hides the service behind a
+    shorter name nor lends its authority to whatever borrows the longer one.
     """
+    aliases = _aliases(tree)
     bound = {}
     for node in ast.walk(tree):
         if (
@@ -565,9 +589,10 @@ def _bindings(tree) -> dict:
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
         ):
+            constructor = node.value.func.id
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    bound[target.id] = node.value.func.id
+                    bound[target.id] = aliases.get(constructor, constructor)
     return bound
 
 
@@ -848,6 +873,53 @@ def test_the_same_call_on_the_service_is_counted(tmp_path):
         encoding="utf-8",
     )
     assert capabilities(source, web) == {"draft"}
+
+
+def test_the_service_imported_under_another_name_is_counted(tmp_path):
+    """An import alias is a spelling, not a different class.
+
+    `from system.workflow import OutwardActions as OA` is legal and ordinary, and a surface
+    written that way reaches exactly the same authority. Judging the local spelling would
+    find no owner for it, and an unmatched owner is dropped rather than fallen back on -- so
+    the manifest would stay agreeing with itself while the browser gained `draft`.
+    """
+    source, web = outward_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import OutwardActions as OA\n"
+        "\n"
+        "def _draft(self, review):\n"
+        "    actions = OA(self.server.repository, self.server.provider)\n"
+        "    return actions.draft(review)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"draft"}
+
+    stale = "<!-- careersignal-web-capabilities\nrecord_status\ndecide\n-->"
+    assert declared(stale) != capabilities(source, web), "an alias hid the capability"
+
+
+def test_an_alias_does_not_lend_authority_to_an_unrelated_class(tmp_path):
+    """The other direction of the same resolution, so it is a mapping and not a loophole.
+
+    A `Letterhead` imported *as* `OutwardActions` is still a `Letterhead`, and its `draft`
+    still reaches no write. Resolving the import is what keeps that judgement about the
+    class rather than about the name in front of the parentheses.
+    """
+    source, web = outward_tree(tmp_path)
+    (source / "system" / "letters.py").write_text(
+        "class Letterhead:\n    def draft(self, text):\n        return text.strip()\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "from system.letters import Letterhead as OutwardActions\n"
+        "\n"
+        "def _preview(self, text):\n"
+        "    letterhead = OutwardActions()\n"
+        "    return letterhead.draft(text)\n",
+        encoding="utf-8",
+    )
+    assert "draft" in entrypoints(source, web)
+    assert capabilities(source, web) == set()
 
 
 def test_no_entrypoint_name_is_owned_by_two_classes():

@@ -22,7 +22,7 @@ The surface is confined by construction rather than by configuration, so each of
 
 **It binds loopback only.** `127.0.0.1`, with no parameter that accepts another interface.
 
-**It answers `GET`, `HEAD` and two `POST` addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly two addresses, each written out beside the reads rather than registered in a router that would accept a third the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
+**It answers `GET`, `HEAD` and explicitly permitted `POST` command addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows that default only at the explicitly listed command addresses, each written out beside the reads rather than registered in a router that would accept another the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
 
 **It reaches read projections, and the mutations declared below.** This block is the canonical statement of what the browser may change, and it is not prose — a test parses it and compares it against what the package's own syntax tree proves it can reach:
 
@@ -139,7 +139,7 @@ The browser may fetch, select a row, filter rows it already has, count statuses 
 
 Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
 
-The browser may write two things: a status, and a decision. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; both commands are described below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
+The browser may write only what the capability block above declares. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; every command it may send is written out below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
 
 ## The commands
 
