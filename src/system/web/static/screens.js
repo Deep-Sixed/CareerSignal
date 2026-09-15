@@ -48,6 +48,43 @@ const QUEUE_HINTS = {
  * cards have to agree with the screen itself: a count the operator cannot then see is a
  * worse answer than no count at all. */
 export const APPROVAL_QUEUES = ["decide", "stale", "draft", "reconcile", "created"];
+/* Which decision controls a queue offers, and the copy for each. Display copy keyed by a
+ * name the server sent, exactly like QUEUE_LABELS above: no precedence, no fallthrough and
+ * no arithmetic. A queue absent from this table offers no decision control at all, so the
+ * default when the engine grows a state this file has not been taught is to offer nothing.
+ * `reapprove` is offered only when the launch destination differs from the approved one. */
+const DECISION_CONTROLS = {
+  decide: {
+    note: "Undecided. Approving binds this packet to the destination named below.",
+    negative: "Reject",
+    approve: "Approve",
+  },
+  stale: {
+    note:
+      "The packet moved after this approval, so it binds nothing until it is approved " +
+      "again. Compare the approved and current digests below before deciding.",
+    negative: "Withdraw approval",
+    approve: "Re-approve",
+  },
+  draft: {
+    note: "Approved and still binding. Creating the draft is a command-line action.",
+    negative: "Withdraw approval",
+    reapprove: "Re-approve",
+  },
+  reconcile: {
+    note:
+      "A draft was attempted and its outcome is unknown, so the decision is locked until " +
+      "it is reconciled. Reconciling is a command-line action.",
+  },
+  created: {
+    note: "A draft exists in the destination mailbox; the decision is locked.",
+  },
+  rejected: {
+    note:
+      "Declined; nothing was created. Approving it after that is a command-line action " +
+      "in this release.",
+  },
+};
 
 export function inApprovals(row) {
   return APPROVAL_QUEUES.includes(row.presentation.queue);
@@ -273,6 +310,78 @@ function attention(record) {
   );
 }
 
+function decisionAction(record, extra, actions) {
+  /* The approval controls, inside the packet block rather than in a toolbar.
+   *
+   * Which controls exist is looked up by the queue the server already decided -- the flat
+   * table above, exactly like the labels and the attention copy. Nothing here reads
+   * `binds`, a decision name or a status to work out whether an approval still holds:
+   * `views.queue()` owns that precedence, it is mutation-tested where it lives, and a
+   * second opinion computed here is how a list and a detail pane start disagreeing about
+   * the same opportunity. An unrecognised queue offers nothing, which is the safe default.
+   *
+   * The expectation these buttons carry is `bound.expected` -- the same object whose
+   * recipient, subject and wording are rendered just above. That is the whole point of the
+   * controls living here: a toolbar over the current selection would have no particular
+   * packet behind it, and an approval has to name the one it was read from.
+   */
+  const bound = record.bound;
+  const target = extra.target;
+  const offered = DECISION_CONTROLS[record.presentation.queue];
+  if (!bound || !target || !offered) {
+    return null;
+  }
+  const holder = el("div", "action decision");
+  const here = target.provider_namespace;
+  /* A session-level fact, and the one comparison this file makes: an approval may bind one
+   * destination while this launch is configured for another. It is not part of the queue,
+   * which describes durable state independent of any particular launch, and it is never
+   * authorization -- the draft path rechecks the destination in its own transaction. */
+  const elsewhere =
+    record.action.provider_namespace && record.action.provider_namespace !== here;
+  /* A mismatch earns a re-approval control where the queue allows one at all. Where it does
+   * not -- a draft has been attempted, so the decision is locked -- there is no re-approval
+   * to offer, and the copy below must not describe one. */
+  const approveLabel = offered.approve || (elsewhere ? offered.reapprove : null);
+
+  /* What this row *is*, first. The destination note qualifies that; it does not replace it. */
+  put(holder, el("p", "action-note", offered.note));
+  if (elsewhere) {
+    put(
+      holder,
+      definitions(
+        [
+          ["approved destination", record.action.provider_namespace],
+          ["current destination", here],
+        ],
+        "facts strong",
+      ),
+      el(
+        "p",
+        "action-note",
+        approveLabel
+          ? "This approval does not authorize the current destination. Re-approving " +
+            "records it against " + here + " instead."
+          : "This approval does not authorize the current destination, and the decision " +
+            "is locked, so it cannot be re-approved here.",
+      ),
+    );
+  }
+  if (offered.negative) {
+    const decline = button("secondary", () => actions.decide(bound.review, false, null));
+    text(decline, offered.negative);
+    put(holder, decline);
+  }
+  if (approveLabel) {
+    const accept = button("primary", () =>
+      actions.decide(bound.review, true, bound.expected),
+    );
+    text(accept, approveLabel + " for " + here);
+    put(holder, accept);
+  }
+  return holder;
+}
+
 function statusAction(record, extra, actions) {
   /* The one thing this surface can change, anchored to the opportunity rather than to the
    * approval packet below: a status is opportunity authority, and an approval is not.
@@ -408,6 +517,10 @@ function opportunityDetail(record, extra, actions) {
         "Reporting, not prediction — the write path re-checks every binding inside " +
           "its own transaction.",
       ),
+      decisionAction(record, extra, actions),
+      extra.decisionRefusal
+        ? el("p", "action-refusal", extra.decisionRefusal)
+        : null,
     ),
   );
 

@@ -1,6 +1,6 @@
 # The local surface
 
-CareerSignal's first surface that listens on a socket. It reads, and it records a status. It decides no review, creates no draft, and contacts no mailbox: approving, drafting and reconciling are still command-line actions.
+CareerSignal's first surface that listens on a socket. It reads, it records a status, and it records a decision. It creates no draft and contacts no mailbox: drafting and reconciling are still command-line actions.
 
 ```sh
 uv run careersignal serve --db /path/to/private.db
@@ -22,9 +22,9 @@ The surface is confined by construction rather than by configuration, so each of
 
 **It binds loopback only.** `127.0.0.1`, with no parameter that accepts another interface.
 
-**It answers `GET`, `HEAD` and one `POST`.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly one address, written out rather than registered in a router that would accept a second command the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
+**It answers `GET`, `HEAD` and two `POST` addresses.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly two addresses, each written out beside the reads rather than registered in a router that would accept a third the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
 
-**It reaches read projections and one mutation.** `record_status()`, and nothing else: no intake, no `decide()`, no `claim()`, no `finish()`, no provider, no credential. A test reads the package's own syntax tree and asserts the set of non-read repository members it touches is exactly `{record_status}` — stated positively, so the guard says what the browser *can* do rather than only what it cannot.
+**It reaches read projections and two mutations.** `record_status()` and `decide()`, and nothing else: no intake, no `claim()`, no `finish()`, no `draft()`, no `reconcile()`, no provider, no credential. A test reads the package's own syntax tree and asserts the set of non-read repository members it touches is exactly `{record_status, decide}` — stated positively, so the guard says what the browser *can* do rather than only what it cannot, and against a literal, so widening it means editing the guard too.
 
 **It derives no fact.** Every route hands back what a repository projection already returned. The rules were settled where the storage is; a second opinion computed at the edge is how a list and a detail pane start disagreeing about the same opportunity.
 
@@ -126,7 +126,7 @@ Everything stored reaches the page through `document.createElement` and `textCon
 
 This release has no approval or outward controls: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Recording a status is the one thing the browser may write, and it is described below. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
 
-## The one command
+## The commands
 
 ```
 POST /api/v1/opportunities/{id}/status
@@ -168,6 +168,77 @@ Nothing is written.
 
 `GET /api/v1/statuses` returns the ordered vocabulary from `recruiting.status.STATUSES`. The browser fills its control from that rather than holding a copy that could fall out of step. The order is presentation order and carries no rule: transitions are deliberately unrestricted, and only the vocabulary is governed.
 
+## The decision command
+
+```
+POST /api/v1/reviews/{review_id}/decision
+```
+
+An approval carries the packet it was read from; a rejection carries nothing.
+
+```json
+{"approved": true,  "expected": {"content_digest": "…", "draft_digest": "…",
+                                 "addressing_digest": "…", "status_event_id": 103}}
+{"approved": false}
+```
+
+The asymmetry is `decide()`'s, not this layer's invention. An approval authorizes an outward draft to a destination, so it is recorded only while the four facts the operator saw still hold. A rejection binds nothing and authorizes nothing, and demanding a fresh packet to record one would put the safest action an operator can take behind the same precondition as the riskiest. So `expected` is **required** with `approved: true` and **refused** with `approved: false` — refused rather than ignored, because a caller that sent one believed it was being honoured.
+
+**The expectation comes from the packet that was rendered.** `GET /api/v1/opportunities/{id}` returns `bound`, and `bound.expected` is built from the same `_binding()` snapshot as the recipient, subject and wording beside it. Reading the packet from one request and its expectation from another would name a moment the operator was never shown — which is the window the expectation exists to close. The browser posts back the object it was given and never assembles one.
+
+**The comparison is `decide()`'s.** It reads the binding inside the write transaction and raises `BindingConflict` there. Nothing at this layer pre-checks it: a comparison here could only read *outside* that transaction, and a message could commit between the check and the row that depended on it.
+
+| Condition | Response |
+| --- | --- |
+| decision recorded | `200` |
+| malformed body or malformed expectation | `400` |
+| bad/missing launch token | `401` |
+| bad/missing `Origin` | `403` |
+| review does not exist | `404` |
+| the packet moved | `409` `binding_conflict` |
+| a valid decision the current state refuses | `409` `decision_refused` |
+| oversized body | `413` |
+| a `POST` anywhere else | `405` |
+
+A state refusal — a terminal opportunity, a below-threshold review, a decision locked behind an existing draft intent — is **not** a malformed request. The body was well formed and the operator's authority was real; what refused was the stored state, so it answers `409`, not `400`. Telling an operator to fix a request that was never wrong is its own kind of wrong answer.
+
+`binding_conflict` carries what the exception already knows:
+
+```json
+{"error": "binding_conflict", "expected": {…}, "observed": {…}}
+```
+
+Nothing is written when it is raised: no decision row, no audit event. An approval that already stood stands exactly as it was.
+
+## Where an approval points
+
+The destination is a **launch fact**, declared the way the command line already declares one:
+
+```
+careersignal serve --provider controlled
+careersignal serve --provider gmail --mailbox user@example.com
+```
+
+`--provider gmail` derives the namespace with `namespace_for(mailbox)`, the same pure function the compose side uses, so a declared mailbox and a mailbox Gmail itself reports become the same string by the same code. **No compose credential is required.** Approving names where a draft may go; it has never needed the ability to reach it, and making the safe half of the workflow depend on the unsafe half would be the wrong dependency. Only the two resulting strings cross into `system.web` — no adapter, no credential class.
+
+`GET /api/v1/session` reports the target as a name, never a secret:
+
+```json
+{"decision_target": {"provider": "gmail", "provider_namespace": "gmail:user@example.com"}}
+```
+
+It is immutable for the process. A restart issues a new launch token anyway, so a page left open cannot act against a target chosen after it loaded.
+
+An approval may bind one destination while this launch is configured for another. The packet says so, side by side, and offers to re-approve against the current one — but only where the queue allows a decision at all. Once a draft has been attempted the decision is locked, and copy promising a re-approval that cannot happen would be a button that lies. This comparison is presentation: the draft path rechecks the destination transactionally, and a screen is never authorization.
+
+## Approval controls stay on the packet
+
+There is no toolbar of verbs. The controls live in the packet block, and the expectation they carry is `bound.expected` — the same object whose recipient and wording are rendered above them. A button hovering over the current selection would have no particular packet behind it, and an approval that cannot name what it was decided against is exactly what `decide(expected=…)` exists to prevent.
+
+Which controls appear is looked up by the queue the server already decided, from a flat table keyed by queue name. The browser does not work out whether an approval still binds: `views.queue()` owns that precedence, it is mutation-tested where it lives, and a second implementation here is how a list and a detail pane start disagreeing. A queue the table does not name offers nothing.
+
+**Withdraw approval** is wording for recording `approved: false`. It creates no new state, audit vocabulary or schema — afterwards the durable decision is the ordinary negative one. Reversing that is a command-line action in this release.
+
 ## What the browser does after a command
 
 It re-reads. Nothing patches the row, the status, the queue or a count locally — what those become is the engine's to decide, and a local edit would be the browser forming a second opinion about state it just asked the server to change.
@@ -186,14 +257,14 @@ The server is threaded so a slow read cannot block the pane beside it, and no `s
 
 ## What is not here yet
 
-Approving, rejecting, drafting and reconciling. `decide()`, `BindingConflict`, `claim()`, `finish()` and `OutwardActions` are all unreachable from this package, and a test fails the build if that changes.
+Drafting and reconciling. `claim()`, `finish()`, `refuse()`, `reject()` and `OutwardActions` are all unreachable from this package, and a test fails the build if that changes. `decide()` and `BindingConflict` are reachable as of this release, and they are the only additions: the guard names what may be reached, so the next capability has to be argued for rather than arrive.
 
 The active evaluation profile. The session panel reports only facts that are authoritative today, and which skills, locations and threshold a future intake would score against is launch configuration the engine does not store. Showing a label for it would mean inventing one. It arrives with the persisted-profile decision.
 
 `.eml` ingestion and the Gmail label read, which are write affordances and belong with intake.
 
-Approval and outward authority. Approving a review, creating a draft and reconciling one remain command-line actions. Recording a status is the one exception, and it is an exception on purpose: status is authority over the opportunity, which the operator already holds, and it carries the event it was decided against. Approving is authority over what leaves the machine. Each arrives here only with the write path designed for it, and not as a side effect of being able to see things in a browser.
+Outward authority. Creating a draft and reconciling one remain command-line actions, and they are the ones that actually reach a mailbox. Approving now happens here, bound to the packet it was read from; what an approval does is authorize, and authorizing is not the same as acting. That separation is the point rather than a staging accident: the operator says yes in one place, and the thing that leaves the machine is still started deliberately somewhere else.
 
-**When approval does arrive, its controls stay anchored to the approval packet.** The operator acts against the binding they were shown — the review version, its digests, what the packet says is true now — not against a row they happened to select. That rules out a generic toolbar of verbs hovering over the current selection, however convenient: a button that is always present has no particular state behind it, and an approval that cannot name what it was decided against is the failure `decide(expected=…)` exists to prevent. Status can sit in the opportunity header precisely because it is not approval authority; approval cannot.
+Reversing a decision to decline. A rejected review can be approved again from the command line; this surface reports the decision and offers no control for it. A first write surface should not also be the place that quietly re-opens something an operator deliberately closed.
 
 A readable database path. `/session` reports the path in full and the panel prints it in full, so a long one is the widest thing on the screen and pushes the layout around. The fix is to shorten it **in the middle**, keeping the start and the filename, since those are the parts that identify which database is open — and to keep the whole value reachable, as a title attribute and as selectable text, because a path the operator cannot read back is a fact the panel only appears to report. The truncation is presentation alone: the projection keeps serving the real value, and nothing downstream reads the shortened form.

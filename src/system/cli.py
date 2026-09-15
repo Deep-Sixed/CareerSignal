@@ -281,7 +281,11 @@ def main():
     parser.add_argument(
         "--db", help="Database path; relative paths resolve from the current directory"
     )
-    parser.add_argument("--mailbox", help="Authorized Gmail address, used only by gmail-ingest")
+    parser.add_argument(
+        "--mailbox",
+        help="Authorized Gmail address. Used by gmail-ingest, and by approve/serve to "
+        "declare where an approval says a draft may go.",
+    )
     parser.add_argument("--query", help="Gmail search query, used only by gmail-ingest")
     parser.add_argument("--label", action="append", help="Gmail label id; repeat for multiple")
     parser.add_argument(
@@ -485,11 +489,17 @@ def main():
             ],
         }
     elif args.command == "serve":
-        # Read-only, and loopback-only by construction: the surface offers no way to bind
-        # another interface and answers nothing but GET and HEAD. It blocks here until the
-        # operator stops it, so it returns rather than falling through to the JSON report
-        # the pipeline commands print.
-        serve(Repository(path), port=args.port)
+        # Loopback-only by construction: the surface offers no way to bind another
+        # interface, and it reads, records a status and records a decision -- nothing else.
+        # It blocks here until the operator stops it, so it returns rather than falling
+        # through to the JSON report the pipeline commands print.
+        #
+        # The approval destination is declared the same way `approve` declares it, through
+        # _declared_identity, which needs no credential: approving names where a draft may
+        # go, and naming a destination has never required the ability to reach it. Only the
+        # two resulting strings cross into system.web.
+        provider, namespace = _declared_identity(args, parser)
+        serve(Repository(path), port=args.port, provider=provider, provider_namespace=namespace)
         return
     elif args.command == "init":
         result = {"applied": migrate(path)}

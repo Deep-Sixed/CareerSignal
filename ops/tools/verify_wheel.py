@@ -69,7 +69,12 @@ assert packaged == [
     "screens.js",
 ], packaged
 
-surface = Surface(Repository("extraction.db"), port=0)
+surface = Surface(
+    Repository("extraction.db"),
+    port=0,
+    provider="gmail",
+    provider_namespace="gmail:operator@example.com",
+)
 threading.Thread(target=surface.serve_forever, daemon=True).start()
 
 
@@ -134,8 +139,57 @@ assert [row["status"] for row in history][-1] == "applied", history
 assert sum(1 for row in history if row["status"] == "applied") == 1, history
 assert history[-1]["actor"] == "operator", history
 
+# The decision command, from the installed wheel. The destination is the launch's, never
+# the caller's, and no compose credential is configured here -- approving names where a
+# draft may go and has never needed the ability to reach it.
+facts = json.loads(ask("/api/v1/session")[1])
+assert facts["gmail_compose_token"] is False, facts
+assert facts["decision_target"] == {
+    "provider": "gmail",
+    "provider_namespace": "gmail:operator@example.com",
+}, facts
+
+detail = json.loads(ask("/api/v1/opportunities/" + chosen)[1])
+review, packet = detail["review"], detail["bound"]["expected"]
+assert sorted(packet) == [
+    "addressing_digest",
+    "content_digest",
+    "draft_digest",
+    "status_event_id",
+], packet
+verdict = "/api/v1/reviews/" + review + "/decision"
+
+# An approval carrying the packet that was read is recorded against the launch destination.
+status, body = ask(verdict, method="POST", body=json.dumps({"approved": True, "expected": packet}).encode())
+assert status == 200, (status, body)
+assert json.loads(body)["provider_namespace"] == "gmail:operator@example.com", body
+action = json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]
+assert (action["decision"], action["binds"]) == ("approved", True), action
+assert action["provider_namespace"] == "gmail:operator@example.com", action
+
+# The same approval again, after the status moved under it: refused, and nothing written.
+moved = json.dumps({"status": "interviewing", "expected_event_id": json.loads(
+    ask("/api/v1/opportunities/" + chosen)[1])["status_event"]}).encode()
+assert ask(address, method="POST", body=moved)[0] == 200
+settled = ask("/api/v1/timeline")[1]
+status, body = ask(verdict, method="POST", body=json.dumps({"approved": True, "expected": packet}).encode())
+assert status == 409, (status, body)
+assert json.loads(body)["error"] == "binding_conflict", body
+assert ask("/api/v1/timeline")[1] == settled, "a refused decision still moved a ledger"
+
+# A rejection needs no packet, and an approval may not go without one.
+assert ask(verdict, method="POST", body=b'{"approved": true}')[0] == 400
+assert ask(verdict, method="POST", body=b'{"approved": false, "expected": {}}')[0] == 400
+assert ask(verdict, method="POST", body=b'{"approved": false, "actor": "somebody"}')[0] == 400
+assert ask(verdict, method="POST", body=b'{"approved": false}', origin=False)[0] == 403
+assert ask(verdict, method="POST", body=b'{"approved": false}', token=False)[0] == 401
+assert ask("/api/v1/reviews/nope/decision", method="POST", body=b'{"approved": false}')[0] == 404
+status, body = ask(verdict, method="POST", body=b'{"approved": false}')
+assert status == 200, (status, body)
+assert json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]["decision"] == "rejected"
+
 surface.shutdown()
-print("read surface and the status command verified from the installed wheel")
+print("read surface, the status command and the decision command verified from the wheel")
 """
 
 
@@ -239,7 +293,7 @@ def main():
             run(str(check))
     print(
         "PASS: pure-Python installed wheel, zero runtime dependencies, resource discovery, "
-        "golden workflow, replay, the loopback read surface and its one command"
+        "golden workflow, replay, the loopback surface and both of its commands"
     )
 
 

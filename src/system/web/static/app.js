@@ -26,6 +26,9 @@ const state = {
   floor: 0,
   failure: null,
   statuses: [],
+  /* The launch's approval destination, read once from /session. Null until then, which is
+   * why the packet withholds its controls rather than guessing a destination. */
+  target: null,
 };
 
 let api = null;
@@ -128,10 +131,40 @@ async function opportunityDetail(id, extra = {}) {
     audit,
     authorization,
     statuses: state.statuses,
+    /* Where an approval recorded from this page would say a draft may go. A launch fact,
+     * read once at start and never from a control: the packet shows it so the operator can
+     * see what they are authorizing, and the server uses its own copy regardless. */
+    target: state.target,
     composing: false,
     refusal: null,
+    decisionRefusal: null,
     ...extra,
   };
+}
+
+function decisionRefused(answer) {
+  /* What the server found, in the operator's terms.
+   *
+   * `binding_conflict` is not a failed request. It says the packet moved between the
+   * moment it was rendered and the moment the decision was recorded, and that nothing was
+   * written -- no decision row, no audit event. The fields that moved are named, because
+   * "something changed" is not enough to decide against.
+   */
+  if (answer.status === 409 && answer.body.error === "binding_conflict") {
+    const moved = Object.keys(answer.body.observed || {})
+      .filter((field) => answer.body.expected[field] !== answer.body.observed[field])
+      .sort();
+    return (
+      "This packet changed since it was shown: " +
+      moved.join(", ") +
+      ". Nothing was written and the decision on record is unchanged. " +
+      "Read the packet again and decide against what it says now."
+    );
+  }
+  if (answer.status === 409) {
+    return answer.body.detail || "The decision was refused by the current state.";
+  }
+  return answer.body.error || "The decision was refused.";
 }
 
 function refused(answer) {
@@ -196,6 +229,26 @@ const actions = {
       });
     });
   },
+  decide(review, approved, expected) {
+    /* Send, then re-read -- on success and on refusal alike. Nothing here patches the
+     * approval text, the queue, a badge count, the stale/current state or the timeline:
+     * what those become is the engine's to decide, and a local edit would be this browser
+     * forming a second opinion about state it just asked the server to change.
+     *
+     * On a binding conflict the packet is re-read first and the refusal is shown against
+     * the new one. The approval is never resubmitted with the newer expectation: that
+     * would approve a packet the operator never saw, which is the entire failure the
+     * expectation exists to prevent.
+     */
+    const id = state.selected;
+    guard(async () => {
+      const answer = await api.decide(review, approved ? { approved, expected } : { approved });
+      await reload();
+      state.detail = await opportunityDetail(id, {
+        decisionRefusal: answer.ok ? null : decisionRefused(answer),
+      });
+    });
+  },
   openCommunication(id) {
     guard(async () => {
       state.selected = id;
@@ -242,6 +295,7 @@ async function start() {
       api.statuses(),
     ]);
     renderSession(session);
+    state.target = session.decision_target;
     state.communications = communications;
     state.statuses = vocabulary.statuses;
     await reload();
