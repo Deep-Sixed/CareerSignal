@@ -42,7 +42,9 @@ JOB_TEXT = (
     "Skills: Python, SQL\r\n"
     "URL: https://jobs.example.com/roles/1\r\n"
 )
-WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "FROBNICATE")
+# Every method this surface does not answer. POST is deliberately absent: it is answered,
+# on exactly one address, and `test_post_reaches_no_address_but_the_one_command` covers it.
+UNANSWERED_METHODS = ("PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "FROBNICATE")
 
 
 def alert(sender="recruiter@example.com", external_id="m1"):
@@ -72,20 +74,38 @@ class Client:
     def __init__(self, surface):
         self.surface = surface
 
-    def send(self, path, *, method="GET", token=True, host=None, headers=(), body=None):
+    def send(
+        self,
+        path,
+        *,
+        method="GET",
+        token=True,
+        host=None,
+        origin=None,
+        content_type=None,
+        length=None,
+        headers=(),
+        body=None,
+    ):
         connection = http.client.HTTPConnection(web.LOOPBACK, self.surface.server_port, timeout=10)
         try:
             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
             connection.putheader("Host", self.surface.authority if host is None else host)
+            if origin:
+                connection.putheader("Origin", self.surface.origin if origin is True else origin)
             if token:
                 connection.putheader(
                     web.TOKEN_HEADER,
                     self.surface.token if token is True else token,
                 )
+            if content_type:
+                connection.putheader("Content-Type", content_type)
             for name, value in headers:
                 connection.putheader(name, value)
-            if body is not None:
-                connection.putheader("Content-Length", str(len(body)))
+            if body is not None and length != "omit":
+                # `length` lets a test declare something other than the truth, which is the
+                # only way to reach the ceiling without actually sending the bytes.
+                connection.putheader("Content-Length", str(len(body) if length is None else length))
             connection.endheaders(body)
             response = connection.getresponse()
             return response.status, response.read(), dict(response.getheaders())
@@ -95,6 +115,17 @@ class Client:
     def json(self, path, **kwargs):
         status, payload, headers = self.send(path, **kwargs)
         return status, json.loads(payload)
+
+    def command(self, opportunity, payload, **kwargs):
+        """A well-formed status command, so a test varies only what it is about."""
+        settings = {
+            "method": "POST",
+            "origin": True,
+            "content_type": "application/json",
+            "body": json.dumps(payload).encode("utf-8"),
+        } | kwargs
+        status, body, _ = self.send(f"/api/v1/opportunities/{opportunity}/status", **settings)
+        return status, json.loads(body)
 
 
 @pytest.fixture
@@ -320,31 +351,66 @@ def test_no_response_carries_a_cross_origin_allowance(client, surface):
 # --- what it will not do -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("method", WRITE_METHODS)
-def test_every_method_but_get_and_head_is_refused_without_reaching_a_route(
+@pytest.mark.parametrize("method", UNANSWERED_METHODS)
+def test_every_method_but_the_three_answered_is_refused_without_reaching_a_route(
     client, repository, method
 ):
-    """Including verbs this server has never heard of: refusal is the default."""
+    """Including verbs this server has never heard of: refusal is still the default.
+
+    POST is now answered, on exactly one address. Every other method is refused before
+    anything is routed, authenticated or read, which is why this list includes verbs
+    nobody has implemented.
+    """
     before = state(repository)
     status, payload, headers = client.send(method=method, path="/api/v1/opportunities", body=b"{}")
     assert status == 405
-    assert headers["Allow"] == "GET, HEAD"
-    assert json.loads(payload) == {"error": "This surface is read-only"}
+    assert headers["Allow"] == "GET, HEAD, POST"
+    assert json.loads(payload) == {"error": "This surface reads, and records a status"}
     assert state(repository) == before
 
 
-@pytest.mark.parametrize("method", WRITE_METHODS)
-def test_a_write_verb_is_refused_even_with_a_valid_token(client, surface, method):
-    """Authority is not the question. There is no write for a valid token to reach."""
+@pytest.mark.parametrize("method", UNANSWERED_METHODS)
+def test_no_unanswered_verb_becomes_reachable_with_a_valid_token(client, surface, method):
+    """Authority is not the question: there is no handler for a valid token to reach."""
     assert client.send(method=method, path="/api/v1/opportunities")[0] == 405
 
 
-def test_a_write_verb_is_refused_before_the_token_is_even_considered(client):
-    """Earliest possible refusal: a cross-origin POST never gets as far as 401 or 403."""
+def test_an_unanswered_verb_is_refused_before_the_token_is_even_considered(client):
+    """Earliest possible refusal: a cross-origin PUT never gets as far as 401 or 403."""
     status, _, headers = client.send(
-        "/api/v1/session", method="POST", token=False, host="evil.example.com"
+        "/api/v1/session", method="PUT", token=False, host="evil.example.com"
     )
-    assert status == 405 and headers["Allow"] == "GET, HEAD"
+    assert status == 405 and headers["Allow"] == "GET, HEAD, POST"
+
+
+def test_post_reaches_no_address_but_the_one_command(client, repository):
+    """One command, not a command router.
+
+    A POST anywhere else is refused with the read methods, which also keeps a POST from
+    reporting which read routes exist.
+    """
+    opportunity = repository.opportunities()[0]["id"]
+    before = state(repository)
+    for path in (
+        "/api/v1/session",
+        "/api/v1/opportunities",
+        f"/api/v1/opportunities/{opportunity}",
+        f"/api/v1/opportunities/{opportunity}/sources",
+        "/api/v1/communications",
+        "/api/v1/timeline",
+        "/api/v1/statuses",
+        "/api/v1/opportunities/status",
+        f"/api/v1/opportunities/{opportunity}/status/extra",
+        f"/api/v1/reviews/{repository.opportunity(opportunity)['review']}/status",
+        "/",
+    ):
+        status, payload, headers = client.send(
+            path, method="POST", origin=True, body=b'{"status": "applied", "expected_event_id": 1}'
+        )
+        assert status == 405, path
+        assert headers["Allow"] == "GET, HEAD", path
+        assert json.loads(payload) == {"error": "No command at this address"}, path
+    assert state(repository) == before
 
 
 @pytest.mark.parametrize(
@@ -857,6 +923,400 @@ def test_a_hostile_payload_is_inert_because_of_what_it_is_served_as(client, repo
     assert any(row["subject"] == subject for row in listed), "the subject did not round-trip"
 
 
+# --- the one command: recording a status ----------------------------------------------------------
+
+
+@pytest.fixture
+def opportunity(repository):
+    return repository.opportunities()[0]["id"]
+
+
+def history(repository, opportunity):
+    return repository.opportunity(opportunity)["history"]
+
+
+def test_two_commands_carrying_the_same_event_produce_exactly_one_append(repository, surface):
+    """The test this whole boundary exists for.
+
+    Two browser writes race with the same expected event, which is what happens when an
+    operator has two tabs open, or when a tab acts on a state a CLI command has already
+    moved. The compare-and-append is inside the write transaction, so the database decides:
+    one appends, one is told the state moved, and the ledger gains exactly one row. Nothing
+    in the web server serialises these -- a lock here would be a second concurrency
+    authority, and the wrong one.
+    """
+    opportunity = repository.opportunities()[0]["id"]
+    event = repository.opportunity(opportunity)["status_event"]
+    before = len(history(repository, opportunity))
+
+    ready = threading.Barrier(2)
+    answers = []
+
+    def race(status):
+        client = Client(surface)
+        ready.wait(timeout=10)
+        answers.append(client.command(opportunity, {"status": status, "expected_event_id": event}))
+
+    racers = [
+        threading.Thread(target=race, args=("interested",)),
+        threading.Thread(target=race, args=("applied",)),
+    ]
+    for racer in racers:
+        racer.start()
+    for racer in racers:
+        racer.join(timeout=20)
+        assert not racer.is_alive(), "a command never returned"
+
+    codes = sorted(code for code, _ in answers)
+    assert codes == [200, 409], answers
+    conflict = next(body for code, body in answers if code == 409)
+    assert conflict["error"] == "status_conflict"
+    assert conflict["expected_event_id"] == event
+    assert conflict["observed_event_id"] != event, "the refusal names the event it found"
+
+    after = history(repository, opportunity)
+    assert len(after) == before + 1, "the ledger gained more or less than one row"
+    winner = next(body for code, body in answers if code == 200)
+    assert after[-1]["event"] == winner["event"] == conflict["observed_event_id"]
+    assert after[-1]["status"] == winner["status"]
+
+
+@pytest.mark.parametrize(
+    "supplied, expected",
+    (
+        ({"status": "applied", "expected_event_id": True}, "whole number"),
+        ({"status": "applied", "expected_event_id": False}, "whole number"),
+        ({"status": "applied", "expected_event_id": 3.0}, "whole number"),
+        ({"status": "applied", "expected_event_id": "3"}, "whole number"),
+        ({"status": b"applied", "expected_event_id": 3}, "status must be text"),
+        ({"status": "applied", "expected_event_id": 3, "actor": "x"}, "Unknown field"),
+        ([], "must be a JSON object"),
+        ("applied", "must be a JSON object"),
+    ),
+)
+def test_the_command_shape_is_refused_at_this_layer_too(supplied, expected):
+    """Tested directly, not only through the repository's identical check.
+
+    `record_status()` refuses a bool event id as well, which is defence in depth working --
+    and it is also why an HTTP-layer mistake here would be invisible end to end. This calls
+    the boundary's own validator so that guard has a test of its own.
+    """
+    with pytest.raises(ValueError, match=expected):
+        web.command(supplied)
+
+
+def test_the_command_shape_accepts_exactly_the_three_documented_fields():
+    assert web.command({"status": "applied", "expected_event_id": 3}) == {
+        "status": "applied",
+        "reason": "",
+        "expected_event_id": 3,
+    }
+    assert web.command({"status": "applied", "expected_event_id": 3, "reason": "note"}) == {
+        "status": "applied",
+        "reason": "note",
+        "expected_event_id": 3,
+    }
+    assert web.COMMAND_FIELDS == {"status", "reason", "expected_event_id"}
+
+
+def test_no_header_or_field_can_name_the_actor(client, repository, opportunity):
+    """The unknown-field refusal covers the body; this covers everything else.
+
+    A header is the other way a caller could try to name themselves, and it would not be
+    refused as an unknown field because it never reaches the body at all.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    status, _ = client.command(
+        opportunity,
+        {"status": "applied", "expected_event_id": event},
+        headers=[("X-Actor", "somebody else"), ("From", "nobody@example.com")],
+    )
+    assert status == 200
+    assert history(repository, opportunity)[-1]["actor"] == "operator"
+    # Stated once in the source, as a constant, so there is one place to read the answer.
+    assert web.OPERATOR == "operator"
+    recorded = [
+        node
+        for name, node in nodes(ast.keyword)
+        if node.arg == "actor" and _named(node.value, "OPERATOR")
+    ]
+    assert len(recorded) == 1, "the actor is no longer the module's own constant"
+
+
+def test_a_command_appends_and_says_what_it_appended(client, repository, opportunity):
+    event = repository.opportunity(opportunity)["status_event"]
+    status, body = client.command(
+        opportunity,
+        {"status": "interested", "reason": "worth a look", "expected_event_id": event},
+    )
+    assert status == 200
+    assert body == {"status": "interested", "event": body["event"], "previous_event": event}
+    recorded = history(repository, opportunity)[-1]
+    assert (recorded["status"], recorded["reason"]) == ("interested", "worth a look")
+    assert recorded["event"] == body["event"]
+
+
+def test_the_reason_is_optional_and_defaults_to_nothing(client, repository, opportunity):
+    event = repository.opportunity(opportunity)["status_event"]
+    assert client.command(opportunity, {"status": "applied", "expected_event_id": event})[0] == 200
+    assert history(repository, opportunity)[-1]["reason"] == ""
+
+
+def test_the_actor_is_the_operator_and_never_comes_from_the_request(
+    client, repository, opportunity
+):
+    """A browser-supplied actor would let presentation input rewrite audit identity.
+
+    It is not ignored, it is refused: silently dropping a field a caller believed in is how
+    a surface ends up recording something other than what was asked for.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    status, body = client.command(
+        opportunity,
+        {"status": "applied", "expected_event_id": event, "actor": "somebody else"},
+    )
+    assert status == 400 and "actor" in body["error"]
+    assert history(repository, opportunity)[-1]["actor"] != "somebody else"
+
+    assert client.command(opportunity, {"status": "applied", "expected_event_id": event})[0] == 200
+    assert history(repository, opportunity)[-1]["actor"] == "operator"
+
+
+def test_a_status_recorded_on_the_command_line_moves_the_event_the_browser_holds(
+    client, repository, opportunity
+):
+    """The case expected_event_id exists for, with the two surfaces it actually spans."""
+    read = repository.opportunity(opportunity)["status_event"]
+    repository.record_status(opportunity, "withdrawn", actor="operator", reason="")
+
+    status, body = client.command(opportunity, {"status": "applied", "expected_event_id": read})
+    assert status == 409
+    assert body["expected_event_id"] == read
+    assert body["status"] == "withdrawn", "the refusal says what is true now"
+    assert repository.status(opportunity) == "withdrawn", "the stale command was applied anyway"
+
+
+def test_a_conflict_writes_nothing(client, repository, opportunity):
+    event = repository.opportunity(opportunity)["status_event"]
+    assert (
+        client.command(opportunity, {"status": "interested", "expected_event_id": event})[0] == 200
+    )
+    settled = history(repository, opportunity)
+    assert client.command(opportunity, {"status": "closed", "expected_event_id": event})[0] == 409
+    assert history(repository, opportunity) == settled
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    (
+        ({"status": "applied"}, "expected_event_id is required"),
+        ({"expected_event_id": 1}, "status is required"),
+        ({"status": "applied", "expected_event_id": True}, "whole number"),
+        ({"status": "applied", "expected_event_id": 1.0}, "whole number"),
+        ({"status": "applied", "expected_event_id": "1"}, "whole number"),
+        ({"status": "applied", "expected_event_id": None}, "whole number"),
+        ({"status": 4, "expected_event_id": 1}, "status must be text"),
+        ({"status": "applied", "expected_event_id": 1, "reason": 9}, "reason must be text"),
+        ({"status": "applied", "expected_event_id": 1, "actor": "x"}, "Unknown field: actor"),
+        ({"status": "applied", "expected_event_id": 1, "opportunity": "x"}, "Unknown field"),
+        ({"status": "nonsense", "expected_event_id": 1}, "Unknown status"),
+        ({}, "is required"),
+    ),
+)
+def test_a_command_this_surface_cannot_mean_is_a_bad_request(
+    client, repository, opportunity, payload, expected
+):
+    # Every case here is refused on shape, before the event is ever compared, so the event
+    # id in the payload is deliberately not substituted for the real one. An earlier draft
+    # of this test did substitute it, keyed on `== 1` -- which is true of both `True` and
+    # `1.0`, the two values it most needed to keep distinct.
+    before = state(repository)
+    status, body = client.command(opportunity, payload)
+    assert status == 400, (payload, body)
+    assert expected in body["error"], (payload, body)
+    assert state(repository) == before
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (b"{not json", b'"a string"', b"[1, 2, 3]", b"null", b"42", b"", b"true"),
+)
+def test_a_body_that_is_not_a_json_object_is_refused(client, repository, opportunity, raw):
+    before = state(repository)
+    status, payload, _ = client.send(
+        f"/api/v1/opportunities/{opportunity}/status",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=raw,
+    )
+    assert status == 400, raw
+    assert "error" in json.loads(payload)
+    assert state(repository) == before
+
+
+def test_a_command_must_be_sent_as_json(client, repository, opportunity):
+    event = repository.opportunity(opportunity)["status_event"]
+    body = json.dumps({"status": "applied", "expected_event_id": event}).encode()
+    for content_type in (None, "text/plain", "application/x-www-form-urlencoded", "text/json"):
+        status, payload, _ = client.send(
+            f"/api/v1/opportunities/{opportunity}/status",
+            method="POST",
+            origin=True,
+            content_type=content_type,
+            body=body,
+        )
+        assert status == 400, content_type
+        assert "application/json" in json.loads(payload)["error"], content_type
+    assert (
+        client.send(
+            f"/api/v1/opportunities/{opportunity}/status",
+            method="POST",
+            origin=True,
+            content_type="application/json; charset=utf-8",
+            body=body,
+        )[0]
+        == 200
+    ), "a charset parameter is part of the media type, not a different one"
+
+
+def test_an_oversized_command_is_refused_on_what_it_declares(client, repository, opportunity):
+    """Refused before the body is read, so an enormous request costs nothing to refuse."""
+    before = state(repository)
+    padded = json.dumps(
+        {"status": "applied", "expected_event_id": 1, "reason": "x" * (web.MAX_BODY + 1)}
+    ).encode()
+    assert len(padded) > web.MAX_BODY
+    status, payload, _ = client.send(
+        f"/api/v1/opportunities/{opportunity}/status",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=padded,
+    )
+    assert status == 413
+    assert str(web.MAX_BODY) in json.loads(payload)["error"]
+    assert state(repository) == before
+
+
+def test_a_command_needs_a_length_it_can_be_held_to(client, repository, opportunity):
+    """No declared length means nothing to bound, and this surface decodes no chunked body."""
+    status, payload, _ = client.send(
+        f"/api/v1/opportunities/{opportunity}/status",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=b'{"status": "applied", "expected_event_id": 1}',
+        length="omit",
+    )
+    assert status == 400 and "Content-Length" in json.loads(payload)["error"]
+
+
+def test_a_command_must_carry_this_surfaces_own_origin(client, repository, opportunity):
+    """Required, not merely checked when present.
+
+    A read with no Origin is an ordinary same-document fetch. A write with none has nothing
+    to say for where it came from, and this is the request that changes the record.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    before = state(repository)
+    for origin in (False, "http://evil.example.com", "null", f"https://{surface_authority()}"):
+        status, body = client.command(
+            opportunity, {"status": "applied", "expected_event_id": event}, origin=origin
+        )
+        assert status == 403, origin
+        assert "Origin" in body["error"], origin
+    assert state(repository) == before
+
+
+def surface_authority():
+    """Named so the parametrised origins above read as what they are."""
+    return "127.0.0.1:1"
+
+
+def test_a_command_without_the_launch_token_is_refused_before_its_body_is_read(
+    client, repository, opportunity
+):
+    event = repository.opportunity(opportunity)["status_event"]
+    before = state(repository)
+    for token in (False, "", "wrong"):
+        status, body = client.command(
+            opportunity, {"status": "applied", "expected_event_id": event}, token=token
+        )
+        assert status == 401, token
+        assert body == {"error": "A valid launch token is required"}
+    assert state(repository) == before
+
+
+def test_a_command_naming_an_unknown_opportunity_is_not_found(client, repository):
+    status, body = client.command(
+        "no-such-opportunity", {"status": "applied", "expected_event_id": 1}
+    )
+    assert status == 404 and body == {"error": "No record with that id"}
+
+
+def test_a_command_refuses_a_query_string(client, repository, opportunity):
+    event = repository.opportunity(opportunity)["status_event"]
+    status, payload, _ = client.send(
+        f"/api/v1/opportunities/{opportunity}/status?force=true",
+        method="POST",
+        origin=True,
+        content_type="application/json",
+        body=json.dumps({"status": "applied", "expected_event_id": event}).encode(),
+    )
+    assert status == 400 and "Unknown parameter" in json.loads(payload)["error"]
+
+
+def test_the_command_refuses_before_reading_the_body_in_the_order_that_matters(
+    client, repository, opportunity
+):
+    """Host, then Origin, then token -- each settled before a byte of the body is parsed.
+
+    Proved by sending a body that would itself be a 400: whichever provenance check is
+    reached first must answer instead, which is only true if the body is never looked at.
+    """
+    nonsense = b"{not json at all"
+    address = f"/api/v1/opportunities/{opportunity}/status"
+    common = {"method": "POST", "content_type": "application/json", "body": nonsense}
+    assert client.send(address, host="evil.example.com", origin=True, **common)[0] == 403
+    assert client.send(address, origin=False, **common)[0] == 403
+    assert client.send(address, origin=True, token=False, **common)[0] == 401
+    # With provenance in order, the same body is finally read -- and refused.
+    assert client.send(address, origin=True, **common)[0] == 400
+
+
+def test_the_status_vocabulary_is_served_rather_than_copied(client, repository):
+    """The browser fills its control from this, so there is no second copy to drift."""
+    status, body = client.json("/api/v1/statuses")
+    assert status == 200
+    assert body == {"statuses": list(STATUSES)}
+    assert body["statuses"][0] == "new", "the module's order is the order served"
+    assert client.json("/api/v1/statuses?limit=1")[0] == 400
+
+
+def test_recording_a_status_is_visible_in_every_projection_that_reports_it(
+    client, repository, opportunity
+):
+    """What the browser re-reads after a command is the engine's answer, not a local patch."""
+    event = repository.opportunity(opportunity)["status_event"]
+    assert (
+        client.command(opportunity, {"status": "withdrawn", "expected_event_id": event})[0] == 200
+    )
+
+    detail = client.json(f"/api/v1/opportunities/{opportunity}?presentation=true")[1]
+    assert detail["status"] == "withdrawn"
+    assert detail["status_event"] != event
+    listed = next(
+        row
+        for row in client.json("/api/v1/opportunities?presentation=true")[1]
+        if row["id"] == opportunity
+    )
+    assert listed["status"] == "withdrawn"
+    assert listed["presentation"] == detail["presentation"], "list and detail disagree"
+    newest = client.json("/api/v1/timeline?limit=1")[1][0]
+    assert (newest["kind"], newest["event"], newest["actor"]) == ("status", "withdrawn", "operator")
+
+
 # --- under load -----------------------------------------------------------------------------------
 
 
@@ -915,8 +1375,12 @@ PERMITTED_READS = frozenset(
         "path",
     }
 )
-# Names that write, decide, contact a provider, or carry a credential. None may appear
-# anywhere in this package, as a call, an attribute or an import.
+# The one repository mutation this package may reach. Everything an operator can change
+# from the browser goes through it, so the list of what the browser can do to the database
+# is this line.
+PERMITTED_WRITES = frozenset({"record_status"})
+# Names that decide, contact a provider, or carry a credential -- and every other mutation.
+# None may appear anywhere in this package, as a call, an attribute or an import.
 FORBIDDEN_NAMES = frozenset(
     {
         "Intake",
@@ -927,7 +1391,6 @@ FORBIDDEN_NAMES = frozenset(
         "GmailComposeCredentials",
         "ControlledDrafts",
         "decide",
-        "record_status",
         "claim",
         "finish",
         "refuse",
@@ -947,22 +1410,36 @@ FORBIDDEN_NAMES = frozenset(
 )
 
 
-def test_the_package_reaches_no_write_and_no_second_business_layer():
+def test_the_package_reaches_exactly_one_write_and_no_second_business_layer():
     """Read mechanically, because a passing response body cannot show this.
 
     A route that started deciding something of its own would answer 200 exactly as before.
     What says otherwise is the source: this package may name the repository's read
-    projections and nothing else, and may not name a write, a provider or a credential at
-    all -- so a future edit that reaches one fails here rather than at review.
+    projections and one mutation, and may not name a decision, a provider or a credential
+    at all -- so a future edit that reaches one fails here rather than at review.
     """
+    allowed = PERMITTED_READS | PERMITTED_WRITES
     for name, tree in package_modules():
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 assert node.attr not in FORBIDDEN_NAMES, f"{name}: .{node.attr}"
                 if isinstance(node.value, ast.Name) and node.value.id == "repository":
-                    assert node.attr in PERMITTED_READS, f"{name}: repository.{node.attr}"
+                    assert node.attr in allowed, f"{name}: repository.{node.attr}"
             if isinstance(node, ast.Name):
                 assert node.id not in FORBIDDEN_NAMES, f"{name}: {node.id}"
+
+
+def test_the_only_mutation_the_package_reaches_is_the_status_append():
+    """Stated positively, so the guard says what the browser can do rather than only what
+    it cannot. Every other way to change the database is in FORBIDDEN_NAMES above; this
+    asserts the one that is left is the one the contract names, and that it is still used.
+    """
+    reached = {
+        node.attr
+        for name, node in nodes(ast.Attribute)
+        if _named(node.value, "repository") and node.attr not in PERMITTED_READS
+    }
+    assert reached == PERMITTED_WRITES == {"record_status"}, reached
 
 
 def test_the_package_imports_no_behaviour_from_the_communications_layer():
@@ -987,7 +1464,11 @@ def test_the_package_imports_no_behaviour_from_the_communications_layer():
 
 
 def test_the_package_declares_every_route_in_one_place():
-    """Eight routes, all read. A ninth has to be written where the eight are."""
+    """Nine reads in one match, and the one command in another.
+
+    A tenth read, or a second command, has to be written where these are rather than
+    registered somewhere a reader would not think to look.
+    """
     tree = dict(package_modules())["server.py"]
     projection = next(
         node
@@ -996,7 +1477,7 @@ def test_the_package_declares_every_route_in_one_place():
     )
     matches = [node for node in ast.walk(projection) if isinstance(node, ast.Match)]
     assert len(matches) == 1
-    assert len(matches[0].cases) == 8
+    assert len(matches[0].cases) == 9
 
 
 # --- the command ----------------------------------------------------------------------------------

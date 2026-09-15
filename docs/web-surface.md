@@ -1,6 +1,6 @@
 # The local read surface
 
-CareerSignal's first surface that listens on a socket. It is **read-only**: it records no status, decides no review, creates no draft, and contacts no mailbox. Every operator write is still made on the command line, where it is already bounded.
+CareerSignal's first surface that listens on a socket. It reads, and it records a status. It decides no review, creates no draft, and contacts no mailbox: approving, drafting and reconciling are still command-line actions.
 
 ```sh
 uv run careersignal serve --db /path/to/private.db
@@ -22,9 +22,9 @@ The surface is confined by construction rather than by configuration, so each of
 
 **It binds loopback only.** `127.0.0.1`, with no parameter that accepts another interface.
 
-**It answers `GET` and `HEAD`, and nothing else.** Every other method — `POST`, `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` and `Allow: GET, HEAD` *before* anything is routed, authenticated, or read. Refusal is the default; reaching a route is what has to be spelled out.
+**It answers `GET`, `HEAD` and one `POST`.** Every other method — `PUT`, `PATCH`, `DELETE`, and verbs this server has never heard of — is refused with `405` *before* anything is routed, authenticated, or read. Refusal is still the default; `POST` narrows it by exactly one address, written out rather than registered in a router that would accept a second command the day somebody adds one. A `POST` to any other address is `405` with `Allow: GET, HEAD`, which also keeps a `POST` from reporting which read routes exist.
 
-**It reaches read projections and nothing else.** No intake, no `decide()`, no `record_status()`, no `claim()`, no `finish()`, no provider, no credential. A test reads the package's own syntax tree and fails the build if a write, a provider, or a mailbox client is ever named inside it — because a route that quietly started deciding something would answer `200` exactly as it does now.
+**It reaches read projections and one mutation.** `record_status()`, and nothing else: no intake, no `decide()`, no `claim()`, no `finish()`, no provider, no credential. A test reads the package's own syntax tree and asserts the set of non-read repository members it touches is exactly `{record_status}` — stated positively, so the guard says what the browser *can* do rather than only what it cannot.
 
 **It derives no fact.** Every route hands back what a repository projection already returned. The rules were settled where the storage is; a second opinion computed at the edge is how a list and a detail pane start disagreeing about the same opportunity.
 
@@ -122,6 +122,54 @@ Everything stored reaches the page through `document.createElement` and `textCon
 
 This release has no write controls at all: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
 
+## The one command
+
+```
+POST /api/v1/opportunities/{id}/status
+Content-Type: application/json
+X-CareerSignal-Token: <launch token>
+Origin: http://127.0.0.1:<port>
+
+{"status": "interviewing", "reason": "Recruiter scheduled technical interview", "expected_event_id": 103}
+```
+
+`status` and `expected_event_id` are required; `reason` is optional and defaults to `""`.
+
+**There is no `actor` field.** The authenticated local browser *is* the operator, so the server records `actor="operator"`. An actor taken from the request would let presentation input rewrite audit identity. Supplying one is refused rather than ignored — silently dropping a field a caller believed in is how a surface ends up recording something other than what was asked for.
+
+**The compare-and-append is `record_status()`'s, not this layer's.** It reads the newest event inside the write transaction and refuses there. Nothing in the HTTP layer re-implements that comparison: a second one here could only read outside the transaction, which is the race it exists to close. There is no application-level write lock either — a lock in the web server would be a second concurrency authority, and the wrong one. Two commands carrying the same event race honestly, and the database decides: one appends, one is told what it found.
+
+**Provenance is settled before the body is read.** Host, then `Origin`, then the launch token — so a request that cannot say where it came from is never parsed. `Origin` is *required* on a command, not merely checked when present: a read with no `Origin` is an ordinary same-document fetch, but a write with none has nothing to say for itself. The body must be `application/json`, must declare a `Content-Length`, and must not exceed 16 KiB — refused on what it declares rather than after it has been read into memory.
+
+| Outcome | Response |
+| --- | --- |
+| appended | `200` with the status, the new event, and the previous one |
+| malformed or invalid command | `400` |
+| missing or wrong launch token | `401` |
+| missing or wrong `Origin` | `403` |
+| unknown opportunity | `404` |
+| the event moved since it was read | `409` |
+| body larger than the ceiling | `413` |
+| any other method, or a `POST` elsewhere | `405` |
+
+A conflict is not an ordinary `400`. The request was well formed and the operator's authority was real; what moved was the state they acted on. It is caught by type — never by reading an exception's text — and answers with what was found:
+
+```json
+{"error": "status_conflict", "expected_event_id": 103, "observed_event_id": 104, "status": "withdrawn"}
+```
+
+Nothing is written.
+
+## The status vocabulary
+
+`GET /api/v1/statuses` returns the ordered vocabulary from `recruiting.status.STATUSES`. The browser fills its control from that rather than holding a copy that could fall out of step. The order is presentation order and carries no rule: transitions are deliberately unrestricted, and only the vocabulary is governed.
+
+## What the browser does after a command
+
+It re-reads. Nothing patches the row, the status, the queue or a count locally — what those become is the engine's to decide, and a local edit would be the browser forming a second opinion about state it just asked the server to change.
+
+A refusal is re-read too, and the form stays open on the new state, showing what the opportunity is *now* and inviting the operator to decide again. The command is never retried against the newer event: deciding again is theirs to do.
+
 ## Static assets
 
 `index.html`, `careersignal.css`, `icon.svg` and four ES modules (`app.js`, `api.js`, `dom.js`, `screens.js`) are packaged resources under `system.web`, discovered with `importlib.resources` and served by **exact name**. Nothing joins or resolves a path, so a request for `../../etc/passwd` is not a traversal to defeat — it is a key that does not exist. There is no directory listing. An asset the surface cannot name a media type for stops the launch rather than being served as guessed bytes.
@@ -133,6 +181,8 @@ Locating assets beside `__file__` would pass every test in a checkout, so the wh
 The server is threaded so a slow read cannot block the pane beside it, and no `sqlite3` object crosses those threads. `Repository` holds a path; each of its methods opens and closes its own connection on the calling thread. That is why one handle can be shared where a connection could not be, and why this package creates no pool and never weakens `check_same_thread`.
 
 ## What is not here yet
+
+Approving, rejecting, drafting and reconciling. `decide()`, `BindingConflict`, `claim()`, `finish()` and `OutwardActions` are all unreachable from this package, and a test fails the build if that changes.
 
 The active evaluation profile. The session panel reports only facts that are authoritative today, and which skills, locations and threshold a future intake would score against is launch configuration the engine does not store. Showing a label for it would mean inventing one. It arrives with the persisted-profile decision.
 
