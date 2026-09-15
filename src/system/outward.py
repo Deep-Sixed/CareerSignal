@@ -79,7 +79,7 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
             "state": None,
             "receipt": None,
             "message": str(exc),
-            "next": "Nothing was created; correct the cause and run draft again.",
+            "next": "Nothing was created; correct the cause and draft again.",
         }
     except (ValueError, KeyError) as exc:
         # Raised before any intent is reserved: missing approval, a changed review, a changed

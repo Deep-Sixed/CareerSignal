@@ -2999,3 +2999,69 @@ def test_two_drafts_that_pass_the_replay_check_together_still_make_one_draft(
     # One intent, and it is the one the single provider call produced.
     state, receipt = repository.intent(review)
     assert (state, receipt) == ("confirmed", f"gmail-draft:{review}")
+
+
+# --- one answer, two surfaces ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("expected", "behaviour"),
+    [
+        ("accepted", None),
+        ("provider_rejected", lambda key: ProviderRejected("declined")),
+        ("uncertain", lambda key: OSError("reset")),
+    ],
+)
+def test_the_browser_and_the_command_line_describe_the_same_attempt_identically(
+    acting, repository, tmp_path, expected, behaviour
+):
+    """The same situation, run through both surfaces, compared field by field.
+
+    An outward outcome is the one answer in this system where two surfaces disagreeing would
+    be a safety defect rather than an inconsistency. If the browser called an unknown outcome
+    a failure while the command line called it uncertain, an operator moving between them
+    would be told two different things about whether a draft exists in their mailbox.
+
+    Only `next` is allowed to differ, and only because it names where the operator is: one
+    says to run a command, the other describes what to press. Everything else -- the outcome,
+    the durable state, the receipt, the message -- is a fact about storage and is single
+    sourced in `system.outward`.
+    """
+
+    def run(store, provider, surface):
+        Intake(store, Profile(("python", "sql"))).intake_message(alert())
+        target = store.opportunities()[0]["id"]
+        review = approve(store, target)
+        return surface(store, provider, review)
+
+    def through_the_browser(store, provider, review):
+        client = acting(provider)
+        client.surface.repository = store
+        client.surface.actions = OutwardActions(store, provider)
+        return outward(client, review, "draft")[1]
+
+    def through_the_command_line(store, provider, review):
+        return outward_module.attempt(
+            store,
+            "draft",
+            review,
+            lambda: OutwardActions(store, provider).draft(review),
+            cli.GUIDANCE,
+        )
+
+    browser = run(Repository(tmp_path / "browser"), Outward(create=behaviour), through_the_browser)
+    terminal = run(
+        Repository(tmp_path / "terminal"), Outward(create=behaviour), through_the_command_line
+    )
+
+    assert browser["outcome"] == terminal["outcome"] == expected
+    shared = ("command", "outcome", "state", "message")
+    assert {key: browser[key] for key in shared} == {key: terminal[key] for key in shared}
+    # The receipt is the same fact with the review id in it, so it is compared by shape.
+    assert bool(browser["receipt"]) == bool(terminal["receipt"])
+    # `next` is either the same sentence on both -- most of these are facts about the record,
+    # not about the surface -- or the one the guidance map supplies, where the terminal names
+    # a command to type and the browser never does.
+    assert "careersignal" not in (browser.get("next") or "")
+    if browser.get("next") != terminal.get("next"):
+        assert "careersignal" in terminal["next"]
