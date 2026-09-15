@@ -124,7 +124,7 @@ The browser may fetch, select a row, filter rows it already has, count statuses 
 
 Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
 
-This release has no approval or outward controls: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Recording a status is the one thing the browser may write, and it is described below. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
+The browser may write two things: a status, and a decision. **Approve**, **Reject**, **Re-approve** and **Withdraw approval** are here, in the approval packet itself; both commands are described below. There are **no outward controls** — no Create draft and no Reconcile — because those are the actions that actually reach a mailbox, and authorizing one is not the same as performing it. Approvals is where the decision is taken: it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests beside the controls that act on them.
 
 ## The commands
 

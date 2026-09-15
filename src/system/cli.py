@@ -35,9 +35,11 @@ still emit a JSON document. They report no outcome because they have no operator
 in them.
 
 `serve` is neither. It binds a loopback socket and blocks, printing one address and then
-answering reads until it is stopped. It records nothing and decides nothing, so it has no
-outcome to report either; every write an operator can make is still made here, on the
-command line, where it is already bounded.
+serving until it is stopped, so it has no single outcome to report. What it serves is reads,
+one status append and one decision -- each bounded where it is implemented rather than here:
+a status carries the event it was recorded against, and an approval carries the packet it
+was read from. Creating a draft and reconciling one stay on the command line, because those
+are the actions that reach a mailbox, and authorizing one is not the same as doing it.
 
 This module composes and prints. It holds no rule of its own: every refusal below comes
 from the layer that owns it, and nothing here decides whether an action is authorized.
@@ -269,8 +271,11 @@ def main():
         "--provider",
         choices=("controlled", "gmail"),
         default="controlled",
-        help="Where a draft is created. 'controlled' stays on this machine. 'gmail' creates "
-        "a real draft in the authorized mailbox and is never the default.",
+        help="Where a draft is created, and for serve the destination an approval declares. "
+        "'controlled' stays on this machine. 'gmail' creates a real draft in the authorized "
+        "mailbox for draft, and for serve only names that mailbox as what an approval would "
+        "authorize -- serve writes nothing to Gmail and needs no compose token. Never the "
+        "default either way.",
     )
     parser.add_argument("--message", help="Local RFC email file, used only by ingest")
     parser.add_argument("--namespace", help="Stable mailbox/source identifier for ingest")
