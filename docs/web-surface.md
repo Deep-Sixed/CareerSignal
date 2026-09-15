@@ -36,7 +36,7 @@ Authority is a fresh high-entropy token, minted by `secrets` once per launch and
 
 It is never written to the database, to configuration, to an environment variable, to a file, or to a log — the request logger writes nothing at all, precisely so the token cannot outlive the process in a file nobody thinks about. There is no parameter that supplies one: a token a caller could set is a token a script could pin and reuse.
 
-It travels to the browser in the **URL fragment**, which browsers do not send in an HTTP request. It therefore reaches the page and nothing else. The bootstrap moves it into session storage and rewrites the address bar immediately, so it does not survive in history, in a bookmark, or in whatever gets pasted into a chat window next. In a query string it would reach the server, the request line, and every log that copies one.
+It travels to the browser in the **URL fragment**, which browsers do not send in an HTTP request. It therefore reaches the page and nothing else. `api.js` moves it into session storage and rewrites the address bar immediately, so it does not survive in history, in a bookmark, or in whatever gets pasted into a chat window next. In a query string it would reach the server, the request line, and every log that copies one.
 
 It comes back as a request header and is compared in constant time:
 
@@ -82,7 +82,7 @@ All under `/api/v1`, all `GET`, all exactly the repository projection they name.
 | `/reviews/{review}/authorization` | What an approval for this review would bind |
 | `/timeline` | Status and audit events as one stream, newest first |
 
-`/opportunities` accepts `status`, `active`, `eligible`, `min_coverage` and `max_coverage`; `/timeline` accepts `limit` and `since`. The values are handed to the projection that owns them, so a coverage bound outside 0–100 or a status outside the vocabulary is refused in the repository's own words.
+`/opportunities` accepts `status`, `active`, `eligible`, `min_coverage` and `max_coverage`; `/timeline` accepts `limit` and `since`. `/opportunities` and `/opportunities/{id}` also accept `presentation`. The values are handed to the projection that owns them, so a coverage bound outside 0–100 or a status outside the vocabulary is refused in the repository's own words.
 
 A parameter a route does not know is a `400`, not a silent pass: a misspelled filter that returned everything would tell the operator they are looking at a narrowed list when they are looking at all of it.
 
@@ -90,9 +90,41 @@ A blank value is a value. `?status=` and `?misspelled=` are both refused rather 
 
 An id that names nothing is `404`. A record that exists but has no evidence is an honest empty list — absence of a record and absence of evidence must not arrive looking the same.
 
+## Presentation
+
+`GET /api/v1/opportunities?presentation=true` and `GET /api/v1/opportunities/{id}?presentation=true` add one namespaced field and change nothing else:
+
+```json
+{
+  "id": "…", "company": "…", "status": "interested",
+  "presentation": {
+    "coverage": "100%",
+    "queue": "draft",
+    "approval": "approved by operator",
+    "attempt": "not attempted"
+  }
+}
+```
+
+Every one of those four strings is produced by calling `system.views.coverage()`, `queue()`, `approval()` and `attempt()` — the same functions the CLI prints through. Nothing is recomputed at the edge, and a test reads the package's syntax tree to prove that no fifth derivation, precedence table, status vocabulary or draft wording has appeared in the web layer or in the JavaScript.
+
+Without `presentation=true` the responses are the repository projections exactly as they were before this existed, so enrichment is opt-in and the established reads are unchanged. `presentation` follows the same fail-closed rule as every other parameter: `true` and `false` are accepted, and a blank, an unknown value or a repeat is a `400`.
+
+Building a row's presentation needs its action state, which `opportunities()` does not report, so the list reads each opportunity's detail. That is one read per row, accepted deliberately: the alternative is a second summary model kept in step with `_action` by hand, which is the duplication this design exists to avoid. It is a local, single-operator application, and it can be optimised when a real database is measurably slow.
+
+## The screens
+
+Five, as frozen: Dashboard, Inbox, Opportunities, Approvals, Activity. Plain HTML, CSS and ES modules — no framework, no bundler, no npm, no CDN, no downloaded font. The browser owns interaction and rendering; it does not own interpretation.
+
+The browser may fetch, select a row, filter rows it already has, count statuses and queues, switch panes, format dates and build DOM nodes. It may not decide whether an approval is stale, whether something needs reconciling, whether a draft may be created, what `REFUSED` means, whether an opportunity advances, or which state outranks another. Those arrive already decided.
+
+Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
+
+This release has no write controls at all: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
+
 ## Static assets
 
-`index.html`, `bootstrap.js` and `careersignal.css` are packaged resources under `system.web`, discovered with `importlib.resources` and served by **exact name**. Nothing joins or resolves a path, so a request for `../../etc/passwd` is not a traversal to defeat — it is a key that does not exist. There is no directory listing. An asset the surface cannot name a media type for stops the launch rather than being served as guessed bytes.
+`index.html`, `careersignal.css`, `icon.svg` and four ES modules (`app.js`, `api.js`, `dom.js`, `screens.js`) are packaged resources under `system.web`, discovered with `importlib.resources` and served by **exact name**. Nothing joins or resolves a path, so a request for `../../etc/passwd` is not a traversal to defeat — it is a key that does not exist. There is no directory listing. An asset the surface cannot name a media type for stops the launch rather than being served as guessed bytes.
 
 Locating assets beside `__file__` would pass every test in a checkout, so the wheel gate starts the surface from the installed wheel with no checkout anywhere and asks it for them.
 
@@ -101,5 +133,9 @@ Locating assets beside `__file__` would pass every test in a checkout, so the wh
 The server is threaded so a slow read cannot block the pane beside it, and no `sqlite3` object crosses those threads. `Repository` holds a path; each of its methods opens and closes its own connection on the calling thread. That is why one handle can be shared where a connection could not be, and why this package creates no pool and never weakens `check_same_thread`.
 
 ## What is not here yet
+
+The active evaluation profile. The session panel reports only facts that are authoritative today, and which skills, locations and threshold a future intake would score against is launch configuration the engine does not store. Showing a label for it would mean inventing one. It arrives with the persisted-profile decision.
+
+`.eml` ingestion and the Gmail label read, which are write affordances and belong with intake.
 
 Write authority. Approving a review, recording a status, creating a draft and reconciling one remain command-line actions. They arrive on this surface only with the operator write path that is designed for them — including the approval binding an operator's screen has to carry — and not as a side effect of being able to see things in a browser.

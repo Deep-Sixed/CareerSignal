@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from communications.gmail import TOKEN_VARIABLE
 from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
 from data.store import sqlite_report
+from system import views
 
 # The only address this surface knows how to bind. There is no --host and no fallback: an
 # interface is not a setting when the whole security model is "nothing off this machine".
@@ -70,6 +71,9 @@ MEDIA_TYPES = {
 }
 FILTERS = ("status", "active", "eligible", "min_coverage", "max_coverage")
 WINDOW = ("limit", "since")
+# Opt-in, because the eight reads established in #29 are the repository's projections
+# exactly, and a caller that asked for one should keep getting one.
+PRESENTATION = "presentation"
 
 
 def assets() -> dict:
@@ -135,7 +139,7 @@ def accepted(query, names) -> None:
 
 def filters(query) -> dict:
     """Query strings as the arguments opportunities() already validates for itself."""
-    accepted(query, FILTERS)
+    accepted(query, FILTERS + (PRESENTATION,))
     supplied = {}
     if "status" in query:
         supplied["status"] = one(query, "status")
@@ -151,6 +155,43 @@ def filters(query) -> dict:
 def window(query) -> dict:
     accepted(query, WINDOW)
     return {name: whole(query, name) for name in WINDOW if name in query}
+
+
+def presenting(query) -> bool:
+    """Whether this request asked for the rendered strings as well as the stored facts."""
+    return PRESENTATION in query and boolean(query, PRESENTATION)
+
+
+def presented(summary, action) -> dict:
+    """The four strings an operator reads, from the one implementation that owns them.
+
+    Every value here is a call into `system.views` and nothing else. The alternative the
+    frozen handoff proposed -- porting these four to JavaScript -- would put CareerSignal's
+    idea of what its own state means into a second language, where `queue()`'s precedence
+    could drift from the Python that is mutation-tested. A browser that renders a string it
+    was handed cannot disagree with the engine about whether an approval still binds.
+    """
+    return {
+        "coverage": views.coverage(summary),
+        "queue": views.queue(summary, action),
+        "approval": views.approval(action),
+        "attempt": views.attempt(action),
+    }
+
+
+def enriched(repository, rows) -> list:
+    """List rows with their presentation block.
+
+    `opportunities()` reports no action state, so each row's is read from the detail the
+    repository already assembles. That is one read per row, accepted deliberately for a
+    local single-operator application: the alternative is a second summary model kept in
+    step with `_action` by hand, which is the duplication this whole change exists to
+    avoid. Optimise it when a real database is measurably slow, not before.
+    """
+    return [
+        {**row, "presentation": presented(row, repository.opportunity(row["id"])["action"])}
+        for row in rows
+    ]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -245,10 +286,14 @@ class Handler(BaseHTTPRequestHandler):
                 accepted(query, ())
                 return session(repository)
             case ["opportunities"]:
-                return repository.opportunities(**filters(query))
+                rows = repository.opportunities(**filters(query))
+                return enriched(repository, rows) if presenting(query) else rows
             case ["opportunities", identifier]:
-                accepted(query, ())
-                return repository.opportunity(identifier)
+                accepted(query, (PRESENTATION,))
+                record = repository.opportunity(identifier)
+                if not presenting(query):
+                    return record
+                return {**record, "presentation": presented(record, record["action"])}
             case ["opportunities", identifier, "sources"]:
                 accepted(query, ())
                 # Absence is decided first, exactly as the CLI decides it: an id naming
