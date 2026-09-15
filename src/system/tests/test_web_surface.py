@@ -413,6 +413,106 @@ def test_post_reaches_no_address_but_the_one_command(client, repository):
     assert state(repository) == before
 
 
+def test_the_command_address_is_not_reachable_by_a_lookalike_prefix(
+    client, repository, opportunity
+):
+    """`/api/v1` is proven, not assumed.
+
+    Slicing a path by `len(API_ROOT)` without checking the prefix strips any seven
+    characters, so every seven-character prefix would present the command's own segments.
+    The body here is the one that would genuinely append -- it names the current event --
+    so a regression answers 200 and writes, rather than failing on a malformed payload for
+    some unrelated reason.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    payload = json.dumps({"status": "interested", "expected_event_id": event}).encode("utf-8")
+    before = state(repository)
+    for path in (
+        f"/abcdef/opportunities/{opportunity}/status",
+        f"/1234567/opportunities/{opportunity}/status",
+        f"/../../x/opportunities/{opportunity}/status",
+        f"/api/v2/opportunities/{opportunity}/status",
+        f"/API/V1/opportunities/{opportunity}/status",
+        f"/api/v1x/opportunities/{opportunity}/status",
+        f"/x/api/v1/opportunities/{opportunity}/status",
+    ):
+        status, body, headers = client.send(
+            path, method="POST", origin=True, content_type="application/json", body=payload
+        )
+        assert status == 405, path
+        assert headers["Allow"] == "GET, HEAD", path
+    assert state(repository) == before
+
+
+def test_the_command_address_is_singular_rather_than_a_family_of_aliases(
+    client, repository, opportunity
+):
+    """A doubled or trailing slash is a different address, not another spelling of this one.
+
+    The contract names exactly one command address. Filtering empty path components out
+    would quietly make several spellings equal, which is how an address that was reasoned
+    about once ends up with variants nobody reasoned about.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    payload = json.dumps({"status": "interested", "expected_event_id": event}).encode("utf-8")
+    before = state(repository)
+    for path in (
+        f"/api/v1//opportunities/{opportunity}/status",
+        f"/api/v1/opportunities//{opportunity}/status",
+        f"/api/v1/opportunities/{opportunity}//status",
+        f"/api/v1/opportunities/{opportunity}/status/",
+    ):
+        status, body, headers = client.send(
+            path, method="POST", origin=True, content_type="application/json", body=payload
+        )
+        assert status == 405, path
+        assert headers["Allow"] == "GET, HEAD", path
+    assert state(repository) == before
+    # And the canonical spelling still works, so the rule above narrowed nothing it should
+    # not have.
+    assert (
+        client.command(opportunity, {"status": "interested", "expected_event_id": event})[0] == 200
+    )
+
+
+def test_a_target_naming_its_own_authority_is_refused(client, surface, repository, opportunity):
+    """Identity is settled on Host, so a target may not name an authority of its own.
+
+    In absolute form the target carries the authority, and HTTP makes *that* the one
+    identifying the server. This surface checks the Host header instead, so honouring
+    absolute form would route by one authority while checking another -- and would give the
+    single command address a second spelling that reaches the same write.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    payload = json.dumps({"status": "interested", "expected_event_id": event}).encode("utf-8")
+    before = state(repository)
+    for target in (
+        f"http://{surface.authority}/api/v1/opportunities/{opportunity}/status",
+        f"https://{surface.authority}/api/v1/opportunities/{opportunity}/status",
+        f"http://elsewhere.example/api/v1/opportunities/{opportunity}/status",
+    ):
+        status, _, _ = client.send(
+            target, method="POST", origin=True, content_type="application/json", body=payload
+        )
+        assert status == 400, target
+    assert state(repository) == before
+    # The reads refuse it on the same rule rather than a separate one.
+    assert client.send(f"http://{surface.authority}/api/v1/session")[0] == 400
+
+
+def test_a_read_address_is_singular_too(client, repository, opportunity):
+    """The same parser serves the reads, so the same spellings are the same one address."""
+    for path in (
+        "/api/v1//session",
+        "/api/v1/session/",
+        "/api/v1//opportunities",
+        f"/api/v1/opportunities/{opportunity}/sources/",
+    ):
+        status, _, _ = client.send(path)
+        assert status == 404, path
+    assert client.send("/api/v1/session")[0] == 200
+
+
 @pytest.mark.parametrize(
     "path",
     (

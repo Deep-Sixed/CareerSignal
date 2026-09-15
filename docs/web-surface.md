@@ -54,6 +54,10 @@ A request naming an unexpected `Host` is refused with `403`. The socket is not t
 
 A request carrying an `Origin` other than the server's own is refused with `403`, and **no `Access-Control-Allow-*` header is ever emitted** — on any response, including the refusals. Another origin is not refused and then quietly handed the answer by a permissive header.
 
+A request target must be a plain path. One naming its own authority — `http://127.0.0.1:8765/api/v1/…`, the absolute form — is refused with `400`, because HTTP makes that authority the one identifying the server while this surface settles identity on `Host`. Honouring it would mean routing by one authority and checking another, and would give every address a second spelling.
+
+Addresses are matched whole, not by prefix arithmetic. `/api/v1` is proven to be the prefix before anything beneath it is read, so a lookalike of the same length — `/abcdef/…` — reaches nothing. Empty path components are kept rather than filtered away, so a doubled or trailing slash is a different address than the one documented here rather than an alias for it.
+
 Every response carries:
 
 ```
@@ -120,7 +124,7 @@ The browser may fetch, select a row, filter rows it already has, count statuses 
 
 Everything stored reaches the page through `document.createElement` and `textContent`. There is no `innerHTML`, no `insertAdjacentHTML`, no `document.write`, no `eval`, and no template that concatenates a value into markup — so a recruiter's subject line has no parser to reach on the one origin that holds the launch credential. Non-printing characters are escaped for display, never removed: a title carrying an escape sequence stays visible as evidence. The one attribute taken from stored text, a link's `href`, is restricted to `http` and `https`, so a stored `javascript:` URL renders as struck-through text.
 
-This release has no write controls at all: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
+This release has no approval or outward controls: no Approve, Reject, Create draft, Reapprove, Withdraw or Reconcile. Recording a status is the one thing the browser may write, and it is described below. Approvals is a real read screen rather than a placeholder — it shows the rows whose queue makes approval state relevant, with the bound packet and the approved-versus-now digests — because a navigation item that led nowhere would be worse than one that reads.
 
 ## The one command
 
@@ -144,7 +148,7 @@ Origin: http://127.0.0.1:<port>
 | Outcome | Response |
 | --- | --- |
 | appended | `200` with the status, the new event, and the previous one |
-| malformed or invalid command | `400` |
+| malformed or invalid command, or a target naming an authority | `400` |
 | missing or wrong launch token | `401` |
 | missing or wrong `Origin` | `403` |
 | unknown opportunity | `404` |

@@ -309,7 +309,9 @@ function statusAction(record, extra, actions) {
   put(chooser, choices);
 
   const note = el("label", "field");
-  put(note, el("span", "field-label", "Reason (optional, kept verbatim)"));
+  // What the engine actually does with it: `record_status` strips surrounding whitespace
+  // and stores the rest unchanged, so the line breaks inside a note survive.
+  put(note, el("span", "field-label", "Reason (optional, line breaks kept)"));
   const reason = el("textarea", "status-reason");
   reason.rows = 3;
   reason.value = extra.reason || "";
