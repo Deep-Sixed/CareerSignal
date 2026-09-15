@@ -54,6 +54,30 @@ class ProviderRejected(RuntimeError):
     """
 
 
+class DraftUncertain(RuntimeError):
+    """A draft-create request was sent and its outcome cannot be established.
+
+    The third answer, raised only from beyond the provider-write boundary, and only after
+    the uncertainty has been recorded. That ordering is the whole value of the type: a
+    caller receiving this knows two things without inspecting anything -- a request may have
+    landed, and the durable record already says so.
+
+    It exists because inferring this from an exception class does not work. `DraftRefused`
+    and `ProviderRejected` are certain by construction, but everything else a provider can
+    raise is only uncertain *if it happened after contact*, and the exception itself does not
+    carry that fact. A `ValueError` from inside `create()` and a `ValueError` from a missing
+    approval are the same class and opposite answers, and a classifier that guessed would
+    tell an operator nothing was created while the database said otherwise.
+
+    So the boundary declares it rather than the reader deducing it. Every failure past
+    `create()` becomes this, whatever the provider raised -- including a failure to persist
+    the receipt of a draft that was made, which is uncertainty about our own record rather
+    than about the mailbox, and is no safer. The original is kept as `__cause__`.
+
+    Never retried automatically. Only reconciliation resolves it.
+    """
+
+
 class DraftProvider(Protocol):
     # Which implementation owns the external action this provider takes, e.g. "controlled"
     # or "gmail". Fixed per implementation: it names what the provider is, not what mailbox

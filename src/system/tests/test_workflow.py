@@ -8,6 +8,7 @@ from communications.controlled import ControlledDrafts
 from data.repository import Repository
 from data.store import connection
 from recruiting.models import Profile
+from recruiting.ports import DraftUncertain
 from system.demo import golden_workflow
 from system.workflow import Intake, OutwardActions
 
@@ -121,8 +122,12 @@ def test_uncertain_external_result_never_blindly_retries(actions, flow, after_su
         raise OSError("controlled interruption")
 
     actions.provider.create = fail
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         actions.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     assert flow.repository.intent(review)[0] == "uncertain"
     assert actions.draft(review) is None
     assert bool(actions.reconcile(review)) == after_success
@@ -138,8 +143,12 @@ def test_failure_to_persist_receipt_can_be_reconciled(actions, flow, monkeypatch
         raise OSError("disk unavailable")
 
     monkeypatch.setattr(flow.repository, "finish", fail)
-    with pytest.raises(OSError):
+    # Past the provider-write boundary the outward action declares uncertainty rather
+    # than re-raising what the provider happened to throw, so a reader cannot be left
+    # to infer which side of that boundary a failure fell on. The original is kept.
+    with pytest.raises(DraftUncertain) as raised:
         actions.draft(review)
+    assert raised.value.__cause__ is not None, "the original failure was not preserved as the cause"
     monkeypatch.setattr(flow.repository, "finish", original)
     assert flow.repository.intent(review)[0] == "attempting"
     assert actions.draft(review) is None

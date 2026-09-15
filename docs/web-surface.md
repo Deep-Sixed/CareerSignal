@@ -280,7 +280,10 @@ The reservation is the database's to grant, not the web server's. Two simultaneo
 | bad/missing `Origin` | `403` |
 | review does not exist | `404` |
 | oversized body | `413` |
-| any other method, or `GET` on either address | `405` |
+| `GET` or `HEAD` on either address | `404` |
+| any other method | `405` |
+
+Reading one of these addresses is `404` rather than `405`: the read router has no such route, and these two answer `POST` only. A method this surface does not answer at all is still refused with `405` before anything is routed.
 
 `refused` answers `409` because it is a conflict with what is stored — a stale approval, a destination that is not the approved one, an intent already standing — exactly as a refused decision is. The other three ran, and they are answers rather than errors.
 

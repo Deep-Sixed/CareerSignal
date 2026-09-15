@@ -572,16 +572,13 @@ class Handler(BaseHTTPRequestHandler):
             # beside the other commands. A handler that took the address and worked out which
             # method it stood for would be a router with a lookup in it, and the address would
             # stop being the whole of what distinguishes these two commands.
-            case ["reviews", identifier, "draft"]:
+            case ["reviews", identifier, "draft" as command]:
                 return self._outward(
-                    identifier, "draft", parsed.query, lambda actions: actions.draft(identifier)
+                    identifier, command, parsed.query, lambda actions: actions.draft(identifier)
                 )
-            case ["reviews", identifier, "reconcile"]:
+            case ["reviews", identifier, "reconcile" as command]:
                 return self._outward(
-                    identifier,
-                    "reconcile",
-                    parsed.query,
-                    lambda actions: actions.reconcile(identifier),
+                    identifier, command, parsed.query, lambda actions: actions.reconcile(identifier)
                 )
         # Every other address reads -- including a path outside the API root, for which
         # `tail` returns None and no sequence pattern above can match. Saying so with Allow
@@ -706,15 +703,25 @@ class Handler(BaseHTTPRequestHandler):
             # A launch that may record decisions and may not act on them. Nothing was
             # contacted, so this is a local refusal in the exact sense the outcomes define:
             # certain, nothing created, the approval untouched.
+            #
+            # The intent is read rather than reported as absent. This refusal is about what
+            # *this launch* may do; it says nothing about whether an attempt already exists,
+            # and one very well may -- made from the command line, or from an earlier launch
+            # that did hold a credential. Answering `state: None` over a standing `uncertain`
+            # row would tell the operator there is nothing out there to reconcile.
+            state, held = outward.recorded(repository, identifier)
             return self._attempted(
                 {
                     "command": command,
                     "review": identifier,
                     "outcome": outward.REFUSED,
-                    "state": None,
-                    "receipt": None,
+                    "state": state,
+                    "receipt": held,
                     "message": "this launch has no outward authority, so nothing was contacted",
-                    "next": "Restart with a provider credential, or use the command line.",
+                    "next": "The existing draft intent is unaffected; reconcile it from the "
+                    "command line, or restart with a provider credential."
+                    if state
+                    else "Restart with a provider credential, or use the command line.",
                 }
             )
         return self._attempted(

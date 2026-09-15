@@ -17,6 +17,7 @@ import hashlib
 import http.client
 import json
 import socket
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
@@ -1006,20 +1007,31 @@ def routed_only(vocabulary):
     about what a row means, which is the thing being forbidden.
     """
     for name, tree in package_modules():
-        # The router, and nothing else. An earlier version also excused any module-level
-        # tuple of strings, on the grounds that the file declares its route segments that
-        # way -- but that would have let a queue name into any constant that happened to be
-        # a tuple, which is most of them. Matching an address is the only place one of these
-        # words is not an opinion about a row.
+        # The route patterns of the command router, and nothing else.
+        #
+        # Two earlier versions of this were too wide, each in a way that looked right. The
+        # first excused any module-level tuple of strings, which is most of the constants in
+        # this file. The second excused everything beneath any `ast.Match` -- but there are
+        # several match statements here, and a match *body* is ordinary code: a queue name
+        # compared inside `_projection`, or inside a command case, would have been waved
+        # through as "routed" while being exactly the opinion this forbids.
+        #
+        # A `case` pattern is the one position where one of these words is an address rather
+        # than a judgement about a row, so the whitelist is the pattern nodes alone -- not the
+        # guard, not the body, and not another function's match.
         routed = {
             id(node)
-            for match in ast.walk(tree)
+            for command in ast.walk(tree)
+            if isinstance(command, ast.FunctionDef | ast.AsyncFunctionDef)
+            and command.name == "_command"
+            for match in ast.walk(command)
             if isinstance(match, ast.Match)
-            for node in ast.walk(match)
+            for case in match.cases
+            for node in ast.walk(case.pattern)
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and node.value in vocabulary:
-                assert id(node) in routed, f"{name}: {node.value!r} outside the command router"
+                assert id(node) in routed, f"{name}: {node.value!r} outside a command route pattern"
 
 
 def test_the_web_package_derives_presentation_only_by_calling_views():
@@ -3067,3 +3079,215 @@ def test_the_browser_and_the_command_line_describe_the_same_attempt_identically(
     assert "careersignal" not in (browser.get("next") or "")
     if browser.get("next") != terminal.get("next"):
         assert "careersignal" in terminal["next"]
+
+
+# --- the boundary decides, not the exception class -------------------------------------------------
+#
+# The classifier once inferred which side of the provider-write boundary a failure fell on
+# from its exception class. That cannot work: a ValueError raised inside `create()` and a
+# ValueError raised by a missing approval are the same class and opposite facts. It reported
+# the second answer for the first -- REFUSED, "nothing was created" -- while the row said
+# `uncertain`. These pin the shape that replaced it.
+
+
+@pytest.mark.parametrize(
+    ("raised", "why"),
+    [
+        (
+            lambda key: ValueError("the provider raised a ValueError"),
+            "a class the old reader called refused",
+        ),
+        (lambda key: KeyError("missing"), "another of them"),
+        (lambda key: Exception("something nobody anticipated"), "a bare Exception"),
+        (lambda key: TypeError("wrong shape"), "a programming error inside the provider"),
+        (lambda key: OSError("connection reset"), "the transport case that always worked"),
+    ],
+)
+def test_any_failure_after_the_request_was_sent_reports_the_uncertainty_on_record(
+    acting, repository, opportunity, raised, why
+):
+    """Whatever the provider raises past `create()`, the answer is the row, not the class.
+
+    The report and the database have to agree. A response saying nothing was created, beside
+    a row saying the outcome is unknown, is the one contradiction this whole vocabulary
+    exists to prevent -- and it is worse than a wrong label, because "nothing was created"
+    is an invitation to draft again.
+    """
+    provider = Outward(create=raised)
+    client = acting(provider)
+    review = approve(repository, opportunity)
+
+    status, body = outward(client, review, "draft")
+    assert provider.creates == 1, why
+    # The record and the report say the same thing.
+    assert repository.intent(review) == ("uncertain", None), why
+    assert body["outcome"] == "uncertain", why
+    assert body["state"] == "uncertain", why
+    assert status == 200, why
+    # And it points at the only safe move, never at drafting again.
+    assert "reconcile" in body["next"].casefold(), why
+    assert "draft again" not in body["next"].casefold(), why
+
+    # Asking again still creates nothing, which is the property the mislabel endangered.
+    outward(client, review, "draft")
+    assert provider.creates == 1, why
+
+
+def test_a_receipt_that_cannot_be_recorded_is_uncertain_rather_than_lost(
+    acting, repository, opportunity
+):
+    """The draft exists and we failed to write down which one it is.
+
+    Uncertainty about our own record rather than about the mailbox, and no safer: a second
+    draft would be a real second draft. Reconciliation is still the only way out.
+    """
+    provider = Outward()
+    client = acting(provider)
+    review = approve(repository, opportunity)
+
+    broken = OutwardActions(repository, provider)
+    original = repository.finish
+
+    def refuse_to_record(review_id, receipt):
+        if receipt is not None:
+            raise sqlite3.OperationalError("the database would not take the receipt")
+        return original(review_id, receipt)
+
+    client.surface.actions = broken
+    broken.repository = _Recording(repository, refuse_to_record)
+
+    status, body = outward(client, review, "draft")
+    assert provider.creates == 1
+    assert body["outcome"] == "uncertain"
+    assert "reconcile" in body["next"].casefold()
+    # The intent was never settled, so nothing reads as though a draft is confirmed.
+    assert repository.intent(review)[0] != "confirmed"
+
+
+class _Recording:
+    """The repository with one method replaced, so a persistence failure can be staged.
+
+    Written as a wrapper rather than a monkeypatch because the surface and the service hold
+    the same handle, and only the service's write is meant to fail here.
+    """
+
+    def __init__(self, repository, finish):
+        self._repository, self.finish = repository, finish
+
+    def __getattr__(self, name):
+        return getattr(self._repository, name)
+
+
+def test_a_reconciliation_that_fails_after_looking_leaves_the_attempt_unresolved(
+    acting, repository, opportunity
+):
+    """A lookup that broke is not evidence the draft is absent, and must never read as one."""
+    client, provider, review = uncertain(acting, repository, opportunity)
+
+    def broken_lookup(key):
+        raise ValueError("the drafts listing came back unreadable")
+
+    provider.lookup = broken_lookup
+
+    status, body = outward(client, review, "reconcile")
+    assert body["outcome"] == "uncertain"
+    assert body["state"] == "uncertain"
+    assert "reconcile" in body["next"].casefold()
+    # Untouched, and still not free for another draft.
+    assert repository.intent(review) == ("uncertain", None)
+    outward(client, review, "draft")
+    assert provider.creates == 1
+
+
+def test_a_refusal_before_contact_still_reports_whatever_the_record_holds(
+    acting, repository, opportunity
+):
+    """The other direction of the same rule, so it is a rule and not a special case.
+
+    A local refusal with an intent already standing must not report `state: None`. The
+    refusal is about this invocation; the intent is a fact about an earlier one.
+    """
+    client, provider, review = uncertain(acting, repository, opportunity)
+    provider._identity = lambda: RuntimeError("the credential could not be verified")
+
+    status, body = outward(client, review, "reconcile")
+    assert (status, body["outcome"]) == (409, "refused")
+    assert body["state"] == "uncertain", "the refusal erased an intent that still exists"
+    assert repository.intent(review) == ("uncertain", None)
+
+
+def test_a_launch_without_authority_still_reports_an_intent_that_already_exists(
+    acting, addressed, repository, opportunity
+):
+    """A refusal about this launch is not a claim that nothing is out there.
+
+    An uncertain attempt made from the command line, or from an earlier launch that held a
+    credential, survives a restart without one. Reporting `state: None` over it would tell
+    the operator there is nothing to reconcile, which is the same collapse as mislabelling
+    the outcome -- arrived at from the other direction.
+    """
+    # An uncertain attempt, made while the surface could reach a provider.
+    client, provider, review = uncertain(acting, repository, opportunity)
+
+    # The same database, served by a launch with no outward authority at all.
+    without = Client(addressed)
+    assert without.json("/api/v1/session")[1]["outward"] is False
+
+    status, body = outward(without, review, "reconcile")
+    assert (status, body["outcome"]) == (409, "refused")
+    assert body["state"] == "uncertain", "the refusal erased an attempt that still exists"
+    # Untouched, uncontacted, and still not free for another draft.
+    assert repository.intent(review) == ("uncertain", None)
+    assert provider.creates == 1
+
+
+def test_a_refusal_raised_before_contact_reports_the_intent_it_did_not_touch(
+    acting, repository, opportunity
+):
+    """A pre-contact `ValueError` with an attempt already standing.
+
+    Reconciling through a provider declared for another mailbox is refused before anything is
+    searched -- the right answer, and one the classifier once reported as `state: None`. The
+    refusal is about this request; the unresolved attempt is a fact about an earlier one, and
+    dropping it would say there is nothing to reconcile.
+    """
+    client, provider, review = uncertain(acting, repository, opportunity)
+
+    class Elsewhere(Outward):
+        provider, namespace = "gmail", "gmail:somebody.else@example.com"
+
+    stranger = Elsewhere()
+    client.surface.actions = OutwardActions(repository, stranger)
+
+    status, body = outward(client, review, "reconcile")
+    assert (status, body["outcome"]) == (409, "refused")
+    assert body["state"] == "uncertain", "a pre-contact refusal erased the standing attempt"
+    # Never searched, because it could not be trusted to be searching the right mailbox.
+    assert stranger.lookups == 0
+    assert repository.intent(review) == ("uncertain", None)
+
+
+def test_a_fault_over_an_unsettled_attempt_reports_it_rather_than_escaping(
+    acting, repository, opportunity
+):
+    """The safe direction when something breaks that this vocabulary has no name for.
+
+    A fault is not a state, and with nothing reserved it is still raised as the fault it is.
+    But an unsettled intent outranks that: something may exist in the mailbox, and letting the
+    exception escape would hand the operator a traceback where the record has an answer.
+    """
+    client, provider, review = uncertain(acting, repository, opportunity)
+
+    def broken(review_id):
+        raise sqlite3.OperationalError("the intent row could not be read")
+
+    client.surface.actions = OutwardActions(_Recording(repository, repository.finish), provider)
+    client.surface.actions.repository.intent_identity = broken
+
+    status, body = outward(client, review, "reconcile")
+    assert status == 200
+    assert body["outcome"] == "uncertain"
+    assert body["state"] == "uncertain"
+    assert "reconcile" in body["next"].casefold()
+    assert provider.lookups == 0
+    assert repository.intent(review) == ("uncertain", None)

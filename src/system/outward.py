@@ -17,7 +17,7 @@ failed -- so reading that back is the only honest answer. Before the claim nothi
 reserved and the refusal is certain.
 """
 
-from recruiting.ports import DraftRefused, ProviderRejected
+from recruiting.ports import DraftRefused, DraftUncertain, ProviderRejected
 
 ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
     "accepted",
@@ -30,6 +30,17 @@ ACCEPTED, REFUSED, PROVIDER_REJECTED, UNCERTAIN = (
 # should do *here*. Everything else in the record is a fact about storage and is identical
 # wherever it is read. `{review}` is substituted; nothing else is.
 RECONCILE, IN_PROGRESS = "reconcile", "in_progress"
+
+
+def recorded(repository, review) -> tuple:
+    """The durable intent as a (state, receipt) pair, with absence spelled the same way.
+
+    Every branch below reads this rather than asserting what the record must hold. That is
+    the module's rule made mechanical: an answer that contradicts the row it describes is the
+    one failure this whole vocabulary exists to prevent, and the cheapest way to prevent it
+    is never to write the row's contents from memory.
+    """
+    return repository.intent(review) or (None, None)
 
 
 def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
@@ -51,17 +62,16 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
     try:
         receipt = run()
     except DraftRefused as exc:
-        # Read rather than assumed: a refusal reached before any intent exists (the usual
-        # case for `draft`) truly has none to report, but an identity check that fails while
-        # reconciling an already-unsettled intent leaves that intent exactly as it was.
-        # Reporting it as None either time would say less than the record holds, or -- if
-        # this were a fault instead -- more than it does.
-        state = repository.intent(review)
+        # Certain by construction: this invocation sent no draft-create request. What it may
+        # still have is an intent from an earlier one -- an identity check that fails while
+        # reconciling leaves that intent exactly as it was -- so the record is read rather
+        # than assumed, either way.
+        state, held = recorded(repository, review)
         return {
             **common,
             "outcome": REFUSED,
-            "state": state[0] if state else None,
-            "receipt": state[1] if state else None,
+            "state": state,
+            "receipt": held,
             "message": str(exc),
             "next": "The existing draft intent is unaffected; correct the credential and try again."
             if state
@@ -70,45 +80,71 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
     except ProviderRejected as exc:
         # Proven, not merely unknown: the provider was contacted and its own response is
         # evidence nothing was created. The outward action has already released the durable
-        # intent this attempt reserved and recorded the rejection, so there is nothing left
-        # pending here -- the approval is untouched, and retrying once the cause is fixed is
-        # exactly as safe as after an ordinary refusal, just not the same fact.
+        # intent this attempt reserved, so reading the record back should find nothing -- and
+        # it is read rather than hardcoded, because a claim that survived a rejection is
+        # something the operator needs told, not something this layer should paper over.
+        state, held = recorded(repository, review)
         return {
             **common,
             "outcome": PROVIDER_REJECTED,
-            "state": None,
-            "receipt": None,
+            "state": state,
+            "receipt": held,
             "message": str(exc),
             "next": "Nothing was created; correct the cause and draft again.",
         }
+    except DraftUncertain as exc:
+        # Declared by the boundary that knows, never inferred here. A request was sent, its
+        # outcome cannot be established, and the uncertainty is already recorded. This is the
+        # one outcome that must never suggest drafting again.
+        state, held = recorded(repository, review)
+        return {
+            **common,
+            "outcome": UNCERTAIN,
+            "state": state,
+            "receipt": held,
+            "message": f"the provider was contacted and the outcome is unknown: {exc}",
+            "next": guidance[RECONCILE].format(review=review),
+        }
     except (ValueError, KeyError) as exc:
-        # Raised before any intent is reserved: missing approval, a changed review, a changed
-        # address, an ended opportunity, or nothing to reconcile.
-        return {**common, "outcome": REFUSED, "state": None, "receipt": None, "message": str(exc)}
-    except (RuntimeError, OSError) as exc:
-        state = repository.intent(review)
+        # Refused before any request was sent: missing approval, a changed review, a changed
+        # address, an ended opportunity, or nothing to reconcile. Anything raised *after*
+        # contact arrives as DraftUncertain above, whatever class the provider raised, which
+        # is what keeps this branch from having to guess which side of the boundary it is on.
+        state, held = recorded(repository, review)
+        return {
+            **common,
+            "outcome": REFUSED,
+            "state": state,
+            "receipt": held,
+            "message": str(exc),
+        }
+    except Exception as exc:
+        # A fault: not an outcome this vocabulary has a name for. If nothing is reserved it
+        # is reported as the fault it is, because a fault is not a state. But an unsettled
+        # intent outranks that -- something may exist in the mailbox, and letting the
+        # exception escape would leave the operator with a traceback where the record has an
+        # answer. Erring toward "reconcile" is the safe direction to err in.
+        state, held = recorded(repository, review)
         if not state:
-            # Nothing was reserved, so this is not an uncertain external result and must not
-            # be reported as one. It is a fault, and a fault is not a state.
             raise
         return {
             **common,
             "outcome": UNCERTAIN,
-            "state": state[0],
-            "receipt": state[1],
-            "message": f"the provider was contacted and the outcome is unknown: {exc}",
+            "state": state,
+            "receipt": held,
+            "message": f"the attempt did not complete and the record is unsettled: {exc}",
             "next": guidance[RECONCILE].format(review=review),
         }
-    state = repository.intent(review)
+    state, held = recorded(repository, review)
     if receipt:
         return {
             **common,
             "outcome": ACCEPTED,
-            "state": state[0] if state else None,
+            "state": state,
             "receipt": receipt,
             "message": f"draft confirmed; receipt {receipt}",
         }
-    if command == "draft" and state and state[0] == "attempting":
+    if command == "draft" and state == "attempting":
         # This invocation reserved nothing, contacted nothing and wrote nothing: a claim
         # already stood, so it stopped. That is a refusal. Only `draft` reads this way --
         # `reconcile` does contact the provider to look, so its answer is about what the
@@ -116,7 +152,7 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
         return {
             **common,
             "outcome": REFUSED,
-            "state": state[0],
+            "state": state,
             "receipt": None,
             "message": "a draft attempt is already in progress; it is never retried automatically",
             "next": guidance[IN_PROGRESS].format(review=review),
@@ -124,7 +160,7 @@ def attempt(repository, command: str, review: str, run, guidance: dict) -> dict:
     return {
         **common,
         "outcome": UNCERTAIN,
-        "state": state[0] if state else None,
+        "state": state,
         "receipt": None,
         "message": "a draft was attempted and its outcome is unknown; it is never retried "
         "automatically",

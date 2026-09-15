@@ -12,7 +12,7 @@ from communications.message import Message
 from data.repository import Repository
 from recruiting.extraction import PARSER_VERSION, extract, extract_records
 from recruiting.models import Profile, evaluate, fingerprint
-from recruiting.ports import DraftProvider, DraftRefused, ProviderRejected
+from recruiting.ports import DraftProvider, DraftRefused, DraftUncertain, ProviderRejected
 
 
 class Intake:
@@ -156,8 +156,6 @@ class OutwardActions:
                 to=approved["to"],
                 subject_line=approved["subject"],
             )
-            self.repository.finish(review_id, receipt)
-            return receipt
         except ProviderRejected:
             # Proven, not merely unknown: the provider was contacted and its response is
             # evidence nothing was created, so this is not the uncertain path below. The
@@ -166,11 +164,34 @@ class OutwardActions:
             # touching the approval, which is untouched by this failing.
             self.repository.reject(review_id)
             raise
+        except Exception as exc:
+            # Past this point the provider might have succeeded, so the outcome genuinely is
+            # unknown. Recorded, then declared: the caller is told which side of the
+            # provider-write boundary this failure fell on, rather than being left to infer
+            # it from an exception class that cannot carry the answer. A ValueError raised
+            # inside create() and a ValueError raised by a missing approval are the same
+            # class and opposite facts, and a reader that guessed would report "nothing was
+            # created" while this row said otherwise. Never automatically repeat this write.
+            self.repository.finish(review_id, None)
+            raise DraftUncertain(
+                "a draft-create request was sent and its outcome is unknown"
+            ) from exc
         except BaseException:
-            # Past this point the provider might have succeeded, so the outcome genuinely
-            # is unknown. Never automatically repeat this write.
+            # An interrupt or a process-level exit, which is not this boundary's to rename.
+            # The record is still written, because the request was still sent.
             self.repository.finish(review_id, None)
             raise
+        try:
+            self.repository.finish(review_id, receipt)
+        except Exception as exc:
+            # The draft exists and this failed to write down which one it is. That is
+            # uncertainty about our own record rather than about the mailbox, and it is no
+            # safer: the intent is left unsettled and reconciliation is still the only way
+            # to resolve it. Nothing here retries the provider.
+            raise DraftUncertain(
+                "the draft was created and its receipt could not be recorded"
+            ) from exc
+        return receipt
 
     def reconcile(self, review_id: str) -> str | None:
         intent = self.repository.intent(review_id)
@@ -214,7 +235,16 @@ class OutwardActions:
                 "Verified provider identity does not match the draft intent reserved for "
                 "this review; reconcile using the original provider and mailbox"
             )
-        receipt = self.provider.lookup(review_id)
-        if receipt:
-            self.repository.finish(review_id, receipt)
+        try:
+            receipt = self.provider.lookup(review_id)
+            if receipt:
+                self.repository.finish(review_id, receipt)
+        except Exception as exc:
+            # The lookup was made and did not come back with an answer this can act on, or
+            # what it found could not be recorded. Either way the intent stays exactly as
+            # unsettled as it was, and saying so is the whole point: a reconciliation that
+            # failed is not evidence the draft is absent, and must never read as one.
+            raise DraftUncertain(
+                "the destination was searched and the attempt is still unresolved"
+            ) from exc
         return receipt
