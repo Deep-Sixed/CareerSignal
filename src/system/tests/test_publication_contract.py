@@ -8,7 +8,8 @@ argued for is the failure worth testing against:
     reserved names and the reserved `.example` top-level domain -- not only the three
     apex names the rule originally listed;
   * a binary artifact is refused everywhere except a real PNG in one exact directory of
-    design renders -- the name alone is never the evidence.
+    design renders, or at the one exact path of the product screenshot -- the name alone is
+    never the evidence, and the screenshot allowance is one file rather than a directory.
 
 `ops/tools/verify_secrets.py` carries a third: one detector, in three named artifacts.
 Its paths arrive from detect-secrets spelled the way the running platform spells them,
@@ -21,6 +22,7 @@ any rule fails here rather than in review.
 """
 
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -154,6 +156,64 @@ def test_a_render_that_cannot_be_read_is_not_reviewed(gate, tmp_path):
     )
 
 
+# --- the one reviewed capture of the running application -------------------------------------
+
+
+def test_the_product_screenshot_is_reviewed(gate, tmp_path):
+    assert gate.reviewed_screenshot(*written(tmp_path, "docs/screenshots/dashboard.png", BINARY))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # A second screenshot beside it. This is the case the exact-path rule exists for: a
+        # directory allowance would admit every one of these without anybody arguing for it.
+        "docs/screenshots/inbox.png",
+        "docs/screenshots/approvals.png",
+        "docs/screenshots/dashboard-wide.png",
+        "docs/screenshots/nested/dashboard.png",
+        # Right name, wrong place.
+        "docs/dashboard.png",
+        "screenshots/dashboard.png",
+        "src/system/web/static/dashboard.png",
+        # Case is part of the path, because the allowance names one file rather than a shape.
+        "docs/screenshots/Dashboard.png",
+        "docs/screenshots/dashboard.PNG",
+    ],
+)
+def test_nothing_else_is_the_product_screenshot(gate, tmp_path, name):
+    # Written with a genuine PNG signature, so the refusal is about the path and nothing else.
+    assert not gate.reviewed_screenshot(*written(tmp_path, name, BINARY))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"\xff\xd8\xff\xe0\x00\x10JFIF\x00", b"%PDF-1.7\n", b"PK\x03\x04", b"\x89PNG\r\n", b""],
+)
+def test_a_renamed_binary_is_not_the_product_screenshot(gate, tmp_path, payload):
+    relative, path = written(tmp_path, "docs/screenshots/dashboard.png", payload)
+    assert not gate.reviewed_screenshot(relative, path)
+
+
+def test_a_screenshot_that_cannot_be_read_is_not_reviewed(gate, tmp_path):
+    assert not gate.reviewed_screenshot(
+        Path("docs/screenshots/dashboard.png"), tmp_path / "absent.png"
+    )
+
+
+def test_the_two_allowances_do_not_admit_each_other(gate, tmp_path):
+    """They are different claims, so neither may be satisfied by the other's path.
+
+    A render says "this is the design that was accepted". The screenshot says "this is what
+    CareerSignal does". Letting either predicate answer for the other would make the pair a
+    single "PNGs under docs" rule, which is not what either was argued for.
+    """
+    render = written(tmp_path, "docs/ui-design/renders/dashboard.png", BINARY)
+    shot = written(tmp_path, "docs/screenshots/dashboard.png", BINARY)
+    assert gate.reviewed_render(*render) and not gate.reviewed_screenshot(*render)
+    assert gate.reviewed_screenshot(*shot) and not gate.reviewed_render(*shot)
+
+
 def tree(root, files):
     for name, payload in files.items():
         path = root / name
@@ -175,6 +235,31 @@ def test_reviewed_render_publishes_and_is_counted(gate, tmp_path, monkeypatch, c
     tree(tmp_path, {"docs/ui-design/renders/dashboard.png": BINARY})
     assert inspect(gate, tmp_path, monkeypatch) == ""
     assert "1 reviewed renders" in capsys.readouterr().out
+
+
+def test_product_screenshot_publishes_and_is_counted(gate, tmp_path, monkeypatch, capsys):
+    tree(tmp_path, {"docs/screenshots/dashboard.png": BINARY})
+    assert inspect(gate, tmp_path, monkeypatch) == ""
+    assert "1 reviewed screenshots" in capsys.readouterr().out
+
+
+def test_a_second_screenshot_stops_the_gate(gate, tmp_path, monkeypatch):
+    """The whole reason the allowance names a file instead of a directory.
+
+    Both of these are real PNGs in `docs/screenshots/`. One is reviewed and one is not, and
+    the gate has to be able to tell them apart -- because the thing being reviewed is not the
+    file format or the folder, it is the claim the picture makes on the front page.
+    """
+    tree(
+        tmp_path,
+        {
+            "docs/screenshots/dashboard.png": BINARY,
+            "docs/screenshots/inbox.png": BINARY,
+        },
+    )
+    refused = inspect(gate, tmp_path, monkeypatch)
+    assert "Non-text artifact requires review: docs/screenshots/inbox.png" in refused
+    assert "dashboard.png" not in refused, "the reviewed screenshot was refused too"
 
 
 def test_binary_outside_the_render_directory_is_still_refused(gate, tmp_path, monkeypatch):
@@ -1143,3 +1228,88 @@ def test_an_unresolved_receiver_still_counts(tmp_path):
         encoding="utf-8",
     )
     assert capabilities(source, web) == {"claim"}
+
+
+# --- what the repository's front page shows -----------------------------------------------------
+#
+# The regression this section exists for has a date and a cause. PR #37 first put
+# `docs/ui-design/renders/dashboard.png` below the README introduction -- an image whose own
+# wordmark reads MOCK, whose data is invented, and whose copy asserts "writes nothing new",
+# which `test_web_frontend.FORBIDDEN_CLAIMS` forbids the shipped browser from saying because
+# `reconcile()` calls `finish()` and does write. Nothing in the tree objected: the render was
+# already a reviewed binary, and no rule had ever been asked where the front page may point.
+#
+# These assertions are that rule. They are about provenance, not aesthetics.
+
+ROOT = Path(__file__).resolve().parents[3]
+README = ROOT / "README.md"
+FROZEN_RENDERS = "docs/ui-design/renders/"
+FRONT_PAGE_SCREENSHOT = "docs/screenshots/dashboard.png"
+IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)")
+
+
+def readme_images():
+    found = [m.groupdict() for m in IMAGE.finditer(README.read_text(encoding="utf-8"))]
+    assert found, "the README shows no image; this guard has stopped guarding anything"
+    return found
+
+
+def test_the_front_page_never_shows_a_frozen_design_render():
+    """A design mock and the product are different claims, and only one may be shown here.
+
+    `docs/ui-design/renders/` holds the accepted *design*. Pointing the README at it says
+    "this is CareerSignal" about a picture that says MOCK on its face. The images are not
+    interchangeable and this is what stops them being swapped back.
+    """
+    for image in readme_images():
+        assert not image["target"].startswith(FROZEN_RENDERS), (
+            f"the README shows a frozen design render as the product: {image['target']}"
+        )
+
+
+def test_the_front_page_screenshot_is_the_reviewed_capture():
+    """It exists, it is where the gate's exact-path allowance names, and it is really a PNG."""
+    shown = [image for image in readme_images() if image["target"] == FRONT_PAGE_SCREENSHOT]
+    assert len(shown) == 1, f"expected one {FRONT_PAGE_SCREENSHOT}, found {len(shown)}"
+    # Alt text a screen reader can act on, and one that does not call it the design.
+    assert shown[0]["alt"], "the front-page screenshot has no alt text"
+    assert "mock" not in shown[0]["alt"].casefold()
+    capture = ROOT / FRONT_PAGE_SCREENSHOT
+    assert capture.is_file(), f"{FRONT_PAGE_SCREENSHOT} is referenced but not committed"
+    assert capture.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_every_image_the_readme_shows_is_committed():
+    """A broken image on the front page is the first thing a visitor sees not working."""
+    for image in readme_images():
+        target = image["target"]
+        if target.startswith(("http://", "https://")):
+            continue
+        assert (ROOT / target).is_file(), f"README shows a missing file: {target}"
+
+
+def test_the_screenshot_directory_says_what_it_is_and_is_not():
+    """The distinction lives beside the file, not only in a commit message."""
+    notes = (ROOT / "docs" / "screenshots" / "README.md").read_text(encoding="utf-8")
+    assert "docs/ui-design/" in notes, "it does not distinguish itself from the design baseline"
+    assert "synthetic" in notes.casefold(), "it does not say the data is synthetic"
+    assert "running application" in notes.casefold()
+
+
+def test_the_frozen_design_baseline_is_byte_for_byte_unchanged():
+    """The one thing this change must not have touched.
+
+    `docs/ui-design/SHA256SUMS` is the baseline's own record of what was accepted. Verifying
+    it here means a change that edits a frozen artifact -- or quietly re-exports a render to
+    make it look more like the product -- fails in the test suite rather than going unnoticed.
+    """
+    baseline = ROOT / "docs" / "ui-design"
+    recorded = [
+        line.split(maxsplit=1)
+        for line in (baseline / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(recorded) == 8, recorded
+    for digest, name in recorded:
+        found = hashlib.sha256((baseline / name.strip()).read_bytes()).hexdigest()
+        assert found == digest, f"{name.strip()} no longer matches the accepted baseline"

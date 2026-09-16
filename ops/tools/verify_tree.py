@@ -23,14 +23,26 @@ ROOT_FILES = {"README.md", "AGENTS.md", "pyproject.toml", "uv.lock", ".gitignore
 # The attribution domain is listed because commit trailers legitimately carry it.
 RESERVED_DOMAINS = ("example.com", "example.net", "example.org")
 ATTRIBUTION_DOMAIN = "users.noreply.github.com"
-# The one reviewed binary artifact in the tree: a static PNG snapshot of a frozen UI design
-# artboard, which exists so the design can be read from a clone without the Claude Design
+# The first reviewed binaries in the tree: static PNG snapshots of the frozen UI design
+# artboards, which exist so the design can be read from a clone without the Claude Design
 # runtime. Deliberately narrow -- one exact directory, one suffix, no nesting -- because the
 # rule being relaxed is "no unreviewed binaries", not "no binaries under docs".
 RENDER_DIRECTORY = ("docs", "ui-design", "renders")
-# The exception is for a reviewed PNG render, so the file must actually be one. A name is
-# not evidence: without this, any binary at all renamed to .png would inherit the
-# allowance, which is precisely the thing the "no unreviewed binaries" rule exists to stop.
+# The second, and the only capture of the running application: the README's front-page
+# screenshot. Named exactly, as one file, rather than by directory.
+#
+# A directory allowance would have been shorter and is the wrong shape. These two exceptions
+# are not the same claim: a render under RENDER_DIRECTORY says "this is the design that was
+# accepted", while this says "this is what CareerSignal does". The second is a statement
+# about the product, made on the repository's front page, and it was only made after a
+# review established that the image first proposed there was a design mock -- one whose own
+# wordmark read MOCK and whose copy asserted something `test_web_frontend` forbids the
+# shipped browser from saying. A second product screenshot is a second such claim and needs
+# its own review, which is exactly what naming one file forces and a directory would not.
+PRODUCT_SCREENSHOT = ("docs", "screenshots", "dashboard.png")
+# Both exceptions are for reviewed PNGs, so a file must actually be one. A name is not
+# evidence: without this, any binary at all renamed to .png would inherit an allowance,
+# which is precisely the thing the "no unreviewed binaries" rule exists to stop.
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -40,6 +52,19 @@ def synthetic_domain(domain: str) -> bool:
     if value == ATTRIBUTION_DOMAIN or value.endswith(".example"):
         return True
     return any(value == name or value.endswith("." + name) for name in RESERVED_DOMAINS)
+
+
+def _png(path) -> bool:
+    """Whether these bytes actually begin a PNG.
+
+    Shared by both allowances below, so neither can be satisfied by a name alone and the
+    two cannot drift into checking different things.
+    """
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(len(PNG_SIGNATURE)) == PNG_SIGNATURE
+    except OSError:
+        return False
 
 
 def reviewed_render(rel, path) -> bool:
@@ -56,11 +81,18 @@ def reviewed_render(rel, path) -> bool:
         or rel.suffix.lower() != ".png"
     ):
         return False
-    try:
-        with open(path, "rb") as stream:
-            return stream.read(len(PNG_SIGNATURE)) == PNG_SIGNATURE
-    except OSError:
-        return False
+    return _png(path)
+
+
+def reviewed_screenshot(rel, path) -> bool:
+    """Whether this is the one reviewed capture of the running application.
+
+    An exact path rather than a directory, and deliberately so: `docs/screenshots/` is not
+    an allowance, `docs/screenshots/dashboard.png` is. A second file dropped beside it stops
+    the gate and has to be argued for, which is the whole difference between an exception
+    and a loophole.
+    """
+    return tuple(rel.parts) == PRODUCT_SCREENSHOT and _png(path)
 
 
 def files():
@@ -75,7 +107,7 @@ def inspect():
     private = os.getenv("CAREERSIGNAL_PRIVATE_PATTERNS", "")
     patterns = [re.compile(p, re.I) for p in private.split(";") if p]
     emails = re.compile(r"[A-Z0-9_.+%-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-    count = renders = 0
+    count = renders = screenshots = 0
     for path in files():
         rel = path.relative_to(ROOT)
         name = rel.as_posix()
@@ -100,10 +132,13 @@ def inspect():
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            # A reviewed render is the only binary that passes here. Everything else still
-            # stops the gate, including another binary sitting in the same directory.
+            # The reviewed renders and the one reviewed screenshot are the only binaries
+            # that pass here. Everything else still stops the gate, including another binary
+            # sitting in either directory.
             if reviewed_render(rel, path):
                 renders += 1
+            elif reviewed_screenshot(rel, path):
+                screenshots += 1
             else:
                 errors.append(f"Non-text artifact requires review: {name}")
             continue
@@ -135,8 +170,8 @@ def inspect():
     if errors:
         raise SystemExit("\n".join(sorted(set(errors))))
     print(
-        f"PASS: {count} publishable text files and {renders} reviewed renders; "
-        "ownership, imports, artifacts, identity checks"
+        f"PASS: {count} publishable text files, {renders} reviewed renders and "
+        f"{screenshots} reviewed screenshots; ownership, imports, artifacts, identity checks"
     )
 
 
