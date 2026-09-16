@@ -108,7 +108,22 @@ def service(repository, *, skills=SKILLS, locations=None, reader=None) -> Intake
 
 
 class Client:
-    """A raw client for the two intake addresses, so a test varies only what it is about."""
+    """A raw client for the two intake addresses, so a test varies only what it is about.
+
+    `transmit=False` declares a body and sends none, and it is how every refusal *before* the
+    body is read is asserted here. That is not a convenience: a surface that answers without
+    reading leaves the sent bytes unread in the receive buffer, and closing on unread bytes is
+    a reset rather than a clean shutdown on Windows -- so whether the refusal or the reset
+    reaches the client first is a race no test should be made to win. It cost one CI cell
+    before this existed.
+
+    Declaring the length and sending nothing removes the race instead of tolerating it, and it
+    states the claim more exactly than sending the body would: the request that proves the
+    server refused without reading is the request whose body never arrived. It is only ever
+    used where the surface is known to answer before `_material()` or `_body()` is reached --
+    anywhere else the server would block waiting for bytes a declaration promised, which is
+    itself the behaviour `half_close` below exists to exercise.
+    """
 
     def __init__(self, surface):
         self.surface = surface
@@ -123,6 +138,7 @@ class Client:
             "headers": (),
             "body": None,
             "half_close": False,
+            "transmit": True,
         } | kwargs
         connection = http.client.HTTPConnection(web.LOOPBACK, self.surface.server_port, timeout=15)
         try:
@@ -148,7 +164,7 @@ class Client:
             if body is not None and settings["length"] != "omit":
                 declared = len(body) if settings["length"] is None else settings["length"]
                 connection.putheader("Content-Length", str(declared))
-            connection.endheaders(body)
+            connection.endheaders(body if settings["transmit"] else None)
             if settings["half_close"]:
                 # What a truncated upload actually looks like: the client stops writing and
                 # closes its own send side, so the server sees end-of-file rather than waiting
@@ -270,7 +286,7 @@ def test_the_declared_namespace_is_what_reaches_stored_provenance(client, reposi
 def test_a_message_with_no_declared_source_is_refused(client, repository, namespace):
     """An absent namespace is the operator not having said, not a default to fill in."""
     before = stored(repository)
-    status, body = client.eml(eml(), namespace=namespace)
+    status, body = client.eml(eml(), namespace=namespace, transmit=False)
     assert status == 400, body
     assert web.NAMESPACE_HEADER in body["error"]
     assert stored(repository) == before
@@ -287,6 +303,7 @@ def test_two_declared_sources_are_refused_rather_than_resolved(client, repositor
         eml(),
         namespace=None,
         headers=((web.NAMESPACE_HEADER, "one"), (web.NAMESPACE_HEADER, "two")),
+        transmit=False,
     )
     assert status == 400, body
     assert stored(repository) == before
@@ -298,7 +315,7 @@ def test_two_declared_sources_are_refused_rather_than_resolved(client, repositor
 )
 def test_the_eml_address_accepts_only_an_rfc822_message(client, repository, media):
     before = stored(repository)
-    status, body = client.eml(eml(), content_type=media or None)
+    status, body = client.eml(eml(), content_type=media or None, transmit=False)
     assert status == 415, body
     assert stored(repository) == before
 
@@ -310,7 +327,7 @@ def test_an_oversized_declared_body_is_refused_before_it_is_read(client, reposit
     reading would have to buffer whatever a caller chose to send first.
     """
     before = stored(repository)
-    status, body = client.eml(b"x", length=MAX_MESSAGE_BYTES + 1)
+    status, body = client.eml(b"x", length=MAX_MESSAGE_BYTES + 1, transmit=False)
     assert status == 413, body
     assert str(MAX_MESSAGE_BYTES) in body["error"]
     assert stored(repository) == before
@@ -440,6 +457,7 @@ def test_the_eml_address_takes_no_field_at_all_because_it_has_no_place_for_one(c
     status, body = client.eml(
         json.dumps({"skills": ["rust"], "locations": ["onsite berlin"]}).encode(),
         content_type="application/json",
+        transmit=False,
     )
     assert status == 415, body
     assert stored(repository) == before
@@ -452,6 +470,7 @@ def test_a_query_string_on_the_eml_address_is_refused(client, repository):
         content_type=web.RFC822,
         headers=((web.NAMESPACE_HEADER, NAMESPACE),),
         body=eml(),
+        transmit=False,
     )
     assert status == 400, payload
     assert stored(repository) == before
@@ -759,7 +778,7 @@ def test_a_query_string_on_the_gmail_address_is_refused(launch, repository):
 def test_an_oversized_gmail_command_is_refused_on_what_it_declares(launch, repository):
     mailbox = Mailbox({"aaaa1111": eml()})
     client = launch(service(repository, reader=reading(mailbox)))
-    status, body = client.gmail({"query": "x"}, length=web.MAX_BODY + 1)
+    status, body = client.gmail({"query": "x"}, length=web.MAX_BODY + 1, transmit=False)
     assert status == 413, body
     assert mailbox.asked == []
 
@@ -773,7 +792,7 @@ def test_a_launch_with_no_profile_takes_nothing_in(launch, repository):
     before = stored(repository)
     status, sources = client.read("/api/v1/intake/sources")
     assert (status, sources) == (200, web.NO_INTAKE)
-    for status, body in (client.eml(eml()), client.gmail()):
+    for status, body in (client.eml(eml(), transmit=False), client.gmail(transmit=False)):
         assert status == 409, body
         assert body["error"] == "intake_unavailable"
     assert stored(repository) == before
@@ -790,12 +809,12 @@ def test_a_launch_with_no_profile_settles_that_before_it_looks_at_anything_sent(
     client = launch(None)
     before = stored(repository)
     for status, body in (
-        client.gmail({"skills": ["rust"]}),
-        client.gmail({"limit": 0}),
-        client.gmail(payload=None, content_type="text/plain"),
-        client.eml(b"x", length=MAX_MESSAGE_BYTES + 1),
-        client.eml(eml(), namespace=None),
-        client.eml(eml(), content_type="application/json"),
+        client.gmail({"skills": ["rust"]}, transmit=False),
+        client.gmail({"limit": 0}, transmit=False),
+        client.gmail(payload=None, content_type="text/plain", transmit=False),
+        client.eml(b"x", length=MAX_MESSAGE_BYTES + 1, transmit=False),
+        client.eml(eml(), namespace=None, transmit=False),
+        client.eml(eml(), content_type="application/json", transmit=False),
     ):
         assert status == 409, body
         assert body["error"] == "intake_unavailable", body
@@ -813,6 +832,8 @@ def test_a_launch_with_skills_can_take_a_local_message_in_without_any_credential
     assert sources["eml"]["available"] is True
     assert sources["gmail"] == {"available": False}
     assert client.eml(eml())[0] == 200
+    # Transmitted, unlike the refusals above: this launch has a profile, so the command really
+    # is parsed and only then refused for the source it does not hold.
     assert client.gmail()[0] == 409
 
 
@@ -849,7 +870,7 @@ def test_the_browser_cannot_replace_the_profile_it_is_judged_against(launch, rep
     client = launch(service(repository, skills=("python", "sql"), reader=reading(mailbox)))
     for payload in ({"skills": ["rust"]}, {"locations": ["onsite berlin"]}, {"profile": {}}):
         assert client.gmail(payload)[0] == 400, payload
-    assert client.eml(eml(), content_type="application/json")[0] == 415
+    assert client.eml(eml(), content_type="application/json", transmit=False)[0] == 415
     # The launch profile is unchanged, and so is what it decides.
     assert client.read("/api/v1/intake/sources")[1]["profile"]["skills"] == ["python", "sql"]
 
@@ -879,12 +900,12 @@ def test_the_intake_addresses_need_the_same_provenance_every_command_needs(launc
     mailbox = Mailbox({"aaaa1111": eml()})
     client = launch(service(repository, reader=reading(mailbox)))
     before = stored(repository)
-    assert client.eml(eml(), origin=False)[0] == 403
-    assert client.eml(eml(), origin="http://evil.example")[0] == 403
-    assert client.eml(eml(), token=False)[0] == 401
-    assert client.eml(eml(), token="wrong")[0] == 401
-    assert client.gmail(origin=False)[0] == 403
-    assert client.gmail(token=False)[0] == 401
+    assert client.eml(eml(), origin=False, transmit=False)[0] == 403
+    assert client.eml(eml(), origin="http://evil.example", transmit=False)[0] == 403
+    assert client.eml(eml(), token=False, transmit=False)[0] == 401
+    assert client.eml(eml(), token="wrong", transmit=False)[0] == 401
+    assert client.gmail(origin=False, transmit=False)[0] == 403
+    assert client.gmail(token=False, transmit=False)[0] == 401
     assert stored(repository) == before
     assert mailbox.asked == []
 
@@ -920,7 +941,10 @@ def test_there_is_no_generic_intake_address(client, repository, address):
     """Each authority is named by its own address. There is nothing that takes a source."""
     before = stored(repository)
     status, _ = client.send(
-        address, content_type="application/json", body=json.dumps({"source": "gmail"}).encode()
+        address,
+        content_type="application/json",
+        body=json.dumps({"source": "gmail"}).encode(),
+        transmit=False,
     )
     assert status in (404, 405), address
     assert stored(repository) == before
