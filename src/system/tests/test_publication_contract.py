@@ -1333,23 +1333,40 @@ def test_the_frozen_design_baseline_is_unchanged():
         assert found == digest, f"{name.strip()} no longer matches the accepted baseline"
 
 
+def recorded_digest(name):
+    """The digest SHA256SUMS holds for one frozen artifact."""
+    sums = (ROOT / "docs" / "ui-design" / "SHA256SUMS").read_text(encoding="utf-8")
+    found = [line.split(maxsplit=1)[0] for line in sums.splitlines() if line.strip().endswith(name)]
+    assert len(found) == 1, f"{name} is not recorded exactly once: {found}"
+    return found[0]
+
+
 def test_a_windows_checkout_of_the_baseline_still_verifies(tmp_path):
     """The failure that taught this, pinned as behaviour rather than as a comment.
 
     A frozen artifact rewritten to CRLF -- which is exactly what a Windows clone holds -- is
     the same artifact and must still verify. One with a character changed is not, and must
     still fail, or normalising would have bought the green at the cost of the guard.
-    """
-    source = ROOT / "docs" / "ui-design" / "CareerSignal-Mock.dc.html"
-    recorded = hashlib.sha256(source.read_bytes()).hexdigest()
 
-    windows = tmp_path / "CareerSignal-Mock.dc.html"
-    windows.write_bytes(source.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    assert windows.read_bytes() != source.read_bytes(), "the CRLF copy is identical; no test here"
-    assert hashlib.sha256(as_committed(windows)).hexdigest() == recorded
+    Both spellings are built from one canonical form rather than from whatever this platform
+    checked out. The first version of this test converted the file it read, which is a no-op
+    on a checkout that is already CRLF: it proved nothing on precisely the platform it was
+    written for, and said so when its own vacuity assertion fired on Windows.
+    """
+    name = "CareerSignal-Mock.dc.html"
+    recorded = recorded_digest(name)
+    committed = (ROOT / "docs" / "ui-design" / name).read_bytes().replace(b"\r\n", b"\n")
+    windows = committed.replace(b"\n", b"\r\n")
+    assert windows != committed, "this artifact has no line endings, so nothing is being tested"
+
+    # Either spelling is the accepted artifact, and both must verify against the same digest.
+    for spelling in (committed, windows):
+        checkout = tmp_path / name
+        checkout.write_bytes(spelling)
+        assert hashlib.sha256(as_committed(checkout)).hexdigest() == recorded
 
     edited = tmp_path / "edited.dc.html"
-    edited.write_bytes(source.read_bytes().replace(b"CareerSignal", b"CareerSignaI", 1))
+    edited.write_bytes(committed.replace(b"CareerSignal", b"CareerSignaI", 1))
     assert hashlib.sha256(as_committed(edited)).hexdigest() != recorded
 
 
