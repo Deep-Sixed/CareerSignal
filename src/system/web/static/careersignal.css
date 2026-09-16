@@ -1019,3 +1019,125 @@ body {
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* --- taking material in ---------------------------------------------------------------------
+ *
+ * Inbox's intake section. Deliberately set apart from the message list below it: reading what
+ * arrived and putting something new in are different acts, and a control that sat among the
+ * rows would read as something one of them offers.
+ */
+
+.intake {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--rail);
+}
+
+.intake-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.intake-source {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 3px;
+  background: var(--pane);
+}
+
+.intake-source-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.intake-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.intake-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.intake-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.intake-input,
+.intake-file {
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: var(--pane);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.intake-action {
+  align-self: flex-start;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--accent-soft);
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.intake-profile {
+  margin: 0;
+}
+
+.intake-report {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 3px;
+  background: var(--pane);
+}
+
+.intake-taken {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-soft);
+}
+
+/* A diagnostic is evidence, not an error: the extractor read the message and could not use
+ * part of it, and the operator needs to see which part. Marked, never hidden. */
+.intake-diagnostic {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+
+.intake-refusal {
+  margin: 0;
+  font-size: 13px;
+  color: #8a1f1f;
+}

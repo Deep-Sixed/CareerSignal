@@ -1,6 +1,6 @@
 # The local surface
 
-CareerSignal's first surface that listens on a socket. It reads, it records a status, it records a decision, and it runs the two outward commands — creating a draft and reconciling one. It never sends: a draft is left in the destination mailbox for the operator to send by hand.
+CareerSignal's first surface that listens on a socket. It reads, it records a status, it records a decision, it runs the two outward commands — creating a draft and reconciling one — and it takes material in, from a local `.eml` or a bounded Gmail batch. It never sends: a draft is left in the destination mailbox for the operator to send by hand.
 
 ```sh
 uv run careersignal serve --db /path/to/private.db
@@ -31,9 +31,13 @@ record_status
 decide
 draft
 reconcile
+ingest_eml
+ingest_gmail
 -->
 
-`record_status()` appends a status event; `decide()` records an approval or a rejection; `draft()` and `reconcile()` are the outward workflow, reached on the service that owns it. Nothing else: no intake, and no `claim()`, `finish()`, `refuse()` or `reject()` — this surface asks `OutwardActions` for the workflow rather than reimplementing it, and constructs no provider and holds no credential of its own.
+`record_status()` appends a status event; `decide()` records an approval or a rejection; `draft()` and `reconcile()` are the outward workflow, reached on the service that owns it; `ingest_eml()` and `ingest_gmail()` are intake, reached on the service that owns *that*. Nothing else: no `ingest()`, no `intake_message()`, and no `claim()`, `finish()`, `refuse()` or `reject()` — this surface asks `OutwardActions` and `IntakeActions` for their workflows rather than reimplementing either, and constructs no provider, no reader and no credential of its own.
+
+The two intake entries are what PR 9 added, and what they admit is worth stating exactly. This package may now *invoke* two named intake commands on a service it was handed. It still may not name `IntakeActions`, so it cannot construct one; it still may not name `Intake`, `ingest`, `intake` or `intake_message`, so it cannot reimplement what the service does; it still may not name `Message`, `Profile`, `GmailReader` or `GmailCredentials`, so it can neither parse a message, choose an evaluation profile, nor reach a mailbox except through the service that owns that authority. It also may not call `getattr`: a dispatcher that looked a command up by name would be an authority the syntax tree cannot see, which is the one way a capability could arrive without appearing here.
 
 The comparison runs in both directions and is an exact set equality, so a capability added to the code without being declared here fails the build, and a capability declared here that the code cannot actually reach fails it too. Order does not matter; this is a set, not a formatting convention.
 
@@ -102,6 +106,7 @@ All under `/api/v1`, all `GET`, all exactly the repository projection they name.
 | `/communications/{message}` | One message, its evidence, and what it currently addresses |
 | `/reviews/{review}/authorization` | What an approval for this review would bind |
 | `/timeline` | Status and audit events as one stream, newest first |
+| `/intake/sources` | Which sources this launch can take material in from, and the profile it scores against |
 
 `/opportunities` accepts `status`, `active`, `eligible`, `min_coverage` and `max_coverage`; `/timeline` accepts `limit` and `since`. `/opportunities` and `/opportunities/{id}` also accept `presentation`. The values are handed to the projection that owns them, so a coverage bound outside 0–100 or a status outside the vocabulary is refused in the repository's own words.
 
@@ -135,7 +140,7 @@ Building a row's presentation needs its action state, which `opportunities()` do
 
 ## The screens
 
-Five, as frozen: Dashboard, Inbox, Opportunities, Approvals, Activity. Plain HTML, CSS and ES modules — no framework, no bundler, no npm, no CDN, no downloaded font. The browser owns interaction and rendering; it does not own interpretation.
+Five, as frozen: Dashboard, Inbox, Opportunities, Approvals, Activity — Inbox now carrying the intake controls described below. Plain HTML, CSS and ES modules — no framework, no bundler, no npm, no CDN, no downloaded font. The browser owns interaction and rendering; it does not own interpretation.
 
 The browser may fetch, select a row, filter rows it already has, count statuses and queues, switch panes, format dates and build DOM nodes. It may not decide whether an approval is stale, whether something needs reconciling, whether a draft may be created, what `REFUSED` means, whether an opportunity advances, or which state outranks another. Those arrive already decided.
 
@@ -293,6 +298,185 @@ Recording a decision has never needed a credential that can reach the mailbox; c
 
 **CareerSignal never sends.** `draft` creates a draft and stops. The operator reads it in the mailbox and sends it themselves.
 
+## Intake
+
+Two commands take material in, and one read says which of them this launch can actually run.
+
+```
+GET  /api/v1/intake/sources
+POST /api/v1/intake/eml
+POST /api/v1/intake/gmail
+```
+
+There is deliberately no `POST /api/v1/intake` that takes a `source` field. Each authority is named by its own address, for the same reason the outward pair is: an address a request could choose is an authority a page could choose, and a generic dispatcher would put the choice of *which provider to reach* inside a body that a page assembles.
+
+**This is a web exposure of intake, not a second intake.** Everything that arrives goes through `Message` → `Intake.intake_message()` → `Repository.ingest()`, the same path `careersignal ingest` and `careersignal gmail-ingest` have always used, now shared as one `IntakeActions` service. There is no second MIME parser, no second extractor, no second scorer, no second deduplication scheme and no browser-side notion of what a job is. The browser acquires the ability to ask intake to run. It does not acquire the authority to define what intake means.
+
+### The profile is a launch fact
+
+Which skills and which accepted locations an opportunity is judged against is configuration, supplied at launch by the same two options the pipeline commands take:
+
+```sh
+careersignal serve --skill SailPoint --skill IAM --location remote
+```
+
+`--skill` is what gives a launch intake authority at all. Without one there is no profile to score against, so `/intake/sources` reports intake unavailable, the browser offers no intake control, and both commands answer `409`. Locations default to `remote`.
+
+**No intake request may carry `skills`, `locations`, `profile`, `coverage`, `eligibility` or `score`** — there is no request shape that has a place for one, and the Gmail body refuses every field it does not name. This is not tidiness. The material being scored is written by a recruiter, and material that could choose the policy it is judged against is not material being judged.
+
+### Read authority is not draft authority
+
+Gmail intake needs `CAREERSIGNAL_GMAIL_TOKEN`, the read-only grant, plus `--mailbox`. Creating a draft needs `CAREERSIGNAL_GMAIL_COMPOSE_TOKEN`, a different grant, described in [approved drafts](approved-drafts.md). Neither is a flag; both are environment-only, because a command line is visible in shell history and to other users of the machine. They are separate credentials and separately optional, so a launch may legitimately be
+
+```
+EML intake: yes    Gmail intake: yes    outward drafting: no
+EML intake: yes    Gmail intake: no     outward drafting: yes
+```
+
+and the browser is told which, so it offers only controls that can operate.
+
+`system.web` constructs neither credential and imports neither adapter. Both services arrive already built from the composition root that parsed the command line.
+
+### The mailbox is proven, not declared
+
+`--mailbox` is what the operator typed. Before a single Gmail message is admitted, `GmailReader.verify_identity()` reads the credential's own profile and compares the verified namespace against the declared one. A mismatch fails closed, before the first local write, and no message from that credential is ever stored under a namespace it does not answer to. The browser cannot supply a mailbox and cannot confirm one; a page saying "yes, that is the right mailbox" would be a declaration replacing the proof.
+
+### `GET /api/v1/intake/sources`
+
+Discovery of **CareerSignal's** configuration, not of a mailbox. It contacts nothing: a page load must not spend a credential, and a read of local configuration must not depend on whether Google is reachable.
+
+```json
+{
+  "eml": {"available": true},
+  "gmail": {"available": true, "namespace": "gmail:user@example.com"},
+  "profile": {"skills": ["iam", "sailpoint"], "locations": ["remote"]}
+}
+```
+
+With no launch profile:
+
+```json
+{"eml": {"available": false}, "gmail": {"available": false}, "profile": null}
+```
+
+`namespace` appears only where there is a reader to name one. No token, no token length, no fragment of a token and no credential scope detail appears here, and `gmail.available` means *configured for this launch* — not that Google has just been asked.
+
+### `POST /api/v1/intake/eml`
+
+The body **is** the message.
+
+```
+POST /api/v1/intake/eml
+Content-Type: message/rfc822
+X-CareerSignal-Namespace: <operator-declared source>
+X-CareerSignal-Token: <launch token>
+Origin: http://127.0.0.1:<port>
+Content-Length: …
+```
+
+Nothing JSON-wraps or base64-wraps an email to fit a body helper that already exists: a MIME message has a representation, and re-encoding one would mean this surface had an opinion about its bytes.
+
+**The server never accepts a filesystem path.** The browser reads the file the operator chose and sends what it read, so there is no name for the server to resolve and no directory it could be pointed at. The filename is a local convenience in the page and is never stored as provenance.
+
+**The namespace is operator-declared provenance and is not verified.** It is deliberately not derived from the filename, the sender, the `Message-ID`, the subject or the body — every one of those is written by whoever sent the mail, and a message that named its own source would choose which mailbox CareerSignal believes it arrived in. The Inbox labels it as declared. Exactly one such header is accepted; a blank one is refused rather than defaulted, because an empty namespace is the operator not having said, and CareerSignal has no answer to invent.
+
+The ceiling is `MAX_MESSAGE_BYTES`, the same one `Message` itself enforces — imported, not restated, because a second number could only ever disagree with the one that counts. A declared length above it is `413` before the body is read, and exactly the declared number of bytes is read and never one more.
+
+A success is the record of what happened:
+
+```json
+{
+  "source": "eml",
+  "namespace": "…",
+  "message": "message:…",
+  "external_id": "…",
+  "reviews": ["…"],
+  "diagnostics": [{"item": 0, "reason": "no job URL", "review": null}]
+}
+```
+
+**A valid message that names no opportunity is a successful intake.** Extraction diagnostics are data, not an HTTP failure: what the extractor did not understand is exactly what the operator needs to see, and answering `400` would tell them to fix a request that was right.
+
+### `POST /api/v1/intake/gmail`
+
+```json
+{"query": "from:recruiting", "labels": ["INBOX"], "limit": 25}
+```
+
+All three fields are optional and default to `""`, `[]` and `25`. Every other field is **refused**, `mailbox`, `token`, `namespace`, `skills`, `locations`, `provider` and `profile` among them: the launch owns those facts, and quietly dropping a field a caller believed in is how a surface ends up reading a different mailbox than the request asked for.
+
+`limit` is a whole number in `1…100` — a boolean is not an integer, and `true` is not a number of messages. `labels` must be an array of strings; a bare `"INBOX"` is refused rather than spelled out one letter per label. The body keeps the ordinary 16 KiB command ceiling. No Gmail search can turn one button press into an unbounded mailbox walk.
+
+**The whole batch is read before the first local write.**
+
+```
+validate the command
+    ↓
+verify the mailbox identity
+    ↓
+read the complete bounded batch
+    ↓
+only then: intake, message by message
+```
+
+`GmailReader.messages()` already returns the entire batch or raises, and that is why it is called rather than rewritten as fetch-one-write-one. If message N cannot be read, messages 1…N−1 from that request are not already stored merely because they were fetched first, and no write reservation is ever held open across a network call.
+
+```json
+{
+  "source": "gmail",
+  "mailbox": "gmail:user@example.com",
+  "read": 3,
+  "messages": [{"external_id": "…", "message": "message:…", "reviews": ["…"], "diagnostics": []}]
+}
+```
+
+The namespace is the **verified** one, from the reader. The browser does not supply it.
+
+### Idempotency is the storage's, not the browser's
+
+There is no second deduplication layer. Message identity belongs to `Message` and `Repository.ingest()`, and a repeat import resolves to the records that already exist — the same Gmail message id imported twice does not become two communications because a button was pressed twice, and the browser never manufactures an intake id that would defeat storage identity. Where the repository reports an already-known message, that existing state is returned honestly rather than dressed up as new.
+
+### What new evidence does to what is already there
+
+New material can legitimately change what a later action sees: a further source can produce a new current review, or make an earlier approval stale. That belongs to `Intake`, `Repository.ingest()` and the repository's projections. This layer does not invalidate approvals, choose which review is current, merge opportunities, score skills, calculate eligibility or decide that newer evidence supersedes older. After intake it re-reads and shows what the authoritative layer now says.
+
+| Condition | Response |
+| --- | --- |
+| taken in — including zero reviews with diagnostics, and a replay resolving to existing records | `200` |
+| malformed command, wrong field type, unknown field, bad `limit`, blank or missing namespace, unparseable MIME | `400` |
+| bad/missing launch token | `401` |
+| bad/missing `Origin` | `403` |
+| no launch profile, or Gmail requested without a read credential | `409` `intake_unavailable` |
+| body larger than the ceiling | `413` |
+| the EML route sent anything but `message/rfc822` | `415` |
+| the mailbox could not be read | `502` `source_unreadable` |
+| `GET` or `HEAD` on either command address | `404` |
+| any other method | `405` |
+
+`409` is a launch-capability conflict, not evidence that Gmail rejected anything: nothing external was read and nothing local was written.
+
+`502` is an upstream read failure after the command was accepted — a wrong or expired token, a rate limit, an identity that is not the declared one. The message is the adapter's own and never contains the bearer token, an `Authorization` header, a response body or a traceback. Because the batch is read before intake begins, **no message from that attempted batch was written.**
+
+### Recruiter-controlled content stays inert
+
+Nothing about intake weakens the browser-content boundary. An uploaded or fetched message may carry HTML, scripts, CSS, control characters and hostile sender names; the server normalises it through `Message`, and the browser receives repository projections and diagnostics only. There is no `innerHTML`, no `iframe srcdoc`, no HTML preview and no raw-message preview. The intake UI is not an email client.
+
+### The storage model is unchanged
+
+Uploading a file expands no persistence. No table holds a full raw RFC822 payload, no attachment is extracted or stored, no browser-local path is kept, and no credential or launch token is written anywhere. What is stored is exactly the normalised source, evidence and review information the existing intake path has always stored.
+
+### The Inbox controls
+
+Inbox gains one clearly separated intake section, offered only where it can operate — `/intake/sources` decides that, not an inference from unrelated facts such as whether outward drafting is configured.
+
+**Import EML** takes a source namespace and a local file. The browser reads the chosen file as bytes and sends them unchanged as `message/rfc822`; it does not parse the message and does not inspect recruiter content to decide whether it is a job.
+
+**Import Gmail** takes a query, optional label ids and a bounded limit. When Gmail intake is unavailable the control is absent rather than present and failing: a button that can only refuse teaches the operator to ignore refusals.
+
+Afterwards the browser re-reads — Inbox, Opportunities and Approvals alike — rather than patching local objects into pretending the new state. It reports how many messages were read, the provenance already exposed safely, the review ids created or resolved, and the extraction diagnostics, all through the same `textContent` construction every other value uses.
+
+**Nothing here sends, modifies, labels, deletes or polls.** There is no Gmail watch, no push subscription, no mailbox polling, no folder watching and no scheduled intake. Intake happens when the operator presses the button.
+
 ## Where an approval points
 
 The destination is a **launch fact**, declared the way the command line already declares one:
@@ -340,11 +524,15 @@ The server is threaded so a slow read cannot block the pane beside it, and no `s
 
 ## What is not here yet
 
-Drafting and reconciling. `claim()`, `finish()`, `refuse()`, `reject()` and `OutwardActions` are all unreachable from this package, and a test fails the build if that changes. `decide()` and `BindingConflict` are reachable as of this release, and they are the only additions: the guard names what may be reached, so the next capability has to be argued for rather than arrive.
+The repository's own writes. `claim()`, `finish()`, `refuse()`, `reject()`, `ingest()` and `intake_message()` are all unreachable from this package, and a test fails the build if that changes — the browser reaches the two workflows by asking the services that own them, never by performing what those services perform. (A previous edition of this section still said drafting and reconciling themselves were unreachable; they became reachable through `OutwardActions` in PR 8, and the capability block above has been the authoritative statement throughout.)
 
-The active evaluation profile. The session panel reports only facts that are authoritative today, and which skills, locations and threshold a future intake would score against is launch configuration the engine does not store. Showing a label for it would mean inventing one. It arrives with the persisted-profile decision.
+The persisted evaluation profile. `/intake/sources` now reports the skills and locations *this launch* was started with, which is a fact about the process rather than about the database: the engine still stores no profile, and the threshold is not reported because it is not configurable at launch. A profile that survives a restart arrives with the persisted-profile decision.
 
-`.eml` ingestion and the Gmail label read, which are write affordances and belong with intake.
+Gmail label discovery. The Gmail command accepts label ids the operator knows; it cannot list the mailbox's labels, and `labels` is in the read allowlist's reserved-segment list precisely so nothing here can reach that collection.
+
+Scheduled or background intake. No mailbox polling, no Gmail watch, no push subscription, no folder or directory watching. Intake happens when the operator presses the button, and a surface that imported on its own would be making a network request nobody asked for.
+
+Attachments, and previewing a message before taking it in. Nothing extracts or downloads an attachment, and nothing renders a message body — the intake UI is not an email client, and a preview would be the one place recruiter HTML had a parser to reach.
 
 Sending. CareerSignal stops at draft creation and always has. The draft is left in the destination mailbox and the operator sends it themselves, from the mailbox, after reading it. No surface here has ever had a send path and none is planned; a machine that could both decide to write to someone and then send it is a different product.
 

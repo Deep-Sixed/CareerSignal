@@ -647,12 +647,27 @@ def test_the_manifest_is_not_vacuous():
     If the derivation ever stopped finding anything -- a moved package, a renamed helper --
     the test above would go green while proving nothing at all.
     """
-    assert capabilities() == {"record_status", "decide", "draft", "reconcile"}
-    # The outward workflow is reached through the service that owns it. These are the writes
-    # `draft` and `reconcile` perform on the caller's behalf, and the browser reaching one of
-    # them directly would mean this surface had reimplemented the workflow rather than asked
-    # for it -- a different and much wider capability than the one PR 8 granted.
-    assert {"claim", "finish", "refuse", "reject", "ingest"} & capabilities() == set()
+    assert capabilities() == {
+        "record_status",
+        "decide",
+        "draft",
+        "reconcile",
+        "ingest_eml",
+        "ingest_gmail",
+    }
+    # Both workflows are reached through the services that own them. These are the writes the
+    # four commands perform on the caller's behalf, and the browser reaching one of them
+    # directly would mean this surface had reimplemented a workflow rather than asked for it --
+    # a different and much wider capability than the ones PR 8 and PR 9 granted.
+    assert {
+        "claim",
+        "finish",
+        "refuse",
+        "reject",
+        "ingest",
+        "intake",
+        "intake_message",
+    } & capabilities() == set()
 
 
 def test_every_declared_capability_is_a_real_write_entrypoint():
@@ -673,6 +688,10 @@ def test_the_outward_workflow_is_an_entrypoint_even_though_it_writes_indirectly(
     assert {"claim", "finish", "refuse", "reject", "record_status", "decide"} <= reachable
     # And they are entrypoints for the right reason: the service is where they are reached.
     assert {"intake", "intake_message"} <= reachable
+    # The same closure, one link longer, is what makes intake visible: `ingest_eml` reaches
+    # `Repository.ingest` only through `Intake.intake_message`, and a derivation that stopped
+    # at repository members would see a web surface take material in and declare nothing.
+    assert {"ingest_eml", "ingest_gmail"} <= reachable
 
 
 def test_the_declaration_is_a_set_rather_than_a_formatting_convention():
@@ -924,6 +943,176 @@ def test_an_alias_does_not_lend_authority_to_an_unrelated_class(tmp_path):
     )
     assert "draft" in entrypoints(source, web)
     assert capabilities(source, web) == set()
+
+
+# --- the shape PR 9 actually took ---------------------------------------------------------------
+
+
+def intake_tree(root) -> tuple:
+    """The real layering again, one link longer than the outward one.
+
+    A repository whose write opens a transaction; the existing `Intake`, which reaches that
+    write; an `IntakeActions` that reaches `Intake`; and a web package that uses the service.
+    The extra hop is the point: intake is two calls away from a transaction, so a derivation
+    that stopped one short would watch a browser take material in and declare nothing.
+    """
+    source = root / "src"
+    web = source / "system" / "web"
+    web.mkdir(parents=True)
+    (source / "data").mkdir(parents=True)
+    (source / "data" / "repository.py").write_text(
+        "class Repository:\n"
+        "    def ingest(self, message, reviews):\n"
+        "        with connection(self.path) as conn, transaction(conn):\n"
+        "            conn.execute('INSERT INTO messages VALUES (?)', (message,))\n"
+        "\n"
+        "    def communications(self):\n"
+        "        with connection(self.path) as conn:\n"
+        "            return conn.execute('SELECT 1').fetchall()\n",
+        encoding="utf-8",
+    )
+    (source / "system" / "workflow.py").write_text(
+        "class Intake:\n"
+        "    def __init__(self, repository, profile):\n"
+        "        self.repository, self.profile = repository, profile\n"
+        "\n"
+        "    def intake_message(self, message):\n"
+        "        return self.repository.ingest(message.key, [])\n",
+        encoding="utf-8",
+    )
+    (source / "system" / "intake.py").write_text(
+        "from system.workflow import Intake\n"
+        "\n"
+        "class IntakeActions:\n"
+        "    def __init__(self, repository, profile, gmail_reader=None):\n"
+        "        self.repository = repository\n"
+        "        self.gmail_reader = gmail_reader\n"
+        "        self._intake = Intake(repository, profile)\n"
+        "\n"
+        "    def available(self):\n"
+        "        return {'eml': {'available': True}}\n"
+        "\n"
+        "    def ingest_eml(self, raw, namespace):\n"
+        "        return self._intake.intake_message(Message.from_bytes(raw, namespace))\n"
+        "\n"
+        "    def ingest_gmail(self, query='', label_ids=(), limit=25):\n"
+        "        batch = self.gmail_reader.messages(query=query, limit=limit)\n"
+        "        return [self._intake.intake_message(one) for one in batch]\n",
+        encoding="utf-8",
+    )
+    return source, web
+
+
+def test_intake_reached_through_the_service_is_two_capabilities_and_not_none(tmp_path):
+    """The blocker this guard exists for, on the shape PR 9 uses.
+
+    The web package here names no repository write at all and no `Intake` either -- it calls
+    two methods on a service it was handed. A derivation that looked for members of a variable
+    called `repository`, or even for `intake_message`, would report nothing new and leave the
+    manifest agreeing with itself while the browser could take material in.
+    """
+    source, web = intake_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _eml(self, raw, namespace):\n"
+        "    return self.server.inbound.ingest_eml(raw, namespace)\n"
+        "\n"
+        "def _gmail(self, supplied):\n"
+        "    return self.server.inbound.ingest_gmail(query=supplied['query'])\n",
+        encoding="utf-8",
+    )
+    body = (web / "server.py").read_text(encoding="utf-8")
+    assert "repository." not in body and "intake_message" not in body
+
+    gained = capabilities(source, web)
+    assert gained == {"ingest_eml", "ingest_gmail"}
+
+    stale = "<!-- careersignal-web-capabilities\nrecord_status\ndecide\n-->"
+    assert declared(stale) != gained, "the stale manifest still matched; the guard is blind"
+
+
+def test_a_web_surface_that_ingests_directly_is_a_different_and_wider_capability(tmp_path):
+    """The bypass, named as the bypass it is.
+
+    A surface that skipped the service and called `Repository.ingest` itself would be a second
+    intake: no `Message`, no profile, no extractor -- whatever it chose to store. It is not
+    invisible, and it is not `ingest_eml` either. It declares `ingest`, which is not in the
+    manifest and cannot be added to it without saying out loud what was done.
+    """
+    source, web = intake_tree(tmp_path)
+    (web / "server.py").write_text(
+        "def _eml(self, raw, namespace):\n"
+        "    return self.server.repository.ingest(namespace, [])\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"ingest"}
+    assert declared(SURFACE.read_text(encoding="utf-8")) != capabilities(source, web)
+
+
+def test_reimplementing_intake_on_the_workflow_is_counted_too(tmp_path):
+    """The middle route: skip the service, keep the pipeline. Still not `ingest_eml`."""
+    source, web = intake_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.workflow import Intake\n"
+        "\n"
+        "def _eml(self, raw, namespace):\n"
+        "    flow = Intake(self.server.repository, self.server.profile)\n"
+        "    return flow.intake_message(raw)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"intake_message"}
+
+
+def test_an_unrelated_method_named_ingest_eml_is_not_intake_authority(tmp_path):
+    """Attribution, not a name scan -- the same discrimination the outward pair gets."""
+    source, web = intake_tree(tmp_path)
+    (source / "system" / "archive.py").write_text(
+        "class Archive:\n    def ingest_eml(self, raw, namespace):\n        return len(raw)\n",
+        encoding="utf-8",
+    )
+    (web / "server.py").write_text(
+        "from system.archive import Archive\n"
+        "\n"
+        "def _size(self, raw, namespace):\n"
+        "    archive = Archive()\n"
+        "    return archive.ingest_eml(raw, namespace)\n",
+        encoding="utf-8",
+    )
+    assert "ingest_eml" in entrypoints(source, web)
+    assert capabilities(source, web) == set()
+
+
+def test_the_intake_service_imported_under_another_name_is_counted(tmp_path):
+    source, web = intake_tree(tmp_path)
+    (web / "server.py").write_text(
+        "from system.intake import IntakeActions as IA\n"
+        "\n"
+        "def _eml(self, raw, namespace):\n"
+        "    taking = IA(self.server.repository, self.server.profile)\n"
+        "    return taking.ingest_eml(raw, namespace)\n",
+        encoding="utf-8",
+    )
+    assert capabilities(source, web) == {"ingest_eml"}
+
+
+@pytest.mark.parametrize("dropped", ["ingest_eml", "ingest_gmail"])
+def test_a_manifest_missing_either_intake_capability_stops_the_build(dropped):
+    """Removing a line from the declaration is the mutation this comparison exists to fail."""
+    text = SURFACE.read_text(encoding="utf-8")
+    thinned = text.replace(f"\n{dropped}\n", "\n", 1)
+    assert thinned != text, f"{dropped} is not in the manifest as its own line"
+    assert declared(thinned) != capabilities()
+    assert dropped not in declared(thinned)
+
+
+@pytest.mark.parametrize("invented", ["ingest_imap", "ingest_mbox", "ingest"])
+def test_a_manifest_declaring_intake_the_code_cannot_reach_stops_the_build(invented):
+    """Both directions. `ingest_imap` names nothing at all; `ingest` names a real write this
+    package deliberately cannot reach, and declaring it would claim a capability the browser
+    does not have -- which is how a manifest starts being read as decoration."""
+    text = SURFACE.read_text(encoding="utf-8")
+    widened = text.replace("\ningest_eml\n", f"\ningest_eml\n{invented}\n", 1)
+    assert widened != text
+    assert declared(widened) != capabilities()
 
 
 def test_no_entrypoint_name_is_owned_by_two_classes():

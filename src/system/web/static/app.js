@@ -32,6 +32,17 @@ const state = {
   /* Whether this launch can reach that destination. False until /session says otherwise, so
    * the outward controls are withheld rather than offered on an assumption. */
   outward: false,
+  /* Which sources this launch can take material in from, read once from /intake/sources.
+   * Null until then, so the intake controls are withheld rather than guessed at -- and they
+   * are decided by this answer alone, never inferred from whether drafting is configured.
+   * Read authority and draft authority are different grants. */
+  sources: null,
+  /* The last intake report, exactly as the server wrote it, or null. Nothing here decides
+   * what it meant. */
+  intake: null,
+  /* What the operator last submitted, so a rebuilt panel does not silently discard it. It is
+   * what they typed, never anything derived from a message. */
+  intakeForm: { namespace: "", query: "", labels: "", limit: 25 },
 };
 
 let api = null;
@@ -105,6 +116,19 @@ async function reload() {
   state.opportunities = opportunities;
   state.timeline = timeline;
   state.byId = new Map(opportunities.map((row) => [row.id, row]));
+}
+
+async function reloadAll() {
+  /* Everything new evidence can move, which is more than a decision can.
+   *
+   * A message arriving can create an opportunity, produce a new current review, and make an
+   * approval that already stood no longer bind -- so Inbox, Opportunities and Approvals are
+   * all re-read from the server. None of that is worked out here: which review is current and
+   * whether an approval still binds are the engine's answers, and a browser that patched its
+   * own rows would be deciding them a second time, differently.
+   */
+  state.communications = await api.communications();
+  await reload();
 }
 
 
@@ -273,6 +297,41 @@ const actions = {
       state.detail = await opportunityDetail(id, { attempt: answer.body });
     });
   },
+  setIntakeForm(supplied) {
+    /* Held only so a rebuilt panel can show what was last submitted. Nothing downstream reads
+     * it: each command is sent the values read off the controls at the moment it was pressed. */
+    state.intakeForm = { ...state.intakeForm, ...supplied };
+  },
+  importEml(namespace, message) {
+    /* Send the bytes the operator chose, then re-read. Nothing here parses the message,
+     * inspects it to decide whether it is a job, or reports anything the server did not: what
+     * the extractor made of it is the extractor's answer, diagnostics included.
+     *
+     * A refusal is kept and shown rather than retried. Whether the material was unusable or
+     * this launch cannot take anything in, asking again unchanged would only produce the same
+     * answer -- and pressing the button again is the operator's to do.
+     */
+    guard(async () => {
+      const answer = await api.ingestEml(namespace, message);
+      if (answer.ok) {
+        await reloadAll();
+      }
+      state.intake = { ok: answer.ok, status: answer.status, report: answer.body };
+    });
+  },
+  importGmail(bounds) {
+    /* The same shape, against a mailbox. The batch is read whole by the server before
+     * anything is written, so a failure here means nothing from that attempt was stored --
+     * which is the server's guarantee, reported, not one assumed on its behalf.
+     */
+    guard(async () => {
+      const answer = await api.ingestGmail(bounds);
+      if (answer.ok) {
+        await reloadAll();
+      }
+      state.intake = { ok: answer.ok, status: answer.status, report: answer.body };
+    });
+  },
   openCommunication(id) {
     guard(async () => {
       state.selected = id;
@@ -313,10 +372,11 @@ async function start() {
   }
   api = connect(credential);
   await guard(async () => {
-    const [session, communications, vocabulary] = await Promise.all([
+    const [session, communications, vocabulary, sources] = await Promise.all([
       api.session(),
       api.communications(),
       api.statuses(),
+      api.intakeSources(),
     ]);
     renderSession(session);
     state.target = session.decision_target;
@@ -326,6 +386,9 @@ async function start() {
     state.outward = session.outward;
     state.communications = communications;
     state.statuses = vocabulary.statuses;
+    /* Which intake controls exist at all. Decided by this one answer, so a launch that cannot
+     * reach a mailbox is never offered a button that could only ever refuse. */
+    state.sources = sources;
     await reload();
   });
 }

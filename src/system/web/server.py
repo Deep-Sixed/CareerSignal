@@ -5,14 +5,23 @@ it refuses. It binds 127.0.0.1 and offers no way to bind anything else. It answe
 HEAD, and POST only at the addresses written out below, and refuses every other method
 before routing.
 
-One command appends a status event and one records a decision; two more run the outward
-workflow -- creating a draft and reconciling one -- by asking the service that owns that
-authority rather than performing it here. Everything else it reaches is a read projection:
-no intake, no claim, no finish, no refuse, no reject, and no provider or credential of its
-own. What this package may change is declared once, in `docs/web-surface.md`,
-and a test compares that declaration against this package's own syntax tree -- so widening it
-means saying so there, in the same change, rather than discovering later that the code and
-the documentation stopped agreeing.
+One command appends a status event and one records a decision; two run the outward workflow
+-- creating a draft and reconciling one -- and two take material in, a local `.eml` and a
+bounded Gmail batch. The last four are asked of the services that own those authorities
+rather than performed here. Everything else it reaches is a read projection: no `ingest`, no
+`claim`, no `finish`, no `refuse`, no `reject`, no parser, no extractor, no scorer, and no
+provider or credential of its own. What this package may change is declared once, in
+`docs/web-surface.md`, and a test compares that declaration against this package's own syntax
+tree -- so widening it means saying so there, in the same change, rather than discovering
+later that the code and the documentation stopped agreeing.
+
+Intake is where that boundary is load-bearing rather than tidy. What arrives is written by a
+recruiter, and it enters through exactly one path -- `Message`, then `Intake`, then
+`Repository.ingest` -- so there is no second MIME parser, no second extractor, no second
+notion of message identity and no browser-side idea of what a job is. The evaluation profile
+is a launch fact handed in already built: material that could choose the policy it is judged
+against is not material being judged. A Gmail batch is read in full before the first local
+write, so a read that fails partway leaves nothing behind from that attempt.
 
 An approval is recorded only while the packet it was read from still holds. The comparison
 is `decide()`'s, inside its own write transaction; nothing here re-implements it, because a
@@ -41,10 +50,12 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from communications.gmail import TOKEN_VARIABLE
 from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
+from communications.message import MAX_MESSAGE_BYTES
 from data.store import sqlite_report
 from recruiting.models import BindingConflict
 from recruiting.status import STATUSES, StatusConflict
 from system import outward, views
+from system.intake import IntakeUnavailable, SourceUnreadable
 
 # The only address this surface knows how to bind. There is no --host and no fallback: an
 # interface is not a setting when the whole security model is "nothing off this machine".
@@ -120,6 +131,25 @@ EXPECTATION_FIELDS = frozenset(
 # Three short fields and an operator's note. The ceiling exists so an oversized request is
 # refused on what it declares rather than after it has been read into memory.
 MAX_BODY = 16 * 1024
+# The EML command is the one request whose body is not a command but material, so it has the
+# material's ceiling rather than the command ceiling above. MAX_MESSAGE_BYTES is imported
+# rather than restated: it is what `Message` itself enforces, and a second number here could
+# only ever disagree with the one that counts.
+RFC822 = "message/rfc822"
+# Operator-declared provenance for a local file, carried as a header because the body is the
+# message itself and has no room for a field. It is a declaration and not evidence -- unlike a
+# Gmail namespace, which the reader proves against the credential before anything is admitted.
+NAMESPACE_HEADER = "X-CareerSignal-Namespace"
+# The whole of what a Gmail intake request may say, and the bounds on each. Nothing here names
+# a mailbox, a token, a namespace, a profile or a provider: those are launch facts, and a page
+# that could name one could redirect an import or choose the policy it is judged by.
+GMAIL_FIELDS = frozenset({"query", "labels", "limit"})
+MIN_GMAIL_LIMIT, MAX_GMAIL_LIMIT = 1, 100
+DEFAULT_GMAIL_LIMIT = 25
+# What a launch with no evaluation profile reports it can take in. Not a degraded mode to work
+# around: a profile is what incoming material would be scored against, and CareerSignal has no
+# opinion to invent when the operator supplied none.
+NO_INTAKE = {"eml": {"available": False}, "gmail": {"available": False}, "profile": None}
 # Never taken from the request. The authenticated local browser is the operator, and an
 # actor supplied by JavaScript would let presentation input rewrite audit identity.
 OPERATOR = "operator"
@@ -332,6 +362,80 @@ def decision(payload) -> dict:
     return {"approved": True, "expected": expectation(payload["expected"])}
 
 
+def inbound_sources(service) -> dict:
+    """What this launch can take in, as a fact about configuration rather than about a mailbox.
+
+    Answered from what was handed to this surface at launch, and nothing is contacted: a read
+    of local configuration must not depend on whether Google is reachable, and probing a
+    mailbox to answer a discovery GET would make a page load spend a credential. Whether the
+    credential still works is proven by the Gmail command itself, where it matters.
+
+    No token, no token length, no fragment of one and no scope detail appears here or can. The
+    service answers with a mailbox name and the launch profile; this layer adds nothing and
+    withholds nothing, because a browser that had to guess which controls can work would offer
+    the operator buttons that only ever refuse.
+    """
+    return NO_INTAKE if service is None else service.available()
+
+
+def gmail_command(payload) -> dict:
+    """The three fields a Gmail import may carry, each bounded, and nothing else.
+
+    Shape only, exactly as `command()` above is shape only. What a query *matches* is Gmail's
+    to answer and what a message *means* is the extractor's; neither is decided here.
+
+    What is decided here is that one button press cannot become an unbounded mailbox walk, and
+    that the request may not name a mailbox, a token, a namespace, a provider or a profile.
+    Those are launch facts. Supplying one is refused rather than ignored -- a caller that sent
+    `mailbox` believed it was being honoured, and the one answer worse than refusing it is
+    quietly reading a different mailbox than the request asked for.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("The request body must be a JSON object")
+    unknown = sorted(set(payload) - GMAIL_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown field: {', '.join(unknown)}")
+    query = payload.get("query", "")
+    if not isinstance(query, str):
+        raise ValueError("query must be text")
+    labels = payload.get("labels", [])
+    # A string is a sequence of characters, so `"INBOX"` would pass a length check and then be
+    # spelled out one letter per label. The adapter refuses this too; it is refused here as
+    # well because this is where a caller's mistake should be named.
+    if not isinstance(labels, list) or isinstance(labels, str):
+        raise ValueError("labels must be a list of label ids")
+    if not all(isinstance(label, str) for label in labels):
+        raise ValueError("labels must be a list of label ids")
+    limit = payload.get("limit", DEFAULT_GMAIL_LIMIT)
+    # `type(...) is not int` rather than isinstance, because bool is a subclass of int and
+    # `true` is not a number of messages.
+    if type(limit) is not int:
+        raise ValueError("limit must be a whole number")
+    if not MIN_GMAIL_LIMIT <= limit <= MAX_GMAIL_LIMIT:
+        raise ValueError(f"limit must be between {MIN_GMAIL_LIMIT} and {MAX_GMAIL_LIMIT}")
+    return {"query": query, "labels": labels, "limit": limit}
+
+
+def declared_namespace(headers) -> str:
+    """The provenance the operator asserts for a local file, taken from the one header.
+
+    Required and refused when blank, because an empty namespace is not a default to fill in:
+    it is the operator not having said where this came from, and CareerSignal would have to
+    invent an answer. Nothing derives it from the message -- the filename, the sender, the
+    `Message-ID` and the subject are all written by whoever sent the mail.
+
+    Exactly one header, never the first of several. A second copy is a request saying two
+    different things about where its material came from, and picking one would be this layer
+    choosing which provenance to believe.
+    """
+    supplied = headers.get_all(NAMESPACE_HEADER) or []
+    if len(supplied) != 1:
+        raise ValueError(f"Exactly one {NAMESPACE_HEADER} is required")
+    if not supplied[0].strip():
+        raise ValueError(f"{NAMESPACE_HEADER} may not be blank")
+    return supplied[0]
+
+
 def expectation(supplied) -> dict:
     """The four facts, all of them, each the right kind of value and nothing else.
 
@@ -531,6 +635,12 @@ class Handler(BaseHTTPRequestHandler):
                 return repository.authorization(review_id)
             case ["timeline"]:
                 return repository.timeline(**window(query))
+            case ["intake", "sources"]:
+                accepted(query, ())
+                # Discovery of this launch's own configuration. It contacts nothing: the
+                # answer is what the composition root handed over, and a GET that spent a
+                # credential to answer would make opening the page reach a mailbox.
+                return inbound_sources(self.server.inbound)
             case ["statuses"]:
                 accepted(query, ())
                 # The vocabulary itself, so a <select> can be filled without the browser
@@ -580,6 +690,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._outward(
                     identifier, command, parsed.query, lambda actions: actions.reconcile(identifier)
                 )
+            # The two intake addresses. Each names one service call, written out here beside
+            # the others: there is no `/intake` that takes a source as a field, because an
+            # address a request could choose is an authority a page could choose.
+            case ["intake", "eml"]:
+                return self._ingest_eml(parsed.query)
+            case ["intake", "gmail"]:
+                return self._ingest_gmail(parsed.query)
         # Every other address reads -- including a path outside the API root, for which
         # `tail` returns None and no sequence pattern above can match. Saying so with Allow
         # rather than 404 keeps a POST from reporting which read routes exist.
@@ -745,6 +862,156 @@ class Handler(BaseHTTPRequestHandler):
         status = HTTPStatus.CONFLICT if record["outcome"] == outward.REFUSED else HTTPStatus.OK
         return (status, JSON, json.dumps(record).encode("utf-8"), None)
 
+    def _ingest_eml(self, query):
+        """Take in one local message, exactly as the command line takes one in.
+
+        The body *is* the message. Nothing wraps it in JSON or base64 to fit a helper that
+        already exists: a MIME message has a representation, and re-encoding one would mean
+        this surface had an opinion about its bytes. It never accepts a path either -- the
+        browser reads the file the operator chose and sends what it read, so there is no
+        filename for the server to resolve and no directory it could be pointed at.
+
+        The order of refusals is deliberate. Whether this launch can take anything in at all
+        is settled first, so a launch without an evaluation profile never parses intake input;
+        then the envelope -- media type, provenance, declared length -- so an oversized body is
+        refused on what it declares rather than after being read into memory; and only then are
+        the bytes read and handed on.
+
+        Everything past that belongs to `IntakeActions`: the size ceiling, the MIME structure,
+        which alternative is the body, what the extractor makes of it, whether this message was
+        already seen. A message that parses and names no opportunity is a successful intake
+        with diagnostics, not a failure -- what the extractor did not understand is data the
+        operator needs, and answering 400 would tell them to fix a request that was right.
+        """
+        try:
+            accepted(parse_qs(query, keep_blank_values=True), ())
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        service = self.server.inbound
+        if service is None:
+            return self._unavailable(
+                "this launch has no evaluation profile, so it takes nothing in"
+            )
+        media = self.headers.get("Content-Type", "").split(";")[0].strip().casefold()
+        if media != RFC822:
+            return (
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                JSON,
+                json.dumps({"error": f"A message must be sent as {RFC822}"}).encode("utf-8"),
+                None,
+            )
+        try:
+            namespace = declared_namespace(self.headers)
+            raw = self._material(MAX_MESSAGE_BYTES)
+        except Oversized as refused:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(refused))
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        try:
+            record = service.ingest_eml(raw, namespace)
+        except IntakeUnavailable as refused:
+            return self._unavailable(str(refused))
+        except (ValueError, KeyError) as exc:
+            # The material was unusable: an unparseable MIME structure, a charset nothing can
+            # decode, a namespace that normalises to nothing. The refusal is `Message`'s own,
+            # in its own words, and nothing was written.
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        return (HTTPStatus.OK, JSON, json.dumps(record).encode("utf-8"), None)
+
+    def _ingest_gmail(self, query):
+        """Read a bounded Gmail batch and take it in, or read nothing and say why.
+
+        The request may bound the read and may not redirect it. Which mailbox, under which
+        credential, recorded under which namespace, scored against which profile -- all launch
+        facts, none of them fields, and naming one is refused rather than ignored.
+
+        Whether this launch takes anything in at all is settled before the body is looked at,
+        for the same reason it is on the EML address; whether it holds *this source* is the
+        service's own answer, and both are the same `409`.
+
+        The sequence is the service's: verify the mailbox identity, read the whole batch, then
+        write. So a read that fails leaves nothing from that attempt behind, and this layer can
+        answer `502` knowing it is describing an upstream read rather than a partial import.
+        The failure is *declared* by the service rather than guessed from an exception class,
+        for the same reason the outward boundary declares its uncertainty: a `ValueError` from
+        a malformed command and a `ValueError` from inside a mailbox read are the same class
+        and opposite facts.
+        """
+        service = self.server.inbound
+        if service is None:
+            # Settled first, exactly as it is on the EML address: a launch that takes nothing
+            # in never parses intake input at all, whatever it was sent.
+            return self._unavailable(
+                "this launch has no evaluation profile, so it takes nothing in"
+            )
+        try:
+            accepted(parse_qs(query, keep_blank_values=True), ())
+            supplied = gmail_command(self._body())
+        except Oversized as refused:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(refused))
+        except ValueError as exc:
+            return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        try:
+            record = service.ingest_gmail(
+                query=supplied["query"],
+                label_ids=tuple(supplied["labels"]),
+                limit=supplied["limit"],
+            )
+        except IntakeUnavailable as refused:
+            # A launch-capability conflict, not evidence Gmail refused anything: no mailbox was
+            # contacted and nothing local was written.
+            return self._unavailable(str(refused))
+        except SourceUnreadable as failed:
+            # The command was accepted and the mailbox could not be read -- a wrong or expired
+            # token, a rate limit, an identity that is not the declared one. The adapter's own
+            # message says which; it never carries the credential, a header or a response body.
+            return (
+                HTTPStatus.BAD_GATEWAY,
+                JSON,
+                json.dumps({"error": "source_unreadable", "detail": str(failed)}).encode("utf-8"),
+                None,
+            )
+        return (HTTPStatus.OK, JSON, json.dumps(record).encode("utf-8"), None)
+
+    def _unavailable(self, detail):
+        """This launch was not started with the authority the request needs.
+
+        A conflict with how CareerSignal is configured rather than a malformed request, so it
+        answers 409 exactly as a refused decision and a locally refused draft do. Nothing was
+        read, nothing was contacted and nothing was written; the operator fixes it by starting
+        differently, not by correcting what they sent.
+        """
+        return (
+            HTTPStatus.CONFLICT,
+            JSON,
+            json.dumps({"error": "intake_unavailable", "detail": detail}).encode("utf-8"),
+            None,
+        )
+
+    def _material(self, limit) -> bytes:
+        """The declared length, the ceiling, then exactly that many bytes -- and no parsing.
+
+        The same bound as `_body()` and for the same reason, against a different ceiling:
+        without a declared length there is nothing to hold a request to, and this surface
+        decodes no chunked body. Exactly `length` bytes are read and never one more, so a
+        client that declares a permissible size and then writes a larger body has still only
+        been read to what it declared.
+
+        A body shorter than its declaration is refused rather than ingested as what arrived. A
+        truncated message can parse perfectly well into a message that is missing most of
+        itself, and storing that as evidence would be recording something nobody sent.
+        """
+        declared = self.headers.get("Content-Length", "")
+        if not (declared.isascii() and declared.isdigit()):
+            raise ValueError("Content-Length is required")
+        length = int(declared)
+        if length > limit:
+            raise Oversized(f"A message may not exceed {limit} bytes")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("The request body was shorter than its declared length")
+        return raw
+
     def _body(self) -> dict:
         """The declared length, the ceiling, then exactly that many bytes, then JSON."""
         media = self.headers.get("Content-Type", "").split(";")[0].strip().casefold()
@@ -860,6 +1127,7 @@ class Surface(ThreadingHTTPServer):
         provider=DEFAULT_PROVIDER,
         provider_namespace=DEFAULT_PROVIDER,
         actions=None,
+        inbound=None,
     ):
         self.repository = repository
         # The outward service, already constructed by the caller that parsed the command
@@ -869,6 +1137,12 @@ class Surface(ThreadingHTTPServer):
         # None is not a degraded mode to work around -- it is a launch that may record
         # decisions and may not act on them, which is exactly what PR 7 made possible.
         self.actions = actions
+        # The intake service, likewise already constructed by that caller, or None when this
+        # launch was given no evaluation profile. Which sources it holds -- a local file
+        # always, a mailbox only with a read credential -- is its own to report, and this
+        # package constructs neither: it imports no reader, no credential and no parser, so
+        # intake is an authority it was handed rather than one it could assemble.
+        self.inbound = inbound
         # Two strings, decided at launch and never afterwards. They arrive already chosen
         # by the caller that parsed the command line, so nothing here imports a provider,
         # constructs a credential, or learns what reaching that destination would involve.
@@ -895,6 +1169,16 @@ class Surface(ThreadingHTTPServer):
         return f"{self.origin}/#token={self.token}"
 
 
+def sources(inbound) -> list:
+    """The sources one launch holds, named for the terminal.
+
+    Reads exactly what the discovery route reports, so the line an operator sees when they
+    start CareerSignal and the controls the browser then offers cannot disagree.
+    """
+    found = inbound.available()
+    return [name for name in ("eml", "gmail") if found[name]["available"]]
+
+
 def serve(
     repository,
     *,
@@ -902,6 +1186,7 @@ def serve(
     provider=DEFAULT_PROVIDER,
     provider_namespace=DEFAULT_PROVIDER,
     actions=None,
+    inbound=None,
     announce=print,
 ) -> None:
     """Bind, print where to go, and serve until interrupted.
@@ -920,6 +1205,7 @@ def serve(
         provider=provider,
         provider_namespace=provider_namespace,
         actions=actions,
+        inbound=inbound,
     )
     announce(f"CareerSignal is reading {surface.repository.path}")
     announce(f"Approvals recorded here will name {provider_namespace}")
@@ -927,6 +1213,14 @@ def serve(
         f"Drafts may be created in {provider_namespace} from this surface"
         if actions
         else "This launch records decisions only; creating a draft needs a compose credential"
+    )
+    # Said plainly, because which sources a launch holds decides which controls the browser is
+    # offered, and an operator who cannot see that from the terminal finds out by pressing a
+    # button that is not there.
+    announce(
+        "Intake: " + ", ".join(sources(inbound))
+        if inbound
+        else "This launch takes nothing in; intake needs at least one --skill"
     )
     announce(f"Open {surface.launch_url}")
     announce("This address is valid for this process only. Stop with Ctrl-C.")

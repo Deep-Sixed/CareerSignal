@@ -1,11 +1,17 @@
 /* The launch credential, and every request this application is able to make.
  *
- * All of them are GET. There is no helper here that takes a method, so a screen cannot
- * accidentally acquire one: the surface answers nothing else, and neither does this.
+ * Reads go through one helper and commands through another, and neither takes a method: the
+ * verb is written once, in `deliver` below, so a screen cannot acquire a different one by
+ * passing it. Every request this application can make is a named function in this file, which
+ * is what makes adding one an edit a reader notices rather than a parameter.
  */
 
 const HEADER = "X-CareerSignal-Token";
+const NAMESPACE = "X-CareerSignal-Namespace";
 const JSON_MEDIA = "application/json";
+/* A MIME message already has a representation, so it is sent as one. Wrapping it in JSON or
+ * base64 to reuse the helper below would mean this file had an opinion about its bytes. */
+const MESSAGE_MEDIA = "message/rfc822";
 const STORAGE_NAME = "careersignal.launch";
 const MARKER = "#token=";
 const ROOT = "/api/v1";
@@ -46,12 +52,16 @@ async function read(path, credential) {
   return body;
 }
 
-async function send(path, credential, payload) {
+async function deliver(path, credential, media, body, extra) {
   /* The one request on this surface that is not a read.
    *
-   * It is written out here rather than reached through a method parameter, so there is no
-   * helper a screen could hand a different verb to: adding a second command means adding a
-   * second function, in this file, where the credential lives.
+   * The verb is written out here and nowhere else, so there is no helper a screen could hand
+   * a different one to: every command in this file goes through this function, and adding a
+   * command means adding a named function beside the others rather than passing a method.
+   *
+   * What varies is the media type and the body, because one of these commands carries a
+   * message rather than a command. What does not vary is the credential, the verb, and that
+   * nothing is sent with cookies or from cache.
    *
    * The refusal is returned rather than thrown. A 409 is not an error in the sense a
    * failed request is -- the command was well formed and the operator's authority was
@@ -59,12 +69,18 @@ async function send(path, credential, payload) {
    */
   const response = await fetch(ROOT + path, {
     method: "POST",
-    headers: { [HEADER]: credential, "Content-Type": JSON_MEDIA },
+    headers: { [HEADER]: credential, "Content-Type": media, ...(extra || {}) },
     cache: "no-store",
     credentials: "omit",
-    body: JSON.stringify(payload),
+    body,
   });
   return { ok: response.ok, status: response.status, body: await response.json() };
+}
+
+function send(path, credential, payload) {
+  /* A command whose body is fields. Everything it can say is a JSON object the server
+   * validates field by field, and it may say nothing else. */
+  return deliver(path, credential, JSON_MEDIA, JSON.stringify(payload));
 }
 
 export function connect(credential) {
@@ -99,5 +115,18 @@ export function connect(credential) {
      * would have to refuse. */
     draft: (review) => send(`/reviews/${part(review)}/draft`, credential, {}),
     reconcile: (review) => send(`/reviews/${part(review)}/reconcile`, credential, {}),
+    /* Which sources this launch can take material in from. A read of CareerSignal's own
+     * configuration: it contacts no mailbox, and the controls offered are decided by what it
+     * says rather than inferred from anything else the session happens to report. */
+    intakeSources: () => ask("/intake/sources"),
+    /* The message itself, exactly as it was read from the operator's disk. Nothing here
+     * parses it, inspects it, or decides whether it looks like a job -- and no path is sent,
+     * because the server resolves no names. The namespace is what the operator declared and
+     * travels as a header, since the body is already spoken for. */
+    ingestEml: (namespace, message) =>
+      deliver(`/intake/eml`, credential, MESSAGE_MEDIA, message, { [NAMESPACE]: namespace }),
+    /* A bound on a read, and nothing more. The mailbox, the credential, the namespace and the
+     * evaluation profile are launch facts the server refuses to take from a request. */
+    ingestGmail: (bounds) => send(`/intake/gmail`, credential, bounds),
   };
 }
