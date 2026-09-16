@@ -2,6 +2,8 @@
 
 A local, human-approved recruiting workflow. CareerSignal reads recruiting messages, deduplicates the opportunities in them, scores each against the skills and locations you configure, explains the score, and keeps an append-only record of what you decided and what was drafted on your behalf. Nothing leaves your machine without an explicit approval bound to exactly what you read.
 
+![CareerSignal dashboard](docs/ui-design/renders/dashboard.png)
+
 ## What it does and does not do
 
 CareerSignal will:
