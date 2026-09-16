@@ -22,7 +22,7 @@ CareerSignal will not:
 - retry an external write whose outcome is unknown;
 - act on an approval whose review, wording, recipient, or destination has changed since you gave it.
 
-It is a command-line tool with no server, no accounts, no runtime dependencies, and a single SQLite file for state. The design notes in [docs/](docs/) explain each guarantee and the tests that hold it.
+CareerSignal is a local CLI and loopback-only browser application with no accounts, no third-party runtime dependencies, and a single SQLite file for state. The design notes in [docs/](docs/) explain each guarantee and the tests that hold it.
 
 ## Requirements
 
