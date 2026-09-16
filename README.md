@@ -122,7 +122,7 @@ A command written wrongly is exit 2 on stderr, because a mistyped command is not
 
 Message IDs are immutable: the same ID with different content is refused, the same message twice returns the original reviews. A changed review needs a new approval. An approval binds the review's content digest, the exact draft wording, the recipient and subject, and the provider and mailbox, and every one is rechecked inside the transaction that reserves the draft; the status event current when you approved is recorded as evidence, while the draft is judged against the opportunity's status now. A review holds at most one draft attempt at a time: a proven provider rejection releases it, an uncertain outcome locks it until reconciled. Terminal statuses (`rejected`, `withdrawn`, `closed`) refuse a draft. Recruiter-supplied addresses carrying control characters are refused, not repaired. The audit and status-history tables cannot be updated or deleted. Text from recruiters is escaped at the terminal so a job title cannot retitle your window.
 
-The `Repository`, `Intake` and `OutwardActions` classes under `src/` are local trusted-caller APIs, not authenticated endpoints.
+The `Repository`, `Intake`, `IntakeActions` and `OutwardActions` classes under `src/` are local trusted-caller APIs, not authenticated endpoints.
 
 ## Verify
 

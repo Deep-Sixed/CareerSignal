@@ -1613,22 +1613,33 @@ PERMITTED_WRITES = frozenset({"record_status", "decide"})
 # Names that decide, contact a provider, or carry a credential -- and every other mutation.
 # None may appear anywhere in this package, as a call, an attribute or an import.
 #
-# `draft` and `reconcile` left this set in PR 8, and nothing else did. What that admits is
-# narrow and worth stating exactly: this package may now *invoke* the two outward commands on
-# a service it was handed. It still may not name `OutwardActions`, so it cannot construct one;
-# it still may not name `claim`, `finish`, `refuse` or `reject`, so it cannot reimplement what
-# the service does; and it still may not name a provider or a credential class, so it cannot
-# reach a mailbox except through the service that owns that authority. The capability the
-# browser gained is the service's, exercised, not the workflow's, copied.
+# `draft` and `reconcile` left this set in PR 8, and `ingest_eml` and `ingest_gmail` never
+# entered it in PR 9. What that admits is narrow and worth stating exactly: this package may
+# now *invoke* four named commands on two services it was handed. It still may not name
+# `OutwardActions` or `IntakeActions`, so it cannot construct either; it still may not name
+# `claim`, `finish`, `refuse`, `reject`, `ingest`, `intake` or `intake_message`, so it cannot
+# reimplement what they do; it still may not name a provider, a reader or a credential class,
+# so it cannot reach a mailbox except through the service that owns that authority; and as of
+# PR 9 it may not name `Message`, `Profile`, `evaluate` or `extract` either, so it can neither
+# parse incoming material nor decide what the material is judged against. The capability the
+# browser gained is the services', exercised, not the workflows', copied.
+#
+# `getattr` and its neighbours are here for a different reason, and it is the one that makes
+# this whole guard mean anything. Every rule in this file reads the syntax tree. A command
+# looked up by name -- `getattr(service, chosen)(...)` -- is an authority the tree cannot see,
+# so a dynamic dispatcher would not be a way around one rule but a way around all of them.
 FORBIDDEN_NAMES = frozenset(
     {
         "Intake",
+        "IntakeActions",
         "OutwardActions",
         "GmailDrafts",
         "GmailReader",
         "GmailCredentials",
         "GmailComposeCredentials",
         "ControlledDrafts",
+        "Message",
+        "Profile",
         "claim",
         "finish",
         "refuse",
@@ -1636,14 +1647,58 @@ FORBIDDEN_NAMES = frozenset(
         "ingest",
         "intake",
         "intake_message",
+        "from_bytes",
+        "evaluate",
+        "extract",
+        "extract_records",
+        "parse_message",
+        "identifiers",
+        "messages",
+        "verify_identity",
         "migrate",
         "execute",
         "executemany",
         "commit",
         "transaction",
         "connection",
+        "getattr",
+        "setattr",
+        "globals",
+        "vars",
+        "eval",
+        "exec",
     }
 )
+
+
+def offending(name, tree) -> list:
+    """Every forbidden name in one parsed module, and every repository member outside the list.
+
+    Extracted so the guard below and the mutations that prove it bites read the same code. A
+    mutation test that re-implemented the check would prove that its own copy fails, which is
+    not the claim anybody wants made.
+
+    Import lines are read too, not only uses. `from system.intake import IntakeActions` binds
+    an alias rather than an `ast.Name`, so a scan of names alone would let the class into the
+    module and only object once somebody called it -- and a class that is present is a class
+    the next edit can reach for.
+    """
+    allowed = PERMITTED_READS | PERMITTED_WRITES
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            for alias in node.names:
+                if alias.name in FORBIDDEN_NAMES or (alias.asname or "") in FORBIDDEN_NAMES:
+                    found.append(f"{name}: import {alias.name}")
+        if isinstance(node, ast.Attribute):
+            if node.attr in FORBIDDEN_NAMES:
+                found.append(f"{name}: .{node.attr}")
+            if isinstance(node.value, ast.Name) and node.value.id == "repository":
+                if node.attr not in allowed:
+                    found.append(f"{name}: repository.{node.attr}")
+        if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+            found.append(f"{name}: {node.id}")
+    return found
 
 
 def test_the_package_reaches_exactly_one_write_and_no_second_business_layer():
@@ -1654,15 +1709,74 @@ def test_the_package_reaches_exactly_one_write_and_no_second_business_layer():
     projections and the mutations it is permitted, and may not name a provider or a
     credential at all -- so a future edit that reaches one fails here rather than at review.
     """
-    allowed = PERMITTED_READS | PERMITTED_WRITES
     for name, tree in package_modules():
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                assert node.attr not in FORBIDDEN_NAMES, f"{name}: .{node.attr}"
-                if isinstance(node.value, ast.Name) and node.value.id == "repository":
-                    assert node.attr in allowed, f"{name}: repository.{node.attr}"
-            if isinstance(node, ast.Name):
-                assert node.id not in FORBIDDEN_NAMES, f"{name}: {node.id}"
+        assert not offending(name, tree), offending(name, tree)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "def _eml(self):\n    return self.server.repository.ingest('m', [])\n",
+        "def _eml(self, raw, ns):\n    return Intake(self.server.repository, p).intake_message(raw)\n",
+        "from system.intake import IntakeActions\n",
+        "from system.intake import IntakeActions as Taking\n",
+        "from communications.message import Message\n",
+        "from communications.gmail import GmailReader\n",
+        "from recruiting.models import Profile\n",
+        "def _parse(self, raw, ns):\n    return Message.from_bytes(raw, namespace=ns)\n",
+        "def _profile(self, supplied):\n    return Profile(tuple(supplied['skills']))\n",
+        "def _read(self):\n    return self.server.reader.messages(limit=100)\n",
+        "def _run(self, name, raw, ns):\n    return getattr(self.server.inbound, name)(raw, ns)\n",
+        "def _run(self, name):\n    return vars(self.server.inbound)[name]()\n",
+        "def _run(self, source):\n    return eval('self.server.inbound.ingest_' + source)\n",
+    ],
+    ids=[
+        "a direct repository ingest",
+        "the workflow reimplemented",
+        "the service imported",
+        "the service imported under another name",
+        "a message parser imported",
+        "a mailbox reader imported",
+        "an evaluation profile imported",
+        "material parsed here",
+        "a profile built from a request",
+        "a mailbox read here",
+        "a dynamic dispatcher",
+        "a dispatcher through the instance dictionary",
+        "a dispatcher through eval",
+    ],
+)
+def test_the_guard_bites_on_every_way_this_package_could_take_material_in_itself(mutation):
+    """The guard proved against the edits it exists to stop, not only against today's file.
+
+    A guard that passes is evidence of nothing until it has been shown to fail. Every line
+    here is a plausible next edit -- most of them would work perfectly at runtime -- and each
+    is rejected by the same `offending()` the real check runs, on a module parsed the same way.
+
+    The three dispatchers are the ones worth naming. `getattr`, the instance dictionary and
+    `eval` all reach a command by a string, which is an authority the syntax tree cannot see:
+    they would defeat not this rule but every rule in this file at once, which is why the
+    names are forbidden rather than the shapes detected.
+    """
+    assert offending("mutant.py", ast.parse(mutation)), mutation
+
+
+def test_the_guard_admits_what_the_surface_actually_does():
+    """The other half of the pair, so the rule is a discrimination and not a blanket refusal.
+
+    The two intake commands, invoked on the injected service, are exactly what PR 9 grants and
+    must pass cleanly -- a guard that rejected them too would be satisfied by a package that
+    had stopped working.
+    """
+    permitted = (
+        "def _eml(self, raw, ns):\n    return self.server.inbound.ingest_eml(raw, ns)\n"
+        "\n"
+        "def _gmail(self, supplied):\n"
+        "    return self.server.inbound.ingest_gmail(query=supplied['query'])\n"
+        "\n"
+        "def _sources(self):\n    return self.server.inbound.available()\n"
+    )
+    assert not offending("permitted.py", ast.parse(permitted))
 
 
 def test_the_only_mutations_the_package_reaches_are_the_append_and_the_decision():
@@ -1720,7 +1834,11 @@ def test_the_package_declares_every_route_in_one_place():
     )
     matches = [node for node in ast.walk(projection) if isinstance(node, ast.Match)]
     assert len(matches) == 1
-    assert len(matches[0].cases) == 9
+    assert len(matches[0].cases) == 10
+    # The commands are counted where they are routed, on the one match `router()` identifies by
+    # what it dispatches on. Counting them makes a command added elsewhere -- a second match, a
+    # registration, a lookup -- leave this number behind rather than pass unnoticed.
+    assert len(router(tree).cases) == 6
 
 
 # --- the serve command ------------------------------------------------------------------------
@@ -1736,8 +1854,8 @@ def invoke(monkeypatch, *arguments):
     monkeypatch.setattr(
         cli,
         "serve",
-        lambda repository, *, port, provider, provider_namespace, actions: served.append(
-            (repository, port, provider, provider_namespace, actions)
+        lambda repository, *, port, provider, provider_namespace, actions, inbound: served.append(
+            (repository, port, provider, provider_namespace, actions, inbound)
         ),
     )
     monkeypatch.setattr("sys.argv", ["careersignal", *arguments])
@@ -1748,7 +1866,7 @@ def invoke(monkeypatch, *arguments):
 def test_the_command_serves_the_named_database_on_the_named_port(monkeypatch, capsys, tmp_path):
     served = invoke(monkeypatch, "serve", "--db", str(tmp_path / "db"), "--port", "9999")
     assert len(served) == 1
-    repository, port, provider, namespace, _ = served[0]
+    repository, port, provider, namespace, _, _ = served[0]
     assert (repository.path, port) == (store.database_path(tmp_path / "db"), 9999)
     # The destination an approval would name, defaulted rather than inferred: the external
     # provider is never chosen implicitly, here or anywhere else.
@@ -1799,7 +1917,7 @@ def test_gmail_without_a_compose_credential_still_serves_and_cannot_draft(
         "--mailbox",
         "operator@example.com",
     )
-    repository, _, provider, namespace, actions = served[0]
+    repository, _, provider, namespace, actions, _ = served[0]
     # The destination is still declared, so approvals recorded here still name it.
     assert (provider, namespace) == TARGET
     # And there is no service behind them, so nothing here can reach that mailbox.

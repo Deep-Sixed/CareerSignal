@@ -36,17 +36,27 @@ in them.
 
 `serve` is neither. It binds a loopback socket and blocks, printing one address and then
 serving until it is stopped, so it has no single outcome to report. What it serves is reads
-and the four commands -- each bounded where it is implemented rather than here: a status
+and the six commands -- each bounded where it is implemented rather than here: a status
 carries the event it was recorded against, an approval carries the packet it was read from,
-and the two outward commands carry nothing, because what they would say was settled by the
-approval. The outward pair reports the same four outcomes listed above, from the same code,
-so a draft attempted from a browser and one attempted here cannot be described differently.
+the two outward commands carry nothing because what they would say was settled by the
+approval, and the two intake commands carry material rather than policy. The outward pair
+reports the same four outcomes listed above, from the same code, so a draft attempted from a
+browser and one attempted here cannot be described differently.
 
-Outward authority is optional at that launch and is decided here, not there. Creating a draft
-needs a credential that can reach the mailbox; recording a decision never has. A Gmail launch
-without a compose token therefore serves decisions and refuses to act on them, rather than
-refusing to start -- making the safe half of the workflow depend on the unsafe half is the
-dependency that was deliberately removed.
+Three authorities are decided at that launch, here, and they are independent. Creating a
+draft needs a compose credential; taking in a mailbox needs a read credential, which is a
+different grant; recording a decision has never needed either, and taking in a local `.eml`
+needs no credential at all. So a Gmail launch without a compose token serves decisions and
+refuses to act on them rather than refusing to start, and a launch may read a mailbox while
+being unable to write to it, or the reverse. Making the safe half of the workflow depend on
+the unsafe half is the dependency that was deliberately removed, and each of these keeps it
+removed.
+
+Intake also needs an evaluation profile, which `--skill` and `--location` supply the same
+way they always have. It is a launch fact for a reason no surface may weaken: skills and
+accepted locations decide which opportunities advance, and the material being judged is
+written by a recruiter. A launch with no `--skill` therefore has no intake authority, and
+says so rather than inventing a profile to judge against.
 
 This module composes and prints. It holds no rule of its own: every refusal below comes
 from the layer that owns it, and nothing here decides whether an action is authorized.
@@ -64,17 +74,18 @@ from communications.gmail_draft import (
     GmailDrafts,
     namespace_for,
 )
-from communications.message import MAX_MESSAGE_BYTES, Message
+from communications.message import MAX_MESSAGE_BYTES
 from data.repository import Repository
 from data.store import database_path, migrate, verify_contract
 from recruiting.models import Profile
 from recruiting.status import StatusConflict
 from system import outward
 from system.demo import golden_workflow
+from system.intake import IntakeActions
 from system.outward import ACCEPTED, PROVIDER_REJECTED, REFUSED, UNCERTAIN
 from system.views import detail, outcome, table
 from system.web import DEFAULT_PORT, serve
-from system.workflow import Intake, OutwardActions
+from system.workflow import OutwardActions
 
 CODES = {ACCEPTED: 0, REFUSED: 1, PROVIDER_REJECTED: 1, UNCERTAIN: 3}
 # Where the operator goes next, phrased for a terminal. The classification itself is shared
@@ -118,6 +129,46 @@ def _outward_provider(args):
     if args.provider != "gmail":
         return ControlledDrafts()
     return GmailDrafts(GmailComposeCredentials(os.getenv(COMPOSE_TOKEN_VARIABLE, ""), args.mailbox))
+
+
+def _intake_profile(args) -> Profile:
+    """The evaluation profile this launch scores against, from the launch and nowhere else.
+
+    `--skill` and `--location` are the same two options `ingest` and `gmail-ingest` have
+    always taken, and they stay operator configuration for the same reason: skills and
+    accepted locations decide which opportunities advance, and the material being judged is
+    written by a recruiter. A profile a request could name is a profile a message could name.
+    """
+    return Profile(tuple(args.skill), tuple(args.location or ["remote"]))
+
+
+def _gmail_reader(args):
+    """The read-only Gmail credential this launch holds, or None if it holds none.
+
+    Read authority and draft authority are separate grants, separately configured and
+    separately absent: this reads CAREERSIGNAL_GMAIL_TOKEN, never the compose token, so a
+    launch may legitimately be able to read a mailbox and not write to it, or the reverse.
+    The token comes from the environment only -- a command line is visible in shell history
+    and to other users of the machine.
+    """
+    token = os.getenv(TOKEN_VARIABLE, "")
+    if not token.strip() or not args.mailbox:
+        return None
+    return GmailReader(GmailCredentials(token, args.mailbox))
+
+
+def _intake_service(repository, args, reader=None):
+    """The one intake authority, built here where the adapters already live.
+
+    Constructed outside `system.web` for the same reason the outward service is: that package
+    imports no credential class and no provider, so what it can reach is what it was handed.
+    A launch with no `--skill` has no profile to judge anything against and therefore no
+    intake authority at all, which is a capability this returns None for rather than a
+    degraded mode to work around.
+    """
+    if not args.skill:
+        return None
+    return IntakeActions(repository, _intake_profile(args), reader or _gmail_reader(args))
 
 
 def _declared_identity(args, parser):
@@ -227,16 +278,29 @@ def main():
     parser.add_argument("--message", help="Local RFC email file, used only by ingest")
     parser.add_argument("--namespace", help="Stable mailbox/source identifier for ingest")
     parser.add_argument(
-        "--skill", action="append", help="Configured skill; repeat for multiple skills"
+        "--skill",
+        action="append",
+        help="Configured skill; repeat for multiple skills. Required by ingest and "
+        "gmail-ingest, and for serve it is what gives that launch intake authority at all: "
+        "without one there is no profile to score incoming material against, so the browser "
+        "is offered no intake control. A request may never supply one.",
     )
-    parser.add_argument("--location", action="append", help="Allowed location; defaults to remote")
+    parser.add_argument(
+        "--location",
+        action="append",
+        help="Allowed location; defaults to remote. Launch configuration exactly as --skill "
+        "is, for ingest, gmail-ingest and serve alike; a request may never supply one.",
+    )
     parser.add_argument(
         "--db", help="Database path; relative paths resolve from the current directory"
     )
     parser.add_argument(
         "--mailbox",
-        help="Authorized Gmail address. Used by gmail-ingest, and by approve/serve to "
-        "declare where an approval says a draft may go.",
+        help="Authorized Gmail address. Used by gmail-ingest, by approve/serve to "
+        "declare where an approval says a draft may go, and by serve to name the mailbox "
+        "Gmail intake would read -- which needs CAREERSIGNAL_GMAIL_TOKEN, the read grant, "
+        "and never the compose one. Whatever it is set to, the mailbox is proven against "
+        "the credential before a message is taken in.",
     )
     parser.add_argument("--query", help="Gmail search query, used only by gmail-ingest")
     parser.add_argument("--label", action="append", help="Gmail label id; repeat for multiple")
@@ -271,19 +335,19 @@ def main():
     if args.command == "ingest":
         if not args.message or not args.namespace or not args.skill:
             parser.error("ingest requires --message, --namespace, and at least one --skill")
+        # One byte past the ceiling, so an oversized file is refused by Message rather than
+        # read whole and then measured. The read stays here because choosing a local file is
+        # this command's own affordance: the service takes bytes, and no surface that is not
+        # a command line may name a path at all.
         with open(args.message, "rb") as stream:
-            message = Message.from_bytes(
-                stream.read(MAX_MESSAGE_BYTES + 1), namespace=args.namespace
-            )
+            raw = stream.read(MAX_MESSAGE_BYTES + 1)
         repository = Repository(path)
-        intake = Intake(repository, Profile(tuple(args.skill), tuple(args.location or ["remote"])))
-        result = {
-            "reviews": intake.intake_message(message),
-            "diagnostics": [
-                {"item": row[0], "reason": row[2], "review": row[4]}
-                for row in repository.extraction_evidence(message.key)
-            ],
-        }
+        record = _intake_service(repository, args).ingest_eml(raw, args.namespace)
+        # Exactly the two fields this command has always printed. The service reports more --
+        # the namespace, the message key, the provider id -- and adding them here would change
+        # an established contract for scripts that already read this output. The orchestration
+        # is shared; what each surface says about it is not.
+        result = {"reviews": record["reviews"], "diagnostics": record["diagnostics"]}
     elif args.command in {"opportunities", "opportunity"}:
         # Read-only. These commands never record a status, decide a review, create a draft
         # or contact a mailbox; they only report what is already stored.
@@ -417,27 +481,27 @@ def main():
             parser.error("gmail-ingest requires --mailbox and at least one --skill")
         reader = GmailReader(GmailCredentials(token, args.mailbox))
         # reader.identifiers()/fetch()/messages() already refuse to run against an
-        # unverified or mismatched mailbox identity on their own; this call is the same
-        # adapter-owned guarantee, invoked early so a mismatch is caught before Repository
-        # or Intake are even constructed rather than merely before the first message.
+        # unverified or mismatched mailbox identity on their own, and IntakeActions verifies
+        # again before it reads; this call is the same adapter-owned guarantee, invoked early
+        # so a mismatch is caught before Repository is constructed and its migrations run,
+        # rather than merely before the first message. Verification is cached on the reader,
+        # so asking here costs no second profile read.
         reader.verify_identity()
         repository = Repository(path)
-        intake = Intake(repository, Profile(tuple(args.skill), tuple(args.location or ["remote"])))
-        # Read the whole batch before writing anything: no write reservation may be held
-        # across a network call, and nothing here creates or sends a draft.
-        messages = reader.messages(
+        # The batch is read whole before the first local write, which is the service's
+        # contract rather than this command's arrangement of calls.
+        record = _intake_service(repository, args, reader).ingest_gmail(
             query=args.query or "", label_ids=tuple(args.label or ()), limit=args.limit
         )
+        # The three fields this command has always printed, and per message the same three.
+        # The service also reports extraction diagnostics; surfacing them here would widen an
+        # established contract, which this change is not for.
         result = {
-            "mailbox": reader.namespace,
-            "read": len(messages),
+            "mailbox": record["mailbox"],
+            "read": record["read"],
             "messages": [
-                {
-                    "external_id": message.external_id,
-                    "message": message.key,
-                    "reviews": intake.intake_message(message),
-                }
-                for message in messages
+                {key: message[key] for key in ("external_id", "message", "reviews")}
+                for message in record["messages"]
             ],
         }
     elif args.command == "serve":
@@ -463,12 +527,18 @@ def main():
         actions = (
             OutwardActions(repository, _outward_provider(args)) if _outward_possible(args) else None
         )
+        # Intake authority is separate again, and separately optional. It needs an evaluation
+        # profile, which is what `--skill` supplies; Gmail intake needs a read credential on
+        # top of that, which is a different grant from the compose one above. All three are
+        # decided here and the already-built service is handed over, so system.web imports no
+        # credential, constructs no reader, and cannot acquire either authority by asking.
         serve(
             repository,
             port=args.port,
             provider=provider,
             provider_namespace=namespace,
             actions=actions,
+            inbound=_intake_service(repository, args),
         )
         return
     elif args.command == "init":

@@ -48,8 +48,13 @@ print("status history verified from the installed wheel")
 # assets have to arrive as package resources, a read has to answer with the launch token,
 # and a write verb has to be refused. Locating assets beside __file__ passes every test in
 # the tree and fails exactly here, which is why this runs against the installed copy.
-WEB_CHECK = """
+#
+# A raw string, because the synthetic message below carries CRLF escapes that belong to
+# the generated script rather than to this one: without it they would be folded into real
+# line breaks here and arrive there as an unterminated literal.
+WEB_CHECK = r"""
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -57,7 +62,10 @@ from importlib import resources
 
 from data.repository import Repository
 from communications.controlled import ControlledDrafts
-from system.web.server import TOKEN_HEADER, Surface
+from communications.message import MAX_MESSAGE_BYTES
+from recruiting.models import Profile
+from system.intake import IntakeActions
+from system.web.server import NAMESPACE_HEADER, RFC822, TOKEN_HEADER, Surface
 from system.workflow import OutwardActions
 
 packaged = sorted(entry.name for entry in (resources.files("system.web") / "static").iterdir())
@@ -80,12 +88,15 @@ surface = Surface(
 threading.Thread(target=surface.serve_forever, daemon=True).start()
 
 
-def ask(path, method="GET", token=True, body=None, origin=True):
+def ask(path, method="GET", token=True, body=None, origin=True, media="application/json",
+        headers=()):
     request = urllib.request.Request(surface.origin + path, method=method, data=body)
     if token:
         request.add_header(TOKEN_HEADER, surface.token)
     if body is not None:
-        request.add_header("Content-Type", "application/json")
+        request.add_header("Content-Type", media)
+    for name, value in headers:
+        request.add_header(name, value)
     if origin:
         request.add_header("Origin", surface.origin)
     try:
@@ -246,6 +257,112 @@ status, body = ask(drafting, method="POST", body=b"{}")
 assert status == 200, (status, body)
 assert json.loads(body)["receipt"] == created["receipt"], body
 assert json.loads(ask("/api/v1/opportunities/" + chosen)[1])["action"]["draft"] == "confirmed"
+
+surface.shutdown()
+
+# Intake, from the installed wheel. A launch with no evaluation profile takes nothing in;
+# one with a profile takes a local message in with no Gmail credential of any kind in the
+# environment, which is the independence the two grants are supposed to have.
+WHEEL_MESSAGE = (
+    b"From: recruiter@example.com\r\nTo: operator@example.com\r\n"
+    b"Subject: A wheel-synthetic role\r\nMessage-ID: <wheel-intake@example.com>\r\n"
+    b'MIME-Version: 1.0\r\nContent-Type: text/plain; charset="utf-8"\r\n\r\n'
+    b"Title: Wheel Engineer\r\nCompany: Example Company\r\nLocation: remote\r\n"
+    b"Skills: python\r\nURL: https://jobs.example.com/wheel\r\n"
+)
+DECLARED = [(NAMESPACE_HEADER, "wheel:intake")]
+
+store = Repository("intake.db")
+surface = Surface(store, port=0)
+threading.Thread(target=surface.serve_forever, daemon=True).start()
+assert json.loads(ask("/api/v1/intake/sources")[1]) == {
+    "eml": {"available": False},
+    "gmail": {"available": False},
+    "profile": None,
+}, ask("/api/v1/intake/sources")[1]
+for address, body, media, headers in (
+    ("/api/v1/intake/eml", WHEEL_MESSAGE, RFC822, DECLARED),
+    ("/api/v1/intake/gmail", b"{}", "application/json", ()),
+):
+    status, refused = ask(address, method="POST", body=body, media=media, headers=headers)
+    assert status == 409, (address, status, refused)
+    assert json.loads(refused)["error"] == "intake_unavailable", refused
+assert json.loads(ask("/api/v1/communications")[1]) == [], "a refused intake still stored a message"
+surface.shutdown()
+
+# The same launch with a profile, and with no Gmail credential in the environment at all:
+# local intake needs neither grant, and asks for neither.
+for variable in ("CAREERSIGNAL_GMAIL_TOKEN", "CAREERSIGNAL_GMAIL_COMPOSE_TOKEN"):
+    os.environ.pop(variable, None)
+
+surface = Surface(store, port=0, inbound=IntakeActions(store, Profile(("python",))))
+threading.Thread(target=surface.serve_forever, daemon=True).start()
+
+found = json.loads(ask("/api/v1/intake/sources")[1])
+assert found["eml"]["available"] is True, found
+assert found["gmail"] == {"available": False}, found
+assert found["profile"] == {"skills": ["python"], "locations": ["remote"]}, found
+assert "token" not in json.dumps(found).casefold(), found
+
+status, body = ask(
+    "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822, headers=DECLARED
+)
+assert status == 200, (status, body)
+taken = json.loads(body)
+assert taken["source"] == "eml" and taken["namespace"] == "wheel:intake", taken
+assert len(taken["reviews"]) == 1, taken
+assert json.loads(ask("/api/v1/session")[1])["gmail_token"] is False
+
+# The opportunity really is there, through the projections the browser reads.
+listed = json.loads(ask("/api/v1/opportunities")[1])
+assert [row["title"] for row in listed] == ["Wheel Engineer"], listed
+assert [row["message"] for row in json.loads(ask("/api/v1/communications")[1])] == [
+    taken["message"]
+], taken
+
+# Taking the same message in again resolves to what already exists rather than duplicating it.
+status, again = ask(
+    "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822, headers=DECLARED
+)
+assert status == 200, (status, again)
+assert json.loads(again)["reviews"] == taken["reviews"], again
+assert len(json.loads(ask("/api/v1/communications")[1])) == 1
+
+# And the refusals: unusable material, a body over the ceiling, no declared source, and a
+# format this address does not accept.
+assert ask(
+    "/api/v1/intake/eml", method="POST", body=b"Subject: nothing\r\n\r\n", media=RFC822,
+    headers=DECLARED,
+)[0] == 400
+assert ask("/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822)[0] == 400
+assert ask(
+    "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822,
+    headers=[(NAMESPACE_HEADER, "   ")],
+)[0] == 400
+assert ask(
+    "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media="application/json",
+    headers=DECLARED,
+)[0] == 415
+# Declared rather than actually sent. The surface refuses on the declaration, before the
+# body is read, which is the property being checked -- and writing two megabytes at a server
+# that has already answered and closed would only prove which side notices first.
+assert ask(
+    "/api/v1/intake/eml",
+    method="POST",
+    body=b"x",
+    media=RFC822,
+    headers=[*DECLARED, ("Content-Length", str(MAX_MESSAGE_BYTES + 1))],
+)[0] == 413
+# Gmail without a read credential stays a launch-capability refusal, not a network attempt.
+assert ask("/api/v1/intake/gmail", method="POST", body=b"{}")[0] == 409
+# A request may not name a fact the launch owns. This launch has a profile, so the command is
+# parsed -- and refused for naming a field no request may carry.
+assert ask(
+    "/api/v1/intake/gmail", method="POST", body=b'{"skills": ["rust"]}'
+)[0] == 400, "a request named the evaluation profile and was not refused"
+assert ask("/api/v1/intake/eml", method="GET")[0] == 404
+# Nothing was added by any of those refusals.
+assert len(json.loads(ask("/api/v1/communications")[1])) == 1
 
 surface.shutdown()
 print("read surface and every command it answers verified from the installed wheel")

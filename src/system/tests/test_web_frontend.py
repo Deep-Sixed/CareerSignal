@@ -17,23 +17,33 @@ from pathlib import Path
 
 import pytest
 
+from communications.gmail import TOKEN_VARIABLE
+from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
 from recruiting.status import STATUSES
 from system import views
 
 STATIC = Path(__file__).resolve().parents[1] / "web" / "static"
 SCRIPTS = sorted(STATIC.glob("*.js"))
 # Every route the server actually has, as the first segment under /api/v1.
-ROUTES = ("session", "opportunities", "communications", "reviews", "timeline", "statuses")
+ROUTES = (
+    "session",
+    "opportunities",
+    "communications",
+    "reviews",
+    "timeline",
+    "statuses",
+    "intake",
+)
 # Sinks that parse a string as markup or as code. None may appear anywhere.
 SINKS = (
     "innerHTML",
+    "srcdoc",
     "outerHTML",
     "insertAdjacentHTML",
     "document.write",
     "eval(",
     "new Function",
     "setHTML",
-    "srcdoc",
     "javascript:",
 )
 # The one verb the frontend may send, and every verb it may not.
@@ -144,6 +154,10 @@ def test_exactly_one_command_is_sent_and_only_from_the_module_that_holds_the_cre
     `POST` is written once, in one file, in a helper with no method parameter -- so there
     is nothing a screen could hand a different verb to. A second command means a second
     function here, which means this number changes and a reader is made to notice.
+
+    PR 9 added a command whose body is a message rather than fields, and it did not move this
+    number: the media type and the body vary, the verb does not, and the JSON helper now
+    delegates to the same one. A media type is not an authority; a method is.
     """
     for path in SCRIPTS:
         body = code(path)
@@ -666,3 +680,178 @@ def test_a_launch_without_outward_authority_says_so_instead_of_offering_a_button
     action = region(body, "function outwardAction(", "\n}")
     assert "extra.outward" in action
     assert "records decisions only" in action
+
+
+# --- taking material in --------------------------------------------------------------------
+
+
+def test_the_intake_commands_are_addressed_to_the_routes_the_server_answers():
+    """Two more named functions in the file that holds the credential.
+
+    `test_exactly_one_command_is_sent_...` above still holds: all six commands share one
+    `deliver`, so the verb is written once and there is nothing a screen could hand a
+    different one to. What grows is the number of named functions, which is the shape that
+    makes a reader notice a command being added.
+    """
+    body = code(STATIC / "api.js")
+    assert "/intake/eml`" in body and "/intake/gmail`" in body
+    assert "intakeSources:" in body and "ingestEml:" in body and "ingestGmail:" in body
+    # The message is sent as a message. Nothing wraps it to fit the JSON helper.
+    assert "message/rfc822" in body
+    assert "X-CareerSignal-Namespace" in body
+
+
+def test_the_message_is_sent_as_bytes_and_never_as_a_path():
+    """The browser reads the file it was given; the server resolves no names.
+
+    A path would be an instruction to open something, and a surface that opened what a page
+    named would be reading the operator's disk on a page's say-so.
+    """
+    screens = code(STATIC / "screens.js")
+    assert "arrayBuffer()" in screens, "the chosen file is no longer read as bytes"
+    chosen = region(screens, "function emlControls(", "\nfunction gmailControls(")
+    # The filename is a convenience in the picker and is never read, sent or stored: it is a
+    # value the operator's filesystem supplied, and provenance is what they declared instead.
+    assert not re.search(r"\.name\b", chosen), "the chosen file's name is read"
+    for named in ("webkitRelativePath", "FileReader", "readAsText", "chooser.value"):
+        assert named not in chosen, named
+    # And no path reaches the request: the namespace and the bytes are the whole of it.
+    assert "actions.importEml(namespace.value, await chosen.arrayBuffer())" in chosen
+
+
+def test_the_browser_parses_nothing_it_uploads():
+    """No parser, no preview, no inspection of what is inside the message.
+
+    The intake UI is not an email client. Deciding whether a message looks like a job is the
+    extractor's answer, and a preview is the one place recruiter markup would find a parser on
+    the origin that holds the launch credential.
+    """
+    screens = code(STATIC / "screens.js")
+    section = region(screens, "function emlControls(", "\nfunction gmailControls(")
+    for absent in ("DOMParser", "TextDecoder", "atob", "decodeURIComponent", "split(", "match("):
+        assert absent not in section, f"the intake control reaches {absent}"
+    for absent in ("iframe", "preview", "innerHTML", "srcdoc"):
+        assert absent not in screens.lower(), f"screens.js names {absent}"
+
+
+def test_the_intake_controls_are_offered_only_where_the_server_says_they_can_operate():
+    """Decided by the discovery answer alone.
+
+    Inferring Gmail intake from anything else -- a compose credential, a read token in the
+    session facts, a declared mailbox -- would offer a control backed by a different grant, or
+    by no grant at all.
+    """
+    screens = code(STATIC / "screens.js")
+    section = region(screens, "export function intakeSection(", "\nfunction filtered(")
+    assert "state.sources.eml.available" in section
+    assert "state.sources.gmail.available" in section
+    for inferred in ("outward", "gmail_token", "gmail_compose_token", "target"):
+        assert inferred not in section, f"the intake controls infer availability from {inferred}"
+    # A launch with no profile is told so rather than shown controls that must refuse.
+    assert "!state.sources" in section
+
+
+def test_an_unavailable_gmail_source_is_explained_rather_than_offered():
+    screens = code(STATIC / "screens.js")
+    copy = region(screens, "const INTAKE_COPY = {", "\n};")
+    assert "gmailAbsent:" in copy
+    absent = region(copy, "gmailAbsent:", "profileLabel:")
+    assert "CAREERSIGNAL_GMAIL_TOKEN" in absent
+    # And it says plainly that the compose credential is a different grant, because an
+    # operator who has one will otherwise assume intake should already work.
+    assert "different grant" in absent
+
+
+@pytest.mark.parametrize("command", ["importEml", "importGmail"])
+def test_the_browser_re_reads_after_taking_material_in(command):
+    """New evidence moves more than a decision does, so more is re-read.
+
+    A message can create an opportunity, produce a new current review and make an approval
+    stale. Which of those happened is the engine's answer; a browser that patched its own rows
+    would be deciding it a second time, differently.
+    """
+    body = code(STATIC / "app.js")
+    section = region(body, f"  {command}(", "\n  },")
+    assert "await reloadAll()" in section, "intake no longer re-reads"
+    assert "state.intake = {" in section
+    for patched in ("state.opportunities[", "state.communications.push", "row.presentation"):
+        assert patched not in section, f"intake patches {patched} locally"
+    # And reloadAll re-reads the Inbox as well as everything reload() already covered.
+    whole = region(body, "async function reloadAll()", "\n}")
+    assert "api.communications()" in whole and "await reload()" in whole
+
+
+def test_nothing_retries_an_import():
+    """A repeat has to be the operator pressing the button again."""
+    body = code(STATIC / "app.js")
+    for command in ("importEml", "importGmail"):
+        section = region(body, f"  {command}(", "\n  },")
+        for absent in ("setTimeout", "setInterval", "while", "for ("):
+            assert absent not in section, f"{command} contains {absent}"
+        assert section.count("api.ingest") == 1, f"{command} sends more than once"
+
+
+def test_the_browser_never_names_the_profile_it_is_judged_against():
+    """No script assembles skills, locations or a threshold into a request.
+
+    There is no request shape with a place for one, and the way to keep it that way is for no
+    script to spell the fields at all.
+    """
+    for path in SCRIPTS:
+        body = without_declarations(code(path))
+        for field in ("skills:", "locations:", "threshold", "coverage:", "eligibility"):
+            assert field not in body, f"{path.name} assembles {field}"
+    # The panel displays the launch profile it was told about, and that is a read.
+    screens = code(STATIC / "screens.js")
+    assert "state.sources.profile.skills" in screens
+
+
+def test_the_intake_report_repeats_the_servers_words_rather_than_judging_them():
+    """Counts, ids and diagnostics are facts the server reported.
+
+    A browser that summarised them -- "looks like 2 good matches" -- would be a second
+    extractor with a gentler vocabulary, and an operator has no way to tell a summary from a
+    result.
+    """
+    screens = code(STATIC / "screens.js")
+    report = region(screens, "function intakeReport(", "\nexport function intakeSection(")
+    for field in ("answer.messages", "one.reviews", "found.reason", "answer.read"):
+        assert field in report, field
+    for judged in ("advances", "eligible", "score", "coverage", "matched"):
+        assert judged not in report, f"the report decides {judged}"
+
+
+# Read from the modules that own them rather than spelled out here, so a renamed variable
+# cannot leave this check quietly looking for a name nothing uses any more.
+CREDENTIALS = (TOKEN_VARIABLE, COMPOSE_TOKEN_VARIABLE, "Bearer ", "ya29.", "access" + "_token")
+
+
+def test_the_page_does_not_claim_to_be_read_only():
+    """The empty detail pane greeted the operator with a claim this surface outgrew.
+
+    It said approving, recording a status and creating a draft stay on the command line, which
+    stopped being true in PR 7 and PR 8 and now sits beside an Import control. Copy an operator
+    reads is a claim CareerSignal is making, and a false one teaches them to distrust the rest.
+    """
+    body = code(STATIC / "screens.js")
+    for claimed in ("only reads", "read-only surface", "stay on the command line"):
+        assert claimed not in body, f"the page claims: {claimed}"
+    # What is still true, and is the one promise this product is built around.
+    assert "Nothing here is ever sent" in body
+
+
+def test_no_shipped_asset_carries_anything_that_looks_like_a_credential():
+    """The page is served to a browser, so anything compiled into it is on disk, in the wheel,
+    and in every copy of the repository.
+
+    The one permitted mention is the read variable's *name*, in the sentence that tells an
+    operator which credential a launch is missing. A name is not a value, it is already in the
+    documentation, and withholding it would leave the operator with a control that is absent
+    and no way to find out why.
+    """
+    for path in sorted(STATIC.iterdir()):
+        body = path.read_text(encoding="utf-8")
+        for named in CREDENTIALS:
+            if path.name == "screens.js" and named == TOKEN_VARIABLE:
+                continue
+            assert named not in body, f"{path.name} names {named}"

@@ -845,6 +845,216 @@ function evidence(items) {
   }));
 }
 
+/* --- taking material in ---------------------------------------------------------------------- */
+
+/* Display copy for the intake panel, and the whole of what this file says about intake.
+ *
+ * Every sentence here describes what the *operator* is doing -- choosing a file, declaring
+ * where it came from, bounding a mailbox read. None of it describes what CareerSignal will
+ * make of the material: whether a message names a job, which skills it matched, whether an
+ * opportunity advances and what a diagnostic means are all the engine's answers, and they
+ * arrive already decided. A browser that summarised them would be a second extractor with a
+ * gentler vocabulary.
+ */
+const INTAKE_COPY = {
+  heading: "Take a message in",
+  none:
+    "This launch takes nothing in. Start CareerSignal with at least one --skill so there is " +
+    "an evaluation profile to score incoming messages against.",
+  emlTitle: "From a local message file",
+  emlNote:
+    "The file is read here and its bytes are sent as they are. The source you name below is " +
+    "provenance you are declaring — it is not verified, and it is deliberately not taken " +
+    "from the filename, the sender or the subject, because a message must not name its own " +
+    "source.",
+  namespaceLabel: "Source (declared)",
+  namespacePlaceholder: "archive:2019-exports",
+  fileLabel: "Message file",
+  emlAction: "Import EML",
+  noFile: "Choose a .eml file first.",
+  noNamespace: "Name the source this message came from first.",
+  gmailTitle: "From the authorized mailbox",
+  gmailNote:
+    "Read-only, bounded, and only when you press this. The mailbox is proven against the " +
+    "credential before anything is taken in; nothing is sent, labelled, modified or marked " +
+    "read, and CareerSignal never watches or polls a mailbox.",
+  queryLabel: "Gmail search",
+  labelsLabel: "Label ids (comma separated)",
+  limitLabel: "Most messages to read",
+  gmailAction: "Import Gmail",
+  gmailAbsent:
+    "Gmail intake is not configured for this launch. It needs a read credential in " +
+    "CAREERSIGNAL_GMAIL_TOKEN and a --mailbox; the compose credential that creates drafts is " +
+    "a different grant and does not enable it.",
+  profileLabel: "Scored against",
+  profileNote:
+    "Launch configuration. It cannot be changed from this page, and no message can change it.",
+};
+
+function field(labelText, control) {
+  const holder = el("label", "intake-field");
+  put(holder, el("span", "intake-label", labelText), control);
+  return holder;
+}
+
+function entry(value, placeholder = "") {
+  const control = el("input", "intake-input");
+  control.type = "text";
+  control.value = String(value ?? "");
+  if (placeholder) {
+    control.placeholder = placeholder;
+  }
+  return control;
+}
+
+function emlControls(state, actions) {
+  /* The file is read in the browser and sent as bytes. No path is ever submitted: the server
+   * resolves no names and opens no files, so there is nothing for a path to point at. */
+  const namespace = entry(state.intakeForm.namespace, INTAKE_COPY.namespacePlaceholder);
+  const chooser = el("input", "intake-file");
+  chooser.type = "file";
+  chooser.accept = ".eml,message/rfc822";
+  const refusal = el("p", "intake-note");
+  const action = button("intake-action", async () => {
+    const chosen = chooser.files && chooser.files[0];
+    actions.setIntakeForm({ namespace: namespace.value });
+    if (!namespace.value.trim()) {
+      return text(refusal, INTAKE_COPY.noNamespace);
+    }
+    if (!chosen) {
+      return text(refusal, INTAKE_COPY.noFile);
+    }
+    /* Read, not parsed. Nothing here looks at what is inside. */
+    actions.importEml(namespace.value, await chosen.arrayBuffer());
+  });
+  text(action, INTAKE_COPY.emlAction);
+  return put(
+    el("div", "intake-source"),
+    el("h4", "intake-source-title", INTAKE_COPY.emlTitle),
+    el("p", "intake-note", INTAKE_COPY.emlNote),
+    field(INTAKE_COPY.namespaceLabel, namespace),
+    field(INTAKE_COPY.fileLabel, chooser),
+    action,
+    refusal,
+  );
+}
+
+function gmailControls(state, actions) {
+  const query = entry(state.intakeForm.query);
+  const labels = entry(state.intakeForm.labels);
+  const limit = el("input", "intake-input");
+  limit.type = "number";
+  limit.min = "1";
+  limit.max = "100";
+  limit.value = String(state.intakeForm.limit);
+  const action = button("intake-action", () => {
+    const named = labels.value
+      .split(",")
+      .map((one) => one.trim())
+      .filter(Boolean);
+    const bounds = { query: query.value, labels: named, limit: Number(limit.value) };
+    actions.setIntakeForm({ query: query.value, labels: labels.value, limit: bounds.limit });
+    actions.importGmail(bounds);
+  });
+  text(action, INTAKE_COPY.gmailAction);
+  return put(
+    el("div", "intake-source"),
+    el("h4", "intake-source-title", INTAKE_COPY.gmailTitle),
+    el("p", "intake-note", INTAKE_COPY.gmailNote),
+    field(INTAKE_COPY.queryLabel, query),
+    field(INTAKE_COPY.labelsLabel, labels),
+    field(INTAKE_COPY.limitLabel, limit),
+    action,
+  );
+}
+
+function intakeReport(report) {
+  /* The server's own account of what happened, repeated rather than interpreted.
+   *
+   * Message identifiers, review ids, how many messages were read and what the extractor could
+   * not use are all facts it reported. Nothing here summarises them into a verdict, and
+   * nothing renders the message: there is no preview, because a preview is the one place
+   * recruiter markup would have a parser to reach.
+   */
+  const block = el("div", "intake-report");
+  if (!report.ok) {
+    put(block, el("p", "intake-refusal", report.report.detail || report.report.error));
+    return block;
+  }
+  const answer = report.report;
+  const taken = answer.messages || [answer];
+  put(
+    block,
+    el(
+      "p",
+      "intake-note",
+      answer.mailbox
+        ? "Read " + answer.read + " from " + answer.mailbox
+        : "Taken in under " + answer.namespace,
+    ),
+  );
+  for (const one of taken) {
+    const entryBlock = el("div", "intake-taken");
+    put(
+      entryBlock,
+      definitions([
+        ["message", shorten(one.message, 20)],
+        ["provider id", one.external_id],
+        ["reviews", one.reviews.length ? one.reviews.map(shorten).join(", ") : "none"],
+      ]),
+    );
+    for (const found of one.diagnostics || []) {
+      if (found.reason) {
+        put(entryBlock, el("p", "intake-diagnostic", "item " + found.item + ": " + found.reason));
+      }
+    }
+    put(block, entryBlock);
+  }
+  return block;
+}
+
+export function intakeSection(state, actions) {
+  /* Offered only where it can operate.
+   *
+   * Which controls exist is decided by `/intake/sources` and by nothing else -- not by whether
+   * a compose credential is configured, not by whether a read token appears in the session
+   * facts. Those are different grants, and a control that could only ever refuse teaches the
+   * operator to ignore refusals.
+   */
+  const holder = el("div", "intake");
+  put(holder, el("h3", "intake-title", INTAKE_COPY.heading));
+  if (!state.sources || !state.sources.eml.available) {
+    put(holder, el("p", "intake-note", INTAKE_COPY.none));
+    return holder;
+  }
+  put(
+    holder,
+    definitions(
+      [
+        [INTAKE_COPY.profileLabel, state.sources.profile.skills.join(", ")],
+        ["Locations", state.sources.profile.locations.join(", ")],
+      ],
+      "facts intake-profile",
+    ),
+    el("p", "intake-note", INTAKE_COPY.profileNote),
+    emlControls(state, actions),
+  );
+  put(
+    holder,
+    state.sources.gmail.available
+      ? gmailControls(state, actions)
+      : put(
+          el("div", "intake-source"),
+          el("h4", "intake-source-title", INTAKE_COPY.gmailTitle),
+          el("p", "intake-note", INTAKE_COPY.gmailAbsent),
+        ),
+  );
+  if (state.intake) {
+    put(holder, intakeReport(state.intake));
+  }
+  return holder;
+}
+
 /* --- assembly -------------------------------------------------------------------------------- */
 
 function filtered(state) {
@@ -871,7 +1081,10 @@ export const SCREENS = {
     title: "Dashboard",
     subtitle: "Every count is derived from status history, decisions and draft intents.",
   },
-  inbox: { title: "Inbox", subtitle: "Recruiting messages as ingested. Read-only evidence." },
+  inbox: {
+    title: "Inbox",
+    subtitle: "Recruiting messages as ingested, and where new ones are taken in.",
+  },
   opportunities: {
     title: "Opportunities",
     subtitle: "One row per opportunity; the review is evidence about it.",
@@ -930,8 +1143,8 @@ export function detailFor(state, actions) {
       el(
         "p",
         null,
-        "Choose a row to read what CareerSignal stored about it. This surface only reads: " +
-          "approving, recording a status and creating a draft stay on the command line.",
+        "Choose a row to read what CareerSignal stored about it. Nothing here is ever sent: " +
+          "a draft is created in the destination mailbox and you send it yourself.",
       ),
     );
   }
@@ -943,6 +1156,13 @@ export function detailFor(state, actions) {
 
 export function controlsFor(state, actions) {
   const holder = clear(document.getElementById("list-controls"));
+  if (state.screen === "inbox") {
+    /* Inbox is where messages are read, so it is where they are taken in. One clearly
+     * separated section, above the messages it will add to. */
+    holder.hidden = false;
+    put(holder, intakeSection(state, actions));
+    return;
+  }
   if (state.screen !== "opportunities") {
     holder.hidden = true;
     return;
