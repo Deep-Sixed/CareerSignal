@@ -929,6 +929,47 @@ def test_there_is_no_generic_intake_address(client, repository, address):
 # --- one intake, two surfaces ----------------------------------------------------------------
 
 
+# When a row was written, which two intakes a second apart legitimately disagree about. It is
+# not part of what either surface *made* of the message, which is what parity is a claim about
+# -- and comparing it turned an assertion about behaviour into one about how fast a runner is.
+CLOCK = ("status_changed_at", "created_at")
+
+
+def without_clock(value):
+    """The same structure with every clock reading removed, at any depth.
+
+    Recursive because the timestamps are not all at the top: `status_changed_at` is on an
+    opportunity row and `created_at` is on each history entry inside its detail. A shallow
+    strip would pass the list comparison and leave the detail comparison time-sensitive, which
+    is the more valuable of the two.
+    """
+    if isinstance(value, dict):
+        return {k: without_clock(v) for k, v in value.items() if k not in CLOCK}
+    if isinstance(value, list):
+        return [without_clock(item) for item in value]
+    return value
+
+
+def test_the_clock_is_the_only_thing_parity_ignores(repository):
+    """A guard on the guard: `without_clock` must actually be removing something.
+
+    If a timestamp were renamed, the helper would quietly strip nothing, the parity test would
+    go back to comparing wall-clock seconds, and it would fail on a slow runner again -- having
+    looked like it was fixed. So the fields it drops are asserted to exist, and everything else
+    is asserted to survive.
+    """
+    service(repository).ingest_eml(eml(), NAMESPACE)
+    row = repository.opportunities()[0]
+    detail = repository.opportunity(row["id"])
+    assert "status_changed_at" in row, "the row no longer carries the field parity ignores"
+    assert "created_at" in detail["history"][0], "history no longer carries its timestamp"
+    assert set(without_clock(row)) == set(row) - {"status_changed_at"}
+    assert set(without_clock(detail)["history"][0]) == set(detail["history"][0]) - {"created_at"}
+    # And nothing else is lost: the fields that say what intake decided all survive.
+    for named in ("coverage", "advances", "eligible", "review", "status", "status_event"):
+        assert without_clock(row)[named] == row[named]
+
+
 def test_the_browser_and_the_command_line_take_the_same_message_in_identically(
     launch, tmp_path, monkeypatch, capsys
 ):
@@ -972,10 +1013,15 @@ def test_the_browser_and_the_command_line_take_the_same_message_in_identically(
 
     assert printed["reviews"] == record["reviews"]
     assert printed["diagnostics"] == record["diagnostics"]
-    assert through_terminal.opportunities() == through_browser.opportunities()
+    assert without_clock(through_terminal.opportunities()) == without_clock(
+        through_browser.opportunities()
+    )
+    # Nothing in the communications projection is a clock reading, so it is compared whole.
     assert through_terminal.communications() == through_browser.communications()
     for row in through_browser.opportunities():
-        assert through_terminal.opportunity(row["id"]) == through_browser.opportunity(row["id"])
+        assert without_clock(through_terminal.opportunity(row["id"])) == without_clock(
+            through_browser.opportunity(row["id"])
+        )
 
 
 def test_the_command_line_still_prints_exactly_the_fields_it_always_printed(
