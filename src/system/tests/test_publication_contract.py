@@ -1245,6 +1245,7 @@ ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "README.md"
 FROZEN_RENDERS = "docs/ui-design/renders/"
 FRONT_PAGE_SCREENSHOT = "docs/screenshots/dashboard.png"
+PNG = b"\x89PNG\r\n\x1a\n"
 IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)")
 
 
@@ -1296,7 +1297,23 @@ def test_the_screenshot_directory_says_what_it_is_and_is_not():
     assert "running application" in notes.casefold()
 
 
-def test_the_frozen_design_baseline_is_byte_for_byte_unchanged():
+def as_committed(path):
+    """The bytes git holds for this file, whatever the checkout made of them.
+
+    Git rewrites line endings in text files on a Windows checkout, so a `.dc.html` frozen
+    artifact is genuinely CRLF on disk there while `SHA256SUMS` records the LF bytes that
+    were committed. That is a checkout detail, not an edit, and a guard that could not tell
+    the two apart failed the whole matrix on this PR's first head.
+
+    Binaries are returned untouched. Git does not convert them, the renders really are
+    identical everywhere, and folding anything inside a PNG would break the one comparison
+    that has to stay exact: a re-exported render is precisely what this test is for.
+    """
+    raw = path.read_bytes()
+    return raw if raw.startswith(PNG) else raw.replace(b"\r\n", b"\n")
+
+
+def test_the_frozen_design_baseline_is_unchanged():
     """The one thing this change must not have touched.
 
     `docs/ui-design/SHA256SUMS` is the baseline's own record of what was accepted. Verifying
@@ -1310,6 +1327,44 @@ def test_the_frozen_design_baseline_is_byte_for_byte_unchanged():
         if line.strip()
     ]
     assert len(recorded) == 8, recorded
+    assert sum(1 for _, name in recorded if name.strip().startswith("renders/")) == 5
     for digest, name in recorded:
-        found = hashlib.sha256((baseline / name.strip()).read_bytes()).hexdigest()
+        found = hashlib.sha256(as_committed(baseline / name.strip())).hexdigest()
         assert found == digest, f"{name.strip()} no longer matches the accepted baseline"
+
+
+def test_a_windows_checkout_of_the_baseline_still_verifies(tmp_path):
+    """The failure that taught this, pinned as behaviour rather than as a comment.
+
+    A frozen artifact rewritten to CRLF -- which is exactly what a Windows clone holds -- is
+    the same artifact and must still verify. One with a character changed is not, and must
+    still fail, or normalising would have bought the green at the cost of the guard.
+    """
+    source = ROOT / "docs" / "ui-design" / "CareerSignal-Mock.dc.html"
+    recorded = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    windows = tmp_path / "CareerSignal-Mock.dc.html"
+    windows.write_bytes(source.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert windows.read_bytes() != source.read_bytes(), "the CRLF copy is identical; no test here"
+    assert hashlib.sha256(as_committed(windows)).hexdigest() == recorded
+
+    edited = tmp_path / "edited.dc.html"
+    edited.write_bytes(source.read_bytes().replace(b"CareerSignal", b"CareerSignaI", 1))
+    assert hashlib.sha256(as_committed(edited)).hexdigest() != recorded
+
+
+def test_a_re_exported_render_is_still_caught_exactly(tmp_path):
+    """Renders are compared raw, so the normalisation above cannot soften them.
+
+    A PNG that happens to contain the CRLF byte pair -- and one of these does -- would have
+    its content altered by folding, which would both break this comparison and hide a real
+    re-export behind it.
+    """
+    source = ROOT / "docs" / "ui-design" / "renders" / "dashboard.png"
+    raw = source.read_bytes()
+    assert b"\r\n" in raw, "no CRLF pair in this render; pick one that has it"
+    assert as_committed(source) == raw, "a render was normalised; the comparison is no longer exact"
+
+    nudged = tmp_path / "dashboard.png"
+    nudged.write_bytes(raw[:-1] + bytes([raw[-1] ^ 0x01]))
+    assert hashlib.sha256(as_committed(nudged)).hexdigest() != hashlib.sha256(raw).hexdigest()
