@@ -7,9 +7,9 @@ against a real SQLite database, at 1280×840. The pipeline counts, the work queu
 activity entries and the session panel are what that build actually rendered — not a design
 comp, not an edited image, and not a promise about a version that does not exist yet.
 
-**Every value in it is synthetic.** The database was built by running the shipped commands —
-`ingest`, `status`, `approve`, `reject`, `draft` — over invented recruiting alerts. The
-companies are fictional, every address and URL uses an RFC 2606 reserved domain, the
+**Every recruiting value in it is synthetic.** The database was built by running the shipped
+commands — `ingest`, `status`, `approve`, `reject`, `draft` — over invented recruiting alerts.
+The companies are fictional, every address and URL uses an RFC 2606 reserved domain, the
 provider is the local controlled one, and both Gmail credentials read `absent` because
 neither was configured. Nothing here came from anybody's mailbox.
 
