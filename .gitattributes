@@ -1,0 +1,21 @@
+# How git must materialise this tree, on every platform.
+#
+# `docs/ui-design/SHA256SUMS` records the bytes that were accepted, and those digests are of
+# the committed form, which is LF. With no rule here, git on Windows checks text files out as
+# CRLF under the default `core.autocrlf=true`, and `sha256sum -c SHA256SUMS` then reports the
+# frozen design baseline as corrupt in a clone where nobody has edited anything. That is a
+# checkout artefact reported as tampering: loud, wrong, and the fastest way to teach a reader
+# to distrust an integrity gate rather than the tree it guards.
+#
+# `eol=lf` is what makes this a guarantee rather than a preference. `text=auto` on its own
+# still defers to whatever `core.autocrlf` the client has set; `eol=lf` overrides it, so the
+# working tree matches the index everywhere and the recorded digests are checkable from any
+# clone with nothing but `sha256sum`.
+* text=auto eol=lf
+
+# The reviewed binaries: five frozen design renders and one product screenshot. Git decides
+# text-or-binary by looking for a NUL byte near the start of the file, and every PNG has one,
+# so this line changes nothing today -- it is here to stop that from being a heuristic. A
+# render re-encoded by a checkout would fail `verify_tree`'s exact byte comparison with no
+# edit behind it, which is the same false alarm as above wearing different clothes.
+*.png binary

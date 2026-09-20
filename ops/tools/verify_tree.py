@@ -16,7 +16,17 @@ ALLOWED_IMPORTS = {
 DATABASE_ENGINES = {"sqlite3", "libsql", "turso", "pysqlite3"}
 DATABASE_OWNER = "src/data/store.py"
 EXCLUDED = {".git", ".venv", ".pytest_cache", ".ruff_cache", "__pycache__", "dist", "build", "var"}
-ROOT_FILES = {"README.md", "AGENTS.md", "pyproject.toml", "uv.lock", ".gitignore"}
+ROOT_FILES = {
+    "README.md",
+    "AGENTS.md",
+    "pyproject.toml",
+    "uv.lock",
+    ".gitignore",
+    # How git must materialise the tree. It is owned here rather than tolerated because
+    # it is what makes `sha256sum -c docs/ui-design/SHA256SUMS` answer the same on every
+    # platform, which is a publication guarantee rather than an editor preference.
+    ".gitattributes",
+}
 # RFC 2606 reserves these names, and the .example top-level domain, for documentation and
 # synthetic fixtures. A subdomain of a reserved name is reserved with it, so a fixture may
 # say alerts@jobs.example.com without that being a real address anyone can receive mail at.
