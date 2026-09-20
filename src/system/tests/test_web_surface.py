@@ -1518,19 +1518,43 @@ def test_a_command_refuses_a_query_string(client, repository, opportunity):
 def test_the_command_refuses_before_reading_the_body_in_the_order_that_matters(
     client, repository, opportunity
 ):
-    """Host, then Origin, then token -- each settled before a byte of the body is parsed.
+    """Host, then Origin, then token -- each settled before a byte of the body is read.
 
-    Proved by sending a body that would itself be a 400: whichever provenance check is
-    reached first must answer instead, which is only true if the body is never looked at.
+    The earlier version of this sent the malformed body every time, and that proves the
+    weaker property. A server that read the whole body into memory and only then checked
+    Host, Origin and token would have passed it: transmitting the bytes establishes that
+    they were not *parsed* before provenance, not that they were never *read*.
+
+    So the three refusals declare a body and send none. Each must still answer, which it
+    can only do without reading -- a server that reached for those bytes would wait for
+    them until the client timed out. The final request then sends the same body with
+    provenance in order, and must read it to find the malformed JSON, so the pair
+    distinguishes "refused without reading" from "refused after reading".
+
+    It also removes the last instance of the unread-body reset race from this file.
     """
     nonsense = b"{not json at all"
     address = f"/api/v1/opportunities/{opportunity}/status"
-    common = {"method": "POST", "content_type": "application/json", "body": nonsense}
-    assert client.send(address, host="evil.example.com", origin=True, **common)[0] == 403
-    assert client.send(address, origin=False, **common)[0] == 403
-    assert client.send(address, origin=True, token=False, **common)[0] == 401
-    # With provenance in order, the same body is finally read -- and refused.
-    assert client.send(address, origin=True, **common)[0] == 400
+    refused = {
+        "method": "POST",
+        "content_type": "application/json",
+        "body": nonsense,
+        "transmit": False,
+    }
+    assert client.send(address, host="evil.example.com", origin=True, **refused)[0] == 403
+    assert client.send(address, origin=False, **refused)[0] == 403
+    assert client.send(address, origin=True, token=False, **refused)[0] == 401
+    # Provenance in order, so the body finally arrives, is read, and is refused for itself.
+    assert (
+        client.send(
+            address,
+            method="POST",
+            content_type="application/json",
+            body=nonsense,
+            origin=True,
+        )[0]
+        == 400
+    )
 
 
 def test_the_status_vocabulary_is_served_rather_than_copied(client, repository):
