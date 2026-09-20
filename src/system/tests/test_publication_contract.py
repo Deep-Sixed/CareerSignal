@@ -26,6 +26,8 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1465,3 +1467,122 @@ def test_a_re_exported_render_is_still_caught_exactly(tmp_path):
     nudged = tmp_path / "dashboard.png"
     nudged.write_bytes(raw[:-1] + bytes([raw[-1] ^ 0x01]))
     assert hashlib.sha256(as_committed(nudged)).hexdigest() != hashlib.sha256(raw).hexdigest()
+
+
+# --- the checkout contract -----------------------------------------------------------------
+#
+# Everything above compares bytes this process read off the disk. What put them there is git,
+# and on Windows git rewrites text files as it writes them out. That is why these live here:
+# the frozen baseline's integrity claim is only as good as the checkout that materialised it.
+
+GITATTRIBUTES = ROOT / ".gitattributes"
+FROZEN_TEXT = "CareerSignal-Mock.dc.html"
+
+
+def declared_rules():
+    """The rules `.gitattributes` states, with comments and blank lines dropped."""
+    lines = [
+        line.strip()
+        for line in GITATTRIBUTES.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert lines, "the checkout contract declares no rules"
+    return lines
+
+
+def test_the_checkout_contract_pins_both_line_endings_and_binaries():
+    """Two rules, and `eol=lf` is the load-bearing half.
+
+    `text=auto` alone normalises what git *stores* and then defers to the client's
+    `core.autocrlf` for what it *writes out*, which is exactly the case that broke the
+    baseline check. `eol=lf` is what makes the working tree match the index everywhere.
+    """
+    rules = declared_rules()
+    assert "* text=auto eol=lf" in rules, f"line endings are not pinned to LF: {rules}"
+    assert "*.png binary" in rules, f"the reviewed binaries are not declared: {rules}"
+
+
+def git_roundtrip(git, workspace, sources, autocrlf, attributes):
+    """Commit `sources` into a fresh repository and read back what a checkout materialises.
+
+    The repository is built rather than cloned because the question is what git *writes*,
+    and the only honest way to ask it is to let git write.
+    """
+    workspace.mkdir()
+    run = lambda *args: subprocess.run(  # noqa: E731 - one call shape, used four times
+        [git, "-C", str(workspace), *args], check=True, capture_output=True
+    )
+    run("init", "-q", "-b", "main")
+    run("config", "core.autocrlf", autocrlf)
+    run("config", "user.email", "verification@example.com")
+    run("config", "user.name", "CareerSignal verification")
+    if attributes is not None:
+        (workspace / ".gitattributes").write_bytes(attributes)
+    for name, raw in sources.items():
+        (workspace / name).write_bytes(raw)
+    run("add", "-A")
+    run("commit", "-q", "-m", "baseline")
+
+    # Delete and restore, so the bytes on disk are ones git wrote under these settings
+    # rather than the ones handed to it.
+    for name in sources:
+        (workspace / name).unlink()
+    run("checkout", "--", ".")
+    return {name: (workspace / name).read_bytes() for name in sources}
+
+
+def test_a_windows_clone_verifies_the_frozen_baseline(tmp_path):
+    """The carried defect, closed and proved against real git rather than a simulation.
+
+    `sha256sum -c docs/ui-design/SHA256SUMS` did not verify in a Windows clone: git checks
+    text out as CRLF there by default, the digests record the committed LF form, and every
+    frozen artifact reported as modified in a tree nobody had touched. The guards above
+    worked around it by folding line endings before comparing; this closes it at the layer
+    that caused it, so the plain shell command answers correctly too.
+
+    The control is the point. Without `.gitattributes`, the same round trip under the same
+    setting must produce bytes that do NOT verify -- otherwise this platform is not
+    reproducing the situation and the passing half proves nothing about it.
+    """
+    # Required rather than skipped. These tests ship only in the source tree, which is
+    # obtained by cloning, so an environment running them without git is one that cannot
+    # have this repository in the first place. A skip here would read as a pass while
+    # proving nothing about the one platform the contract exists for -- and a green cell
+    # that silently covered nothing is worse than a red one.
+    git = shutil.which("git")
+    assert git, "git is not on PATH, so the claim this test makes cannot be observed"
+
+    baseline = ROOT / "docs" / "ui-design"
+    sources = {
+        FROZEN_TEXT: (baseline / FROZEN_TEXT).read_bytes(),
+        "dashboard.png": (baseline / "renders" / "dashboard.png").read_bytes(),
+    }
+    recorded = {
+        FROZEN_TEXT: recorded_digest(FROZEN_TEXT),
+        "dashboard.png": recorded_digest("renders/dashboard.png"),
+    }
+    attributes = GITATTRIBUTES.read_bytes()
+
+    # Windows' default. Without the contract it rewrites text on the way out.
+    bare = git_roundtrip(git, tmp_path / "bare", sources, "true", attributes=None)
+    assert hashlib.sha256(bare[FROZEN_TEXT]).hexdigest() != recorded[FROZEN_TEXT], (
+        "this platform did not convert line endings, so the control proves nothing"
+    )
+    assert b"\r\n" in bare[FROZEN_TEXT]
+    # A binary is left alone even with no rule, which is why the PNG half of the contract is
+    # insurance rather than a fix: git's own detection already gets this one right.
+    assert hashlib.sha256(bare["dashboard.png"]).hexdigest() == recorded["dashboard.png"]
+
+    # The same checkout, with the contract this repository ships.
+    governed = git_roundtrip(git, tmp_path / "governed", sources, "true", attributes)
+    for name, raw in governed.items():
+        assert hashlib.sha256(raw).hexdigest() == recorded[name], (
+            f"{name} does not match its recorded digest in a governed Windows checkout"
+        )
+    assert b"\r\n" not in governed[FROZEN_TEXT]
+
+
+def test_the_tree_gate_owns_the_checkout_contract(gate):
+    """A root file the gate does not know about is unowned, and unowned stops publication."""
+    assert ".gitattributes" in gate.ROOT_FILES
+    assert GITATTRIBUTES.is_file(), "the gate owns a file that is not committed"
