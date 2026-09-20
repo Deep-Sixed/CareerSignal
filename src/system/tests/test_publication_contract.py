@@ -1246,11 +1246,36 @@ README = ROOT / "README.md"
 FROZEN_RENDERS = "docs/ui-design/renders/"
 FRONT_PAGE_SCREENSHOT = "docs/screenshots/dashboard.png"
 PNG = b"\x89PNG\r\n\x1a\n"
-IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)")
+MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)")
+HTML_IMAGE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+ATTRIBUTE = re.compile(r"""(?P<name>[\w-]+)\s*=\s*["'](?P<value>[^"']*)["']""")
+
+# The storage path the committed capture displays in its session panel. Read off the image
+# by eye, because `verify_secrets` scans text and cannot see inside a PNG.
+DISPLAYED_DATABASE_PATH = "/home/operator/careersignal/var/private.db"
+SHA256 = re.compile(r"\b[0-9a-f]{64}\b")
+
+
+def images_in(text):
+    """Every image a README shows, in both spellings GitHub renders.
+
+    Markdown is not the only way to put a picture on a front page. GitHub renders an
+    `<img>` tag exactly as it renders `![alt](target)`, so a scan that read only the
+    Markdown form would let the design mock back onto the front page with every test still
+    green -- the claim below is about what a visitor sees, not about which syntax said it.
+
+    A tag with no `src` yields an empty target rather than being skipped, because a broken
+    image on the front page is also something worth failing on.
+    """
+    found = [match.groupdict() for match in MARKDOWN_IMAGE.finditer(text)]
+    for tag in HTML_IMAGE.finditer(text):
+        attributes = {m["name"].lower(): m["value"] for m in ATTRIBUTE.finditer(tag.group())}
+        found.append({"alt": attributes.get("alt", ""), "target": attributes.get("src", "")})
+    return found
 
 
 def readme_images():
-    found = [m.groupdict() for m in IMAGE.finditer(README.read_text(encoding="utf-8"))]
+    found = images_in(README.read_text(encoding="utf-8"))
     assert found, "the README shows no image; this guard has stopped guarding anything"
     return found
 
@@ -1266,6 +1291,25 @@ def test_the_front_page_never_shows_a_frozen_design_render():
         assert not image["target"].startswith(FROZEN_RENDERS), (
             f"the README shows a frozen design render as the product: {image['target']}"
         )
+
+
+def test_an_html_image_cannot_smuggle_the_mock_onto_the_front_page():
+    """The bypass the first version of the guard above had, pinned so it cannot come back.
+
+    `<img src="docs/ui-design/renders/dashboard.png">` renders identically to the Markdown
+    form and says the same false thing, so the scan has to see it for the guard to mean
+    what its name says.
+    """
+    smuggled = '<img src="docs/ui-design/renders/dashboard.png" alt="CareerSignal">'
+    shown = [image["target"] for image in images_in(smuggled)]
+    assert shown == [FROZEN_RENDERS + "dashboard.png"], shown
+
+    # Single quotes, other attributes, upper case and a self-closing slash are the same tag.
+    variant = images_in("<IMG width='8' src='docs/ui-design/renders/inbox.png' />")
+    assert variant[0]["target"].startswith(FROZEN_RENDERS), variant
+
+    # And widening the scan did not replace what it already read.
+    assert images_in(f"![a]({FRONT_PAGE_SCREENSHOT})")[0]["target"] == FRONT_PAGE_SCREENSHOT
 
 
 def test_the_front_page_screenshot_is_the_reviewed_capture():
@@ -1295,6 +1339,42 @@ def test_the_screenshot_directory_says_what_it_is_and_is_not():
     assert "docs/ui-design/" in notes, "it does not distinguish itself from the design baseline"
     assert "synthetic" in notes.casefold(), "it does not say the data is synthetic"
     assert "running application" in notes.casefold()
+
+
+def test_the_notes_record_what_the_capture_publishes():
+    """The inspection is bound to the bytes it was made of, not merely stored near them.
+
+    The session panel is inside the frame, so its contents are published with the image,
+    and no gate can read them: `verify_secrets` scans text and a PNG is opaque to it. The
+    first version of this test asserted only that the path appeared in the notes, which
+    proves nothing about the image -- the screenshot could be replaced with one showing a
+    real home directory, the notes left untouched, and this would still have passed. It
+    described a claim about a picture while checking a claim about a paragraph.
+
+    So the notes record the digest of the file they describe, and it is compared against
+    the committed bytes here. That is the invariant worth having:
+
+        reviewed PNG bytes  <->  the written inspection
+
+    A recapture necessarily breaks it, and the only way back to green is to write down what
+    the new image shows. The digest lives in the notes rather than in a constant here for
+    the same reason `SHA256SUMS` holds the design baseline's: the record belongs with the
+    claim it attests to, and one authority for it cannot drift from another.
+    """
+    notes = (ROOT / "docs" / "screenshots" / "README.md").read_text(encoding="utf-8")
+    recorded = SHA256.findall(notes)
+    assert len(recorded) == 1, f"the notes record {len(recorded)} digests; expected exactly 1"
+    capture = (ROOT / FRONT_PAGE_SCREENSHOT).read_bytes()
+    assert hashlib.sha256(capture).hexdigest() == recorded[0], (
+        "docs/screenshots/dashboard.png is not the image these notes were written about; "
+        "inspect the new capture and record what its session panel shows"
+    )
+
+    assert DISPLAYED_DATABASE_PATH in notes, (
+        "the notes do not record the storage path the committed capture displays"
+    )
+    # Recorded as absent, and reported by /session as a boolean, so neither can be a value.
+    assert "read token" in notes.casefold() and "compose token" in notes.casefold()
 
 
 def as_committed(path):

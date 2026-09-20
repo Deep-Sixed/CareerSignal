@@ -13,6 +13,38 @@ The companies are fictional, every address and URL uses an RFC 2606 reserved dom
 provider is the local controlled one, and both Gmail credentials read `absent` because
 neither was configured. Nothing here came from anybody's mailbox.
 
+## What the session panel publishes
+
+This section is an attestation about one exact file, and it names which:
+
+    dashboard.png  sha256  d8de93d6c3703a34447e2bc6d3c34520cf03d70f223a33582209cfe78383ad6f
+
+The digest is here rather than only in a test because it is what makes the rest of this
+section mean anything. Everything below was established by looking at the image with those
+bytes; a different capture is a different set of pixels and a claim nobody has checked. The
+test suite compares the digest recorded here against the committed file, so replacing the
+screenshot fails the gate until somebody writes down what the new one shows.
+
+The session panel is part of the frame, so whatever it displays is published with the
+image. It reads, exactly:
+
+    db             /home/operator/careersignal/var/private.db
+    sqlite         3.45.1
+    read token     absent
+    compose token  absent
+
+That path is a directory created for this capture and nothing else. It is not the home
+directory of the machine that took the screenshot, `operator` is a role rather than
+anybody's account name, and no username, hostname, mailbox address or workspace path
+appears anywhere in the frame. Both credential lines read `absent` because neither grant
+was configured -- and `/session` reports presence as a boolean, never a value, so there is
+no launch of this panel that could have published a credential.
+
+`ops/tools/verify_secrets.py` reads text and does not decode PNG pixels, so nothing
+mechanical can read a path out of a screenshot. What the digest above buys is not an
+automated privacy check -- there is no such thing here -- but the guarantee that the image
+on the front page is the one these sentences were written about.
+
 ## This is not the design baseline
 
 `docs/ui-design/` holds something different and must not be confused with it: the **frozen
