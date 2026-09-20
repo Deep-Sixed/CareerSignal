@@ -91,6 +91,7 @@ class Client:
         length=None,
         headers=(),
         body=None,
+        transmit=True,
     ):
         connection = http.client.HTTPConnection(web.LOOPBACK, self.surface.server_port, timeout=10)
         try:
@@ -111,7 +112,12 @@ class Client:
                 # `length` lets a test declare something other than the truth, which is the
                 # only way to reach the ceiling without actually sending the bytes.
                 connection.putheader("Content-Length", str(len(body) if length is None else length))
-            connection.endheaders(body)
+            # `transmit=False` sends the headers and none of the body. It is only for an
+            # address the surface refuses before reading, where the bytes would otherwise sit
+            # unread in the receive buffer -- and closing on unread bytes is a reset rather
+            # than a clean shutdown on Windows, which makes the response a race. Anywhere the
+            # server does read the body, withholding it hangs until the timeout instead.
+            connection.endheaders(body if transmit else None)
             response = connection.getresponse()
             return response.status, response.read(), dict(response.getheaders())
         finally:
@@ -1395,6 +1401,8 @@ def test_a_command_must_be_sent_as_json(client, repository, opportunity):
             origin=True,
             content_type=content_type,
             body=body,
+            # Refused on the media type alone, before a byte is read; see `transmit`.
+            transmit=False,
         )
         assert status == 400, content_type
         assert "application/json" in json.loads(payload)["error"], content_type
@@ -1423,6 +1431,8 @@ def test_an_oversized_command_is_refused_on_what_it_declares(client, repository,
         origin=True,
         content_type="application/json",
         body=padded,
+        # The point of refusing on the declaration: the oversized body never travels.
+        transmit=False,
     )
     assert status == 413
     assert str(web.MAX_BODY) in json.loads(payload)["error"]
@@ -1430,7 +1440,12 @@ def test_an_oversized_command_is_refused_on_what_it_declares(client, repository,
 
 
 def test_a_command_needs_a_length_it_can_be_held_to(client, repository, opportunity):
-    """No declared length means nothing to bound, and this surface decodes no chunked body."""
+    """No declared length means nothing to bound, and this surface decodes no chunked body.
+
+    The body is declared and never sent. The refusal is decided by the missing header alone,
+    before anything is read, so bytes on the wire would only sit unread in the receive buffer
+    -- and Windows 3.13 reset the connection over the response that proves the point.
+    """
     status, payload, _ = client.send(
         f"/api/v1/opportunities/{opportunity}/status",
         method="POST",
@@ -1438,6 +1453,7 @@ def test_a_command_needs_a_length_it_can_be_held_to(client, repository, opportun
         content_type="application/json",
         body=b'{"status": "applied", "expected_event_id": 1}',
         length="omit",
+        transmit=False,
     )
     assert status == 400 and "Content-Length" in json.loads(payload)["error"]
 
@@ -1493,6 +1509,8 @@ def test_a_command_refuses_a_query_string(client, repository, opportunity):
         origin=True,
         content_type="application/json",
         body=json.dumps({"status": "applied", "expected_event_id": event}).encode(),
+        # Refused on the address, before the body is reached.
+        transmit=False,
     )
     assert status == 400 and "Unknown parameter" in json.loads(payload)["error"]
 
@@ -2287,6 +2305,7 @@ def test_an_oversized_decision_is_refused_on_what_it_declares(addressed, reposit
         content_type="application/json",
         body=b'{"approved": false}',
         length=web.MAX_BODY + 1,
+        transmit=False,
     )
     assert status == 413
     assert str(web.MAX_BODY) in json.loads(body)["error"]
