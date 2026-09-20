@@ -13,6 +13,27 @@ The companies are fictional, every address and URL uses an RFC 2606 reserved dom
 provider is the local controlled one, and both Gmail credentials read `absent` because
 neither was configured. Nothing here came from anybody's mailbox.
 
+## What the session panel publishes
+
+The session panel is part of the frame, so whatever it displays is published with the
+image. It reads, exactly:
+
+    db             /home/operator/careersignal/var/private.db
+    sqlite         3.45.1
+    read token     absent
+    compose token  absent
+
+That path is a directory created for this capture and nothing else. It is not the home
+directory of the machine that took the screenshot, `operator` is a role rather than
+anybody's account name, and no username, hostname, mailbox address or workspace path
+appears anywhere in the frame. Both credential lines read `absent` because neither grant
+was configured -- and `/session` reports presence as a boolean, never a value, so there is
+no launch of this panel that could have published a credential.
+
+This was established by looking at the committed image. `ops/tools/verify_secrets.py`
+reads text and does not decode PNG pixels, so a path in a screenshot is not something any
+gate can catch; recording it here is what makes the claim reviewable against the file.
+
 ## This is not the design baseline
 
 `docs/ui-design/` holds something different and must not be confused with it: the **frozen
