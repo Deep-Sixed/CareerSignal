@@ -1544,9 +1544,13 @@ def test_a_windows_clone_verifies_the_frozen_baseline(tmp_path):
     setting must produce bytes that do NOT verify -- otherwise this platform is not
     reproducing the situation and the passing half proves nothing about it.
     """
+    # Required rather than skipped. These tests ship only in the source tree, which is
+    # obtained by cloning, so an environment running them without git is one that cannot
+    # have this repository in the first place. A skip here would read as a pass while
+    # proving nothing about the one platform the contract exists for -- and a green cell
+    # that silently covered nothing is worse than a red one.
     git = shutil.which("git")
-    if git is None:
-        pytest.skip("git is not installed, so no checkout behaviour can be observed")
+    assert git, "git is not on PATH, so the claim this test makes cannot be observed"
 
     baseline = ROOT / "docs" / "ui-design"
     sources = {
