@@ -1250,10 +1250,10 @@ MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)")
 HTML_IMAGE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 ATTRIBUTE = re.compile(r"""(?P<name>[\w-]+)\s*=\s*["'](?P<value>[^"']*)["']""")
 
-# The storage path the committed capture displays in its session panel, recorded here so a
-# recapture that changes it has to be looked at again. It was read off the image by eye:
-# `verify_secrets` scans text and cannot see inside a PNG.
+# The storage path the committed capture displays in its session panel. Read off the image
+# by eye, because `verify_secrets` scans text and cannot see inside a PNG.
 DISPLAYED_DATABASE_PATH = "/home/operator/careersignal/var/private.db"
+SHA256 = re.compile(r"\b[0-9a-f]{64}\b")
 
 
 def images_in(text):
@@ -1342,14 +1342,34 @@ def test_the_screenshot_directory_says_what_it_is_and_is_not():
 
 
 def test_the_notes_record_what_the_capture_publishes():
-    """The session panel is in the frame, so its contents are published with the image.
+    """The inspection is bound to the bytes it was made of, not merely stored near them.
 
-    No gate can read them: `verify_secrets` scans text and a PNG is opaque to it. What can
-    be held mechanically is that the path the capture displays is written down beside the
-    file, so replacing the image without re-checking the panel fails here rather than
-    publishing whatever the next capture happened to show.
+    The session panel is inside the frame, so its contents are published with the image,
+    and no gate can read them: `verify_secrets` scans text and a PNG is opaque to it. The
+    first version of this test asserted only that the path appeared in the notes, which
+    proves nothing about the image -- the screenshot could be replaced with one showing a
+    real home directory, the notes left untouched, and this would still have passed. It
+    described a claim about a picture while checking a claim about a paragraph.
+
+    So the notes record the digest of the file they describe, and it is compared against
+    the committed bytes here. That is the invariant worth having:
+
+        reviewed PNG bytes  <->  the written inspection
+
+    A recapture necessarily breaks it, and the only way back to green is to write down what
+    the new image shows. The digest lives in the notes rather than in a constant here for
+    the same reason `SHA256SUMS` holds the design baseline's: the record belongs with the
+    claim it attests to, and one authority for it cannot drift from another.
     """
     notes = (ROOT / "docs" / "screenshots" / "README.md").read_text(encoding="utf-8")
+    recorded = SHA256.findall(notes)
+    assert len(recorded) == 1, f"the notes record {len(recorded)} digests; expected exactly 1"
+    capture = (ROOT / FRONT_PAGE_SCREENSHOT).read_bytes()
+    assert hashlib.sha256(capture).hexdigest() == recorded[0], (
+        "docs/screenshots/dashboard.png is not the image these notes were written about; "
+        "inspect the new capture and record what its session panel shows"
+    )
+
     assert DISPLAYED_DATABASE_PATH in notes, (
         "the notes do not record the storage path the committed capture displays"
     )

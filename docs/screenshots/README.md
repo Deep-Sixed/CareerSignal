@@ -15,6 +15,16 @@ neither was configured. Nothing here came from anybody's mailbox.
 
 ## What the session panel publishes
 
+This section is an attestation about one exact file, and it names which:
+
+    dashboard.png  sha256  d8de93d6c3703a34447e2bc6d3c34520cf03d70f223a33582209cfe78383ad6f
+
+The digest is here rather than only in a test because it is what makes the rest of this
+section mean anything. Everything below was established by looking at the image with those
+bytes; a different capture is a different set of pixels and a claim nobody has checked. The
+test suite compares the digest recorded here against the committed file, so replacing the
+screenshot fails the gate until somebody writes down what the new one shows.
+
 The session panel is part of the frame, so whatever it displays is published with the
 image. It reads, exactly:
 
@@ -30,9 +40,10 @@ appears anywhere in the frame. Both credential lines read `absent` because neith
 was configured -- and `/session` reports presence as a boolean, never a value, so there is
 no launch of this panel that could have published a credential.
 
-This was established by looking at the committed image. `ops/tools/verify_secrets.py`
-reads text and does not decode PNG pixels, so a path in a screenshot is not something any
-gate can catch; recording it here is what makes the claim reviewable against the file.
+`ops/tools/verify_secrets.py` reads text and does not decode PNG pixels, so nothing
+mechanical can read a path out of a screenshot. What the digest above buys is not an
+automated privacy check -- there is no such thing here -- but the guarantee that the image
+on the front page is the one these sentences were written about.
 
 ## This is not the design baseline
 
