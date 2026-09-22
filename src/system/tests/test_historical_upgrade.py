@@ -272,7 +272,7 @@ def test_an_approval_from_before_0005_no_longer_authorizes_a_draft(era_database)
     provider = ControlledDrafts()
     actions = OutwardActions(repository, provider)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="Approval predates draft authorization binding"):
         actions.draft(APPROVED_REVIEW)
 
     assert provider.calls == 0, "a provider was contacted on an approval that cannot bind"
@@ -316,7 +316,9 @@ def test_an_intent_from_before_0007_still_bars_a_second_attempt(era_database):
         "receipt-from-before-provider-identity",
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(
+        ValueError, match="Requested provider does not match the draft intent already reserved"
+    ):
         actions.draft(ATTEMPTED_REVIEW)
 
     assert provider.calls == 0, "a second attempt reached a provider"
