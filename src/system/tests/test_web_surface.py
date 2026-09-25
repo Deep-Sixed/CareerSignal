@@ -530,6 +530,49 @@ def test_the_command_address_is_singular_rather_than_a_family_of_aliases(
     )
 
 
+def test_a_leading_empty_component_is_not_a_spelling_of_the_command_address(
+    client, repository, opportunity
+):
+    """The one alias a handler inherits rather than writes.
+
+    `BaseHTTPRequestHandler.parse_request` rewrites a leading `//...` to `/...` before any
+    handler runs, so a surface that routes `self.path` answers `//api/v1/...` at every one
+    of its addresses while believing it answers none of them -- and the test above passes
+    throughout, because every spelling it sends is one the rewrite leaves alone. This is
+    that spelling, at the address where it would matter most.
+
+    The body is withheld: the refusal is settled on the request line, so the bytes would go
+    unread, and closing on unread bytes is a reset rather than a clean shutdown on Windows.
+    What is asserted is the same either way -- the command address is reached by one
+    spelling, and the database is untouched by the others.
+    """
+    event = repository.opportunity(opportunity)["status_event"]
+    payload = json.dumps({"status": "interested", "expected_event_id": event}).encode("utf-8")
+    before = state(repository)
+    for path in (
+        f"//api/v1/opportunities/{opportunity}/status",
+        f"///api/v1/opportunities/{opportunity}/status",
+        f"////api/v1/opportunities/{opportunity}/status",
+    ):
+        status, body, headers = client.send(
+            path,
+            method="POST",
+            origin=True,
+            content_type="application/json",
+            body=payload,
+            transmit=False,
+        )
+        assert status == 405, (path, status)
+        assert json.loads(body) == {"error": "No command at this address"}
+        assert headers["Allow"] == web.READ_METHODS
+    assert state(repository) == before
+    # And the one spelling the contract names still reaches the command, so this narrowed
+    # nothing it should not have.
+    assert (
+        client.command(opportunity, {"status": "interested", "expected_event_id": event})[0] == 200
+    )
+
+
 def test_a_target_naming_its_own_authority_is_refused(client, surface, repository, opportunity):
     """Identity is settled on Host, so a target may not name an authority of its own.
 
@@ -562,9 +605,17 @@ def test_a_read_address_is_singular_too(client, repository, opportunity):
         "/api/v1/session/",
         "/api/v1//opportunities",
         f"/api/v1/opportunities/{opportunity}/sources/",
+        # A leading empty component is the spelling the stdlib rewrites before a handler
+        # sees it, which would answer every read at a second address. The page itself is
+        # here for the same reason: `//` is not `/`, and the reads are not the only thing
+        # that rewrite would have aliased.
+        "//api/v1/session",
+        "///api/v1/session",
+        "//api/v1/opportunities",
     ):
         status, _, _ = client.send(path)
         assert status == 404, path
+    assert client.send("//", token=False)[0] == 404
     assert client.send("/api/v1/session")[0] == 200
 
 

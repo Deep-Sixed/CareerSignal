@@ -46,7 +46,7 @@ import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote
 
 from communications.gmail import TOKEN_VARIABLE
 from communications.gmail_draft import COMPOSE_TOKEN_VARIABLE
@@ -214,9 +214,12 @@ def tail(path):
     reach whatever that address routes to.
 
     Empty components are kept rather than filtered out, so a doubled or trailing slash is
-    a different address than the one the contract names instead of an alias for it. Each
-    component is unquoted after the split, so a `%2F` inside an identifier stays one
-    component rather than dividing the address.
+    a different address than the one the contract names instead of an alias for it. That
+    holds for a leading one too -- `//api/v1/...` is beneath no root and reaches nothing --
+    but only because `_target` reads the request line rather than `self.path`, which the
+    stdlib has already rewritten by the time anything here is called. Each component is
+    unquoted after the split, so a `%2F` inside an identifier stays one component rather
+    than dividing the address.
     """
     if path == API_ROOT:
         return []
@@ -544,7 +547,7 @@ class Handler(BaseHTTPRequestHandler):
     # --- the boundary ---------------------------------------------------------------------
 
     def _resolve(self):
-        parsed = urlsplit(self.path)
+        path, query = self._target()
         if self.headers.get("Host") != self.server.authority:
             # A request naming any other host arrived here by having that name pointed at
             # loopback, which is the shape DNS rebinding takes. The socket is not the
@@ -553,14 +556,40 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is not None and origin != self.server.origin:
             return self._error(HTTPStatus.FORBIDDEN, "Unexpected Origin")
-        if not self._origin_form(parsed):
+        if not self._origin_form(path):
             return self._error(HTTPStatus.BAD_REQUEST, "Unsupported request target")
-        segments = tail(parsed.path)
+        segments = tail(path)
         if segments is not None:
-            return self._api(parsed, segments)
-        return self._static(parsed.path)
+            return self._api(query, segments)
+        return self._static(path)
 
-    def _origin_form(self, parsed) -> bool:
+    def _target(self):
+        """The request target as the client wrote it, split into path and query.
+
+        Not `self.path`, which is not what arrived: `BaseHTTPRequestHandler.parse_request`
+        rewrites a leading `//...` to `/...` before a handler is ever called (CPython
+        gh-87389, which keeps a client from reading a *redirect* to `//host/path` as an
+        absolute URI). That protection is reasonable and it is not this surface's to
+        inherit: taken here it makes `//api/v1/opportunities/{id}/status` a second spelling
+        of the one command address, and `tail` never gets to refuse it, because the rewrite
+        has already happened. The raw request line is still on the handler, so the address
+        this surface routes is read from there and is the address the client asked for.
+
+        Nor is it `urlsplit`, whose rules are a URI reference's rather than a request
+        target's: it reads `//api/v1/session` as the authority `api` and the path
+        `/v1/session`. In a request line that is an origin-form target -- an absolute path
+        whose first component happens to be empty -- and empty components are kept here, as
+        `tail` explains. Splitting the query off directly keeps the one parser that decides
+        what an address *is* in this file, where the rule is written down.
+        """
+        words = self.requestline.split()
+        # A request line that did not parse never reaches a handler; the fallback is for a
+        # caller that set `path` without one.
+        raw = words[1] if words[1:] else self.path
+        path, _, query = raw.partition("?")
+        return path, query
+
+    def _origin_form(self, path) -> bool:
         """A request target this surface answers: a path, carrying no scheme and no authority.
 
         A target in absolute form -- `http://127.0.0.1:8765/api/v1/...` -- names its own
@@ -568,8 +597,12 @@ class Handler(BaseHTTPRequestHandler):
         identifies the server. This surface settles identity on Host, so honouring absolute
         form would mean routing by one authority while checking another, and would give the
         single command address a second spelling. It is refused rather than half-honoured.
+
+        Origin form is exactly an absolute path, so a leading `/` is the whole test. The
+        other forms HTTP defines -- absolute, authority and asterisk -- all begin with
+        something else, and each would name a target this surface has no answer for.
         """
-        return not parsed.scheme and not parsed.netloc
+        return path.startswith("/")
 
     def _authorized(self) -> bool:
         presented = self.headers.get(TOKEN_HEADER, "")
@@ -579,7 +612,7 @@ class Handler(BaseHTTPRequestHandler):
             presented.encode("utf-8", "surrogateescape"), self.server.token.encode("utf-8")
         )
 
-    def _api(self, parsed, segments):
+    def _api(self, query, segments):
         if not self._authorized():
             return self._error(HTTPStatus.UNAUTHORIZED, "A valid launch token is required")
         try:
@@ -587,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
             # route's whole query contract is fail-closed: a parameter that disappears
             # before it is looked at is a narrowed request answered with an unnarrowed
             # list, which is the one wrong answer that looks right.
-            payload = self._projection(segments, parse_qs(parsed.query, keep_blank_values=True))
+            payload = self._projection(segments, parse_qs(query, keep_blank_values=True))
         except KeyError:
             return self._error(HTTPStatus.NOT_FOUND, "No record with that id")
         except ValueError as exc:
@@ -660,7 +693,7 @@ class Handler(BaseHTTPRequestHandler):
         required here rather than merely checked when present: a read with no Origin is an
         ordinary same-document fetch, but a write with none has nothing to say for itself.
         """
-        parsed = urlsplit(self.path)
+        path, query = self._target()
         if self.headers.get("Host") != self.server.authority:
             return self._error(HTTPStatus.FORBIDDEN, "Unexpected Host")
         if self.headers.get("Origin") != self.server.origin:
@@ -671,32 +704,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.UNAUTHORIZED, "A valid launch token is required")
         # After the provenance checks, so the ordering above is the ordering the contract
         # names: this is a question about the request line, not about who is asking.
-        if not self._origin_form(parsed):
+        if not self._origin_form(path):
             return self._error(HTTPStatus.BAD_REQUEST, "Unsupported request target")
-        match tail(parsed.path):
+        match tail(path):
             case ["opportunities", identifier, "status"]:
-                return self._record_status(identifier, parsed.query)
+                return self._record_status(identifier, query)
             case ["reviews", identifier, "decision"]:
-                return self._decide(identifier, parsed.query)
+                return self._decide(identifier, query)
             # Each outward address names the one service call it means, written out here
             # beside the other commands. A handler that took the address and worked out which
             # method it stood for would be a router with a lookup in it, and the address would
             # stop being the whole of what distinguishes these two commands.
             case ["reviews", identifier, "draft" as command]:
                 return self._outward(
-                    identifier, command, parsed.query, lambda actions: actions.draft(identifier)
+                    identifier, command, query, lambda actions: actions.draft(identifier)
                 )
             case ["reviews", identifier, "reconcile" as command]:
                 return self._outward(
-                    identifier, command, parsed.query, lambda actions: actions.reconcile(identifier)
+                    identifier, command, query, lambda actions: actions.reconcile(identifier)
                 )
             # The two intake addresses. Each names one service call, written out here beside
             # the others: there is no `/intake` that takes a source as a field, because an
             # address a request could choose is an authority a page could choose.
             case ["intake", "eml"]:
-                return self._ingest_eml(parsed.query)
+                return self._ingest_eml(query)
             case ["intake", "gmail"]:
-                return self._ingest_gmail(parsed.query)
+                return self._ingest_gmail(query)
         # Every other address reads -- including a path outside the API root, for which
         # `tail` returns None and no sequence pattern above can match. Saying so with Allow
         # rather than 404 keeps a POST from reporting which read routes exist.
