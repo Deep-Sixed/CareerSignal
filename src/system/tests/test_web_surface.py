@@ -1582,7 +1582,8 @@ def test_the_command_refuses_before_reading_the_body_in_the_order_that_matters(
     provenance in order, and must read it to find the malformed JSON, so the pair
     distinguishes "refused without reading" from "refused after reading".
 
-    It also removes the last instance of the unread-body reset race from this file.
+    Every address in this file that refuses before reading declares its body and sends
+    none, the same way. `transmit` on `Client.send` is where that is written down.
     """
     nonsense = b"{not json at all"
     address = f"/api/v1/opportunities/{opportunity}/status"
@@ -3116,6 +3117,18 @@ def test_an_outward_command_carrying_anything_is_refused(
 def test_an_outward_command_refuses_an_unknown_query_parameter(
     acting, repository, opportunity, command
 ):
+    """An unknown parameter is refused on the query, before the body is read.
+
+    The body is declared and withheld, because `_outward` settles `accepted()` on the
+    query before it reaches for `_body()`. That ordering is the thing under test: a
+    server that answered this only after reading would wait for bytes that never come,
+    so the refusal arriving at all is what proves the query was judged first.
+
+    Withholding them also keeps this off the unread-body reset race. Bytes left in the
+    receive buffer make the close a reset rather than a clean shutdown on Windows, and
+    then whether the 400 or the reset reaches the client first is a coin toss. Sending
+    none, the 400 is the only outcome, and the assertion stays exact.
+    """
     provider = Outward()
     client = acting(provider)
     review = approve(repository, opportunity)
@@ -3124,6 +3137,7 @@ def test_an_outward_command_refuses_an_unknown_query_parameter(
         "origin": True,
         "content_type": "application/json",
         "body": b"{}",
+        "transmit": False,
     }
     status, _, _ = client.send(f"/api/v1/reviews/{part(review)}/{command}?force=true", **settings)
     assert status == 400
