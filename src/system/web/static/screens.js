@@ -581,13 +581,26 @@ function opportunityDetail(record, extra, actions) {
   );
 
   const bound = record.bound;
+  /* An undecided review has no destination recorded against it, and both fields read null.
+   * Concatenated, that published the word "null" twice under a note that says approving
+   * binds this packet to the destination named here -- and beside a button that names the
+   * launch destination in its own label. So an undecided packet names that same launch
+   * destination, which the session reports and this file does not derive; a decided one
+   * keeps naming what was recorded, which is the only one of the two that binds anything.
+   * Before the session has arrived there is nothing to name, and the row says so. */
+  const target = extra.target;
+  const destination = record.action.provider
+    ? record.action.provider + " · " + record.action.provider_namespace
+    : target
+      ? target.provider + " · " + target.provider_namespace
+      : "—";
   const packetBlock = bound
     ? definitions([
         ["review", shorten(bound.review, 14)],
         ["source", bound.source ? shorten(bound.source, 18) : "—"],
         ["recipient", bound.to || "—"],
         ["subject", bound.subject || "—"],
-        ["destination", record.action.provider + " · " + record.action.provider_namespace],
+        ["destination", destination],
       ])
     : empty("No current review — nothing an approval could bind.");
   const wording = bound ? paragraphs(bound.wording, "wording") : null;

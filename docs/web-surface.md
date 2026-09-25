@@ -79,6 +79,8 @@ A request target must be a plain path. One naming its own authority — `http://
 
 Addresses are matched whole, not by prefix arithmetic. `/api/v1` is proven to be the prefix before anything beneath it is read, so a lookalike of the same length — `/abcdef/…` — reaches nothing. Empty path components are kept rather than filtered away, so a doubled or trailing slash is a different address than the one documented here rather than an alias for it.
 
+**The address routed is the one the client sent.** A leading doubled slash is the case where that has to be said, because two libraries would otherwise answer it for us. Python's `BaseHTTPRequestHandler` rewrites a leading `//…` to `/…` before a handler runs — [gh-87389](https://github.com/python/cpython/issues/87389), which stops a client reading a *redirect* to `//host/path` as an absolute URI — and `urlsplit` reads `//api/v1/session` as the authority `api` and the path `/v1/session`, since those are a URI reference's rules and not a request target's. Either one, taken at face value, would make `//api/v1/opportunities/{id}/status` a second spelling of the one command address, and the rule above would never see the spelling it refuses. So the target is read from the raw request line and split on the first `?` here, rather than accepted from `self.path` or handed to a URI parser: in a request line `//api/v1/session` is an ordinary absolute path whose first component is empty, it is beneath no root, and it reaches nothing — `404` for a read, `405` for a `POST`, exactly as the other empty-component spellings do.
+
 Every response carries:
 
 ```

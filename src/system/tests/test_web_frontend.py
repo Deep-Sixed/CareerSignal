@@ -855,3 +855,35 @@ def test_no_shipped_asset_carries_anything_that_looks_like_a_credential():
             if path.name == "screens.js" and named == TOKEN_VARIABLE:
                 continue
             assert named not in body, f"{path.name} names {named}"
+
+
+def test_the_packet_names_a_destination_rather_than_publishing_a_missing_one():
+    """Two fields that are null until a decision exists, never concatenated into the page.
+
+    `action.provider` and `action.provider_namespace` are what a *recorded* decision bound.
+    Before one exists the API reports both as null -- correctly, because nothing is bound --
+    and `null + " . " + null` is the string "null . null", published in the one pane whose
+    stated job is to say what an approval would bind, directly under a note promising the
+    destination is named there and beside a button that names it in its own label.
+
+    So the recorded pair is read only when there is a decision to read it from, and an
+    undecided packet names the launch destination the session reported instead. Neither is
+    computed here: both arrive from the server, which is the rule this file exists to keep.
+    """
+    screens = code(STATIC / "screens.js")
+    detail = region(screens, "function opportunityDetail(", "\nfunction digests(")
+    guarded = (
+        "const destination = record.action.provider\n"
+        '    ? record.action.provider + " · " + record.action.provider_namespace\n'
+        "    : target\n"
+        '      ? target.provider + " · " + target.provider_namespace\n'
+        '      : "—";'
+    )
+    assert guarded in detail, "the destination row is no longer guarded by a recorded decision"
+    assert '["destination", destination]' in detail
+    # The unguarded form, which is what published "null · null". Named here so that
+    # reintroducing it fails rather than merely looking different from the block above.
+    unguarded = '["destination", record.action.provider + '
+    assert unguarded not in screens, "the destination row reads the pair without a guard"
+    # The launch destination is the session's, not a value assembled in the browser.
+    assert "const target = extra.target;" in detail
