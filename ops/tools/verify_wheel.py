@@ -53,11 +53,10 @@ print("status history verified from the installed wheel")
 # the generated script rather than to this one: without it they would be folded into real
 # line breaks here and arrive there as an unterminated literal.
 WEB_CHECK = r"""
+import http.client
 import json
 import os
 import threading
-import urllib.error
-import urllib.request
 from importlib import resources
 
 from data.repository import Repository
@@ -89,21 +88,42 @@ threading.Thread(target=surface.serve_forever, daemon=True).start()
 
 
 def ask(path, method="GET", token=True, body=None, origin=True, media="application/json",
-        headers=()):
-    request = urllib.request.Request(surface.origin + path, method=method, data=body)
-    if token:
-        request.add_header(TOKEN_HEADER, surface.token)
-    if body is not None:
-        request.add_header("Content-Type", media)
-    for name, value in headers:
-        request.add_header(name, value)
-    if origin:
-        request.add_header("Origin", surface.origin)
+        headers=(), length=None, transmit=True):
+    '''One request, spoken to the surface rather than handed to urllib.
+
+    `urlopen` cannot declare a body and withhold it, which several checks below need. This
+    surface settles a refusal on the envelope -- provenance, media type, declared length,
+    declared source -- before a byte of the body is read, so bytes actually sent at one of
+    those addresses stay unread in the receive buffer. Closing on unread bytes is a reset
+    rather than a clean shutdown on Windows, and whether the refusal or the reset reaches
+    the client first is a race no check should be made to win.
+
+    So `transmit=False` sends the headers and none of the body, and every call below that
+    is refused before the read uses it. `length` declares something other than the truth,
+    which is the only way to reach the size ceiling without writing at it. `Client.send` in
+    src/system/tests/test_web_surface.py holds the same two controls for the same reason.
+
+    Withholding a body an address *does* read would hang until the timeout instead, so this
+    is for refusals settled before the read and nothing else.
+    '''
+    connection = http.client.HTTPConnection(*surface.server_address, timeout=30)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as refused:
-        return refused.code, refused.read()
+        connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        connection.putheader("Host", surface.authority)
+        if token:
+            connection.putheader(TOKEN_HEADER, surface.token)
+        if body is not None:
+            connection.putheader("Content-Type", media)
+            connection.putheader("Content-Length", str(len(body) if length is None else length))
+        for name, value in headers:
+            connection.putheader(name, value)
+        if origin:
+            connection.putheader("Origin", surface.origin)
+        connection.endheaders(body if transmit else None)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
 
 
 assert surface.server_address[0] == "127.0.0.1", surface.server_address
@@ -143,8 +163,10 @@ status, body = ask(address, method="POST", body=order)
 assert status == 409, (status, body)
 assert json.loads(body)["error"] == "status_conflict", body
 
-assert ask(address, method="POST", body=order, origin=False)[0] == 403
-assert ask(address, method="POST", body=order, token=False)[0] == 401
+# Declared and withheld: provenance is settled before the body is read, so these two
+# never send one. The malformed body below is sent, and has to be read to be refused.
+assert ask(address, method="POST", body=order, origin=False, transmit=False)[0] == 403
+assert ask(address, method="POST", body=order, token=False, transmit=False)[0] == 401
 assert ask(address, method="POST", body=b"{oops", origin=True)[0] == 400
 
 history = json.loads(ask("/api/v1/opportunities/" + chosen)[1])["history"]
@@ -194,8 +216,12 @@ assert ask("/api/v1/timeline")[1] == settled, "a refused decision still moved a 
 assert ask(verdict, method="POST", body=b'{"approved": true}')[0] == 400
 assert ask(verdict, method="POST", body=b'{"approved": false, "expected": {}}')[0] == 400
 assert ask(verdict, method="POST", body=b'{"approved": false, "actor": "somebody"}')[0] == 400
-assert ask(verdict, method="POST", body=b'{"approved": false}', origin=False)[0] == 403
-assert ask(verdict, method="POST", body=b'{"approved": false}', token=False)[0] == 401
+assert ask(
+    verdict, method="POST", body=b'{"approved": false}', origin=False, transmit=False
+)[0] == 403
+assert ask(
+    verdict, method="POST", body=b'{"approved": false}', token=False, transmit=False
+)[0] == 401
 assert ask("/api/v1/reviews/nope/decision", method="POST", body=b'{"approved": false}')[0] == 404
 status, body = ask(verdict, method="POST", body=b'{"approved": false}')
 assert status == 200, (status, body)
@@ -213,8 +239,12 @@ for command in ("draft", "reconcile"):
     assert json.loads(body)["outcome"] == "refused", body
     # The address carries nothing. A field is refused rather than ignored.
     assert ask(outward, method="POST", body=b'{"actor": "somebody"}')[0] == 400, command
-    assert ask(outward, method="POST", body=b"{}", origin=False)[0] == 403, command
-    assert ask(outward, method="POST", body=b"{}", token=False)[0] == 401, command
+    assert ask(
+        outward, method="POST", body=b"{}", origin=False, transmit=False
+    )[0] == 403, command
+    assert ask(
+        outward, method="POST", body=b"{}", token=False, transmit=False
+    )[0] == 401, command
     # Reading a command address is 404 rather than 405: the read router simply has no
     # such route, and these two answer POST only.
     assert ask(outward, method="GET")[0] == 404, command
@@ -284,7 +314,11 @@ for address, body, media, headers in (
     ("/api/v1/intake/eml", WHEEL_MESSAGE, RFC822, DECLARED),
     ("/api/v1/intake/gmail", b"{}", "application/json", ()),
 ):
-    status, refused = ask(address, method="POST", body=body, media=media, headers=headers)
+    # Whether this launch takes anything in at all is settled before the body is read, so
+    # both addresses declare theirs and send none.
+    status, refused = ask(
+        address, method="POST", body=body, media=media, headers=headers, transmit=False
+    )
     assert status == 409, (address, status, refused)
     assert json.loads(refused)["error"] == "intake_unavailable", refused
 assert json.loads(ask("/api/v1/communications")[1]) == [], "a refused intake still stored a message"
@@ -334,24 +368,31 @@ assert ask(
     "/api/v1/intake/eml", method="POST", body=b"Subject: nothing\r\n\r\n", media=RFC822,
     headers=DECLARED,
 )[0] == 400
-assert ask("/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822)[0] == 400
+# The last three are settled on the envelope -- a missing source, a blank one, a media type
+# this address does not accept -- so each declares its body and sends none. The unusable
+# material above is the one refusal here that the surface has to read to reach.
+assert ask(
+    "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822, transmit=False
+)[0] == 400
 assert ask(
     "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media=RFC822,
-    headers=[(NAMESPACE_HEADER, "   ")],
+    headers=[(NAMESPACE_HEADER, "   ")], transmit=False,
 )[0] == 400
 assert ask(
     "/api/v1/intake/eml", method="POST", body=WHEEL_MESSAGE, media="application/json",
-    headers=DECLARED,
+    headers=DECLARED, transmit=False,
 )[0] == 415
-# Declared rather than actually sent. The surface refuses on the declaration, before the
-# body is read, which is the property being checked -- and writing two megabytes at a server
-# that has already answered and closed would only prove which side notices first.
+# Declared rather than actually sent, for the same reason and one more: the surface refuses
+# on the declaration, which is the property being checked, and writing two megabytes at a
+# server that has already answered and closed would only prove which side notices first.
 assert ask(
     "/api/v1/intake/eml",
     method="POST",
-    body=b"x",
+    body=WHEEL_MESSAGE,
     media=RFC822,
-    headers=[*DECLARED, ("Content-Length", str(MAX_MESSAGE_BYTES + 1))],
+    headers=DECLARED,
+    length=MAX_MESSAGE_BYTES + 1,
+    transmit=False,
 )[0] == 413
 # Gmail without a read credential stays a launch-capability refusal, not a network attempt.
 assert ask("/api/v1/intake/gmail", method="POST", body=b"{}")[0] == 409
