@@ -1267,3 +1267,181 @@ def test_what_the_terminal_announces_matches_what_the_browser_is_offered(reposit
         offered = client.read("/api/v1/intake/sources")[1]
         announced = web.sources(inbound)
         assert announced == [name for name in ("eml", "gmail") if offered[name]["available"]]
+
+
+# --- the request a browser actually makes -----------------------------------------------------
+#
+# Every refusal above is asserted with `transmit=False`, which proves the surface decides before
+# it reads. It cannot prove what the page sees, because the page always sends the body: `fetch`
+# streams the file it was given whether or not anyone will read it. These send it.
+
+
+def upload(surface, declared: int, *, media: str = web.RFC822) -> socket.socket:
+    """Open a command connection and send its envelope, declaring `declared` body bytes."""
+    connection = socket.create_connection((web.LOOPBACK, surface.server_port), timeout=10)
+    connection.sendall(
+        (
+            "POST /api/v1/intake/eml HTTP/1.1\r\n"
+            f"Host: {surface.authority}\r\n"
+            f"Origin: {surface.origin}\r\n"
+            f"{web.TOKEN_HEADER}: {surface.token}\r\n"
+            f"Content-Type: {media}\r\n"
+            f"{web.NAMESPACE_HEADER}: {NAMESPACE}\r\n"
+            f"Content-Length: {declared}\r\n"
+            "\r\n"
+        ).encode("ascii")
+    )
+    return connection
+
+
+def answer(connection: socket.socket) -> tuple[int, dict]:
+    """Read exactly one response -- headers, then the length they declare -- and no further."""
+    received = b""
+    while b"\r\n\r\n" not in received:
+        chunk = connection.recv(65536)
+        assert chunk, "the connection ended before a response arrived"
+        received += chunk
+    head, _, payload = received.partition(b"\r\n\r\n")
+    lines = head.decode("iso-8859-1").split("\r\n")
+    fields = dict(line.split(": ", 1) for line in lines[1:])
+    length = int(fields["Content-Length"])
+    while len(payload) < length:
+        chunk = connection.recv(65536)
+        assert chunk, "the connection ended inside the response"
+        payload += chunk
+    return int(lines[0].split(" ")[1]), json.loads(payload[:length])
+
+
+@pytest.mark.parametrize(
+    "settings, expected",
+    [
+        ({"raw": b"x" * (MAX_MESSAGE_BYTES + 1)}, 413),
+        ({"raw": eml(), "content_type": "text/plain"}, 415),
+        ({"raw": eml(), "namespace": None}, 400),
+    ],
+    ids=["over the ceiling", "not a message", "no declared source"],
+)
+def test_a_refusal_reaches_a_client_that_sends_the_whole_body(
+    client, repository, settings, expected
+):
+    """The page's request, and the reason it is refused -- not a network failure instead.
+
+    Repeated because the defect this guards against was a race: a reset overtook the refusal
+    in a minority of attempts on Linux and can discard it outright on Windows. One green
+    attempt would not have distinguished the fixed surface from the unfixed one.
+    """
+    before = stored(repository)
+    for _ in range(5):
+        status, body = client.eml(**settings)
+        assert status == expected, body
+        assert "error" in body
+    assert stored(repository) == before
+
+
+def test_a_refusal_ends_the_connection_cleanly_while_the_upload_is_still_arriving(client):
+    """Deterministic, where the test above is statistical.
+
+    Half the upload is sent, the refusal is read, and then the other half follows -- exactly
+    what a browser does, since it cannot know the answer was decided on the envelope. A
+    surface that closed on the unread half would reset: the second half would fail to send,
+    or the final read would raise ECONNRESET. The surface must instead end its answer at once,
+    take the rest in, discard it, and close in order.
+    """
+    declared = MAX_MESSAGE_BYTES + 1
+    first = declared // 2
+    connection = upload(client.surface, declared)
+    try:
+        connection.sendall(b"x" * first)
+        status, body = answer(connection)
+        assert status == 413, body
+        assert str(MAX_MESSAGE_BYTES) in body["error"]
+        # The end of the answer arrives while half the upload is still unsent, well inside the
+        # drain's five seconds: the surface shut its own send side rather than holding it open
+        # until the client was done. A client reading to end-of-stream is not kept waiting.
+        connection.settimeout(1.0)
+        assert connection.recv(1) == b"", "the answer was not followed by an orderly end of it"
+        connection.settimeout(10)
+        connection.sendall(b"x" * (declared - first))
+        connection.shutdown(socket.SHUT_WR)
+        assert connection.recv(1) == b"", "the connection did not end in an orderly close"
+    finally:
+        connection.close()
+
+
+def test_the_drain_lets_go_of_a_client_that_never_sends_what_it_declared(client, monkeypatch):
+    """A declaration is not a promise the surface waits on forever.
+
+    The client declares an oversized body, reads its refusal, and then neither sends nor
+    closes. The handler must still finish, inside the drain's time bound, rather than hold a
+    thread for as long as the client cares to keep the socket open.
+    """
+    monkeypatch.setattr(web, "DRAIN_SECONDS", 0.3)
+    finished = threading.Event()
+    original = web.Handler.finish
+
+    def finish(self):
+        finished.set()
+        return original(self)
+
+    monkeypatch.setattr(web.Handler, "finish", finish)
+    connection = upload(client.surface, MAX_MESSAGE_BYTES + 1)
+    try:
+        status, _ = answer(connection)
+        assert status == 413
+        assert finished.wait(timeout=5), "the handler was still waiting on a silent client"
+    finally:
+        connection.close()
+
+
+# --- a Gmail bound that can never be met ------------------------------------------------------
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.0], ids=["zero", "negative", "bool", "float"])
+def test_a_limit_that_can_never_be_met_is_the_callers_error_and_contacts_nothing(repository, limit):
+    """Refused before the identity read, and as the caller's own mistake.
+
+    Inside `ingest_gmail`'s try, every failure is declared `SourceUnreadable` -- a claim that
+    the provider side failed. A zero limit is not that, and reporting it as "the mailbox could
+    not be read" sent an operator to look at their credential for a typo in their command.
+    """
+    mailbox = Mailbox({"aaaa1111": eml()})
+    actions = service(repository, reader=reading(mailbox))
+    before = stored(repository)
+    with pytest.raises(ValueError, match="positive result limit"):
+        actions.ingest_gmail(limit=limit)
+    assert mailbox.asked == [], "the mailbox was contacted for a request that could never run"
+    assert stored(repository) == before
+
+
+def test_gmail_ingest_refuses_a_limit_before_gmail_or_the_database_is_touched(
+    tmp_path, monkeypatch, capsys
+):
+    mailbox = Mailbox({"aaaa1111": eml()})
+    monkeypatch.setenv("CAREERSIGNAL_GMAIL_TOKEN", "synthetic-read-token")
+    monkeypatch.setattr(
+        "system.cli.GmailReader", lambda credentials: GmailReader(credentials, mailbox)
+    )
+    path = tmp_path / "never.db"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "careersignal",
+            "gmail-ingest",
+            "--db",
+            str(path),
+            "--mailbox",
+            MAILBOX,
+            "--skill",
+            "python",
+            "--limit",
+            "0",
+        ],
+    )
+    from system import cli
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == 2
+    assert "positive --limit" in capsys.readouterr().err
+    assert mailbox.asked == []
+    assert not path.exists()

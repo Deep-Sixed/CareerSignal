@@ -479,6 +479,10 @@ def main():
             parser.error(f"gmail-ingest requires {TOKEN_VARIABLE} in the environment")
         if not args.mailbox or not args.skill:
             parser.error("gmail-ingest requires --mailbox and at least one --skill")
+        # Refused here, before the identity read below contacts Gmail: a bound that can never
+        # be satisfied is the operator's mistake, and it should not cost a credential to learn.
+        if args.limit < 1:
+            parser.error("gmail-ingest requires a positive --limit")
         reader = GmailReader(GmailCredentials(token, args.mailbox))
         # reader.identifiers()/fetch()/messages() already refuse to run against an
         # unverified or mismatched mailbox identity on their own, and IntakeActions verifies
