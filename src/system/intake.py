@@ -151,8 +151,13 @@ class IntakeActions:
             )
         # Shaped before the try, so a caller's own bad argument stays a caller's error. Inside
         # it, everything becomes `SourceUnreadable`, which is a claim about the provider side
-        # that a TypeError raised here would not support.
+        # that a TypeError raised here would not support. The limit is checked here for the
+        # same reason and against the same rule the reader applies: left to the reader, a
+        # zero would be reported as a mailbox that could not be read, after the identity read
+        # had already spent the credential on a request that was never going to run.
         label_ids = tuple(label_ids)
+        if type(limit) is not int or limit < 1:
+            raise ValueError("A positive result limit is required")
         try:
             namespace = self.gmail_reader.verify_identity()
             messages = self.gmail_reader.messages(query=query, label_ids=label_ids, limit=limit)

@@ -43,6 +43,8 @@ computed at the edge is how a list and a detail pane start disagreeing.
 import json
 import os
 import secrets
+import socket
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -136,6 +138,16 @@ MAX_BODY = 16 * 1024
 # rather than restated: it is what `Message` itself enforces, and a second number here could
 # only ever disagree with the one that counts.
 RFC822 = "message/rfc822"
+# What a refusal leaves behind. Every refusal above is decided on the envelope, before a byte
+# of the body is read -- but a browser sends the body anyway, and closing a socket with bytes
+# still unread in it is a reset rather than a clean shutdown. A reset can reach the client
+# before the refusal does, so the operator who chose a 3 MB file would see "Failed to fetch"
+# instead of the ceiling that refused it. So once the answer is written, whatever the client is
+# still sending is read and thrown away, up to this many bytes and for at most this long, and
+# only then is the socket closed. Both bounds exist so a request cannot hold a thread by
+# declaring a length it never sends, or by sending one it never finishes.
+DRAIN_LIMIT = 16 * 1024 * 1024
+DRAIN_SECONDS = 5.0
 # Operator-declared provenance for a local file, carried as a header because the body is the
 # message itself and has no room for a field. It is a declaration and not evidence -- unlike a
 # Gmail namespace, which the reader proves against the credential before anything is admitted.
@@ -501,6 +513,9 @@ class Handler(BaseHTTPRequestHandler):
 
     server_version = "CareerSignal"
     sys_version = ""
+    # How much of the declared body has been read. Only `_body()` and `_material()` read one,
+    # and a refusal made before either leaves this at zero -- which is what `_settle()` drains.
+    consumed = 0
 
     def log_message(self, format, *args):
         """Write nothing.
@@ -1008,6 +1023,7 @@ class Handler(BaseHTTPRequestHandler):
         if length > limit:
             raise Oversized(f"A message may not exceed {limit} bytes")
         raw = self.rfile.read(length)
+        self.consumed = len(raw)
         if len(raw) != length:
             raise ValueError("The request body was shorter than its declared length")
         return raw
@@ -1025,8 +1041,10 @@ class Handler(BaseHTTPRequestHandler):
         length = int(declared)
         if length > MAX_BODY:
             raise Oversized(f"A command may not exceed {MAX_BODY} bytes")
+        raw = self.rfile.read(length)
+        self.consumed = len(raw)
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"The request body is not valid JSON: {exc}") from exc
 
@@ -1105,6 +1123,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(payload)
+        self._settle()
+
+    def _settle(self):
+        """Finish the answer, then read and discard whatever the client is still sending.
+
+        Nothing here changes what was decided or when: the response is already written, and
+        these bytes are never parsed, stored or kept. What changes is how the connection ends.
+        Closing with unread bytes is a reset, and a reset can overtake the response -- on
+        Windows it discards a response the client has not read yet -- so a refusal made
+        without reading would reach the operator as a network failure instead of a reason.
+
+        The send side is shut first, so the client sees the whole answer and an orderly end
+        of it while the rest of its upload is still arriving. The drain is bounded in bytes and
+        in time (`DRAIN_LIMIT`, `DRAIN_SECONDS`); past either, the socket closes regardless,
+        because no refusal is worth holding a thread for a client that will not stop.
+        """
+        declared = self.headers.get("Content-Length", "")
+        if not (declared.isascii() and declared.isdigit()):
+            return
+        remaining = min(int(declared) - self.consumed, DRAIN_LIMIT)
+        if remaining <= 0:
+            return
+        deadline = time.monotonic() + DRAIN_SECONDS
+        # `self.request` is the client's socket, under the name socketserver gives it. The
+        # handler's other alias for it shares a name with a database handle, which this
+        # package is mechanically forbidden to reach, and a guard that reads names should not
+        # have to be taught that two things called the same are different.
+        client = self.request
+        try:
+            self.wfile.flush()
+            client.shutdown(socket.SHUT_WR)
+            while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                client.settimeout(left)
+                chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # A timeout, or a client already gone. Either way there is nothing left to wait
+            # for, and the answer was written before any of this began.
+            pass
 
 
 class Surface(ThreadingHTTPServer):
