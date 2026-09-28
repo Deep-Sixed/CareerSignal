@@ -886,6 +886,9 @@ const INTAKE_COPY = {
     "Gmail intake is not configured for this launch. It needs a read credential in " +
     "CAREERSIGNAL_GMAIL_TOKEN and a --mailbox; the compose credential that creates drafts is " +
     "a different grant and does not enable it.",
+  gmailMalformed:
+    "Gmail intake is off: the read credential supplied at launch is malformed. Fix " +
+    "CAREERSIGNAL_GMAIL_TOKEN or --mailbox and restart CareerSignal.",
   profileLabel: "Scored against",
   profileNote:
     "Launch configuration. It cannot be changed from this page, and no message can change it.",
@@ -1013,6 +1016,25 @@ function intakeReport(report) {
   return block;
 }
 
+function gmailOff(gmail) {
+  /* Never configured and configured wrongly are different facts, and only the second is an
+   * error. The detail is the credential's own reason, which never repeats the token, and it
+   * is placed as text like every other value on this page.
+   */
+  const holder = put(
+    el("div", "intake-source"),
+    el("h4", "intake-source-title", INTAKE_COPY.gmailTitle),
+  );
+  if (!gmail.error) {
+    return put(holder, el("p", "intake-note", INTAKE_COPY.gmailAbsent));
+  }
+  return put(
+    holder,
+    el("p", "intake-note", INTAKE_COPY.gmailMalformed),
+    el("p", "intake-note", `${gmail.error}: ${gmail.detail}`),
+  );
+}
+
 export function intakeSection(state, actions) {
   /* Offered only where it can operate.
    *
@@ -1041,13 +1063,7 @@ export function intakeSection(state, actions) {
   );
   put(
     holder,
-    state.sources.gmail.available
-      ? gmailControls(state, actions)
-      : put(
-          el("div", "intake-source"),
-          el("h4", "intake-source-title", INTAKE_COPY.gmailTitle),
-          el("p", "intake-note", INTAKE_COPY.gmailAbsent),
-        ),
+    state.sources.gmail.available ? gmailControls(state, actions) : gmailOff(state.sources.gmail),
   );
   if (state.intake) {
     put(holder, intakeReport(state.intake));

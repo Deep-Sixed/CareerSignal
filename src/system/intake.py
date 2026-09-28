@@ -33,6 +33,11 @@ from system.workflow import Intake
 # the one surface where a single button press could otherwise become a mailbox walk.
 DEFAULT_GMAIL_BATCH = 25
 
+# Why Gmail intake is off when a read credential was supplied and could not be used. Stable,
+# so a page or a script can tell "never configured" from "configured wrongly" without
+# parsing a sentence.
+CREDENTIAL_MALFORMED = "credential_malformed"
+
 
 class IntakeUnavailable(RuntimeError):
     """This launch was not configured with the authority the request needs.
@@ -68,11 +73,23 @@ class IntakeActions:
     Local `.eml` intake needs no credential at all, so a launch can legitimately have one
     source and not the other -- and the compose credential that creates drafts is a
     different grant entirely, which this service never sees.
+
+    `gmail_unusable` is the other half of that answer: a read credential was supplied at
+    launch and could not even be constructed -- a stray newline in the token, a blank
+    mailbox. The launch still starts, because local intake and every decision are
+    unaffected, but it carries the credential's own reason so the operator is told what is
+    wrong instead of seeing Gmail intake silently missing. The reason is the credential
+    class's message, which never repeats the value it refused.
     """
 
-    def __init__(self, repository: Repository, profile: Profile, gmail_reader=None):
+    def __init__(
+        self, repository: Repository, profile: Profile, gmail_reader=None, gmail_unusable=None
+    ):
+        if gmail_reader is not None and gmail_unusable is not None:
+            raise ValueError("A launch either holds a Gmail reader or reports why it cannot")
         self.repository, self.profile = repository, profile
         self.gmail_reader = gmail_reader
+        self.gmail_unusable = gmail_unusable
         # The existing composition, unchanged. Everything this service does to a message it
         # does by handing it here.
         self._intake = Intake(repository, profile)
@@ -92,6 +109,9 @@ class IntakeActions:
         gmail = {"available": self.gmail_reader is not None}
         if self.gmail_reader is not None:
             gmail["namespace"] = self.gmail_reader.namespace
+        elif self.gmail_unusable is not None:
+            gmail["error"] = CREDENTIAL_MALFORMED
+            gmail["detail"] = self.gmail_unusable
         return {
             "eml": {"available": True},
             "gmail": gmail,
@@ -145,14 +165,24 @@ class IntakeActions:
         adapter raised. The caller therefore knows, without inspecting anything, that the
         provider side failed and that nothing local was written.
         """
+        if self.gmail_unusable is not None:
+            raise IntakeUnavailable(
+                "the Gmail read credential supplied at launch is malformed, so no mailbox was "
+                f"contacted: {self.gmail_unusable}"
+            )
         if self.gmail_reader is None:
             raise IntakeUnavailable(
                 "this launch has no Gmail read credential, so no mailbox was contacted"
             )
         # Shaped before the try, so a caller's own bad argument stays a caller's error. Inside
         # it, everything becomes `SourceUnreadable`, which is a claim about the provider side
-        # that a TypeError raised here would not support.
+        # that a TypeError raised here would not support. The limit is checked here for the
+        # same reason and against the same rule the reader applies: left to the reader, a
+        # zero would be reported as a mailbox that could not be read, after the identity read
+        # had already spent the credential on a request that was never going to run.
         label_ids = tuple(label_ids)
+        if type(limit) is not int or limit < 1:
+            raise ValueError("A positive result limit is required")
         try:
             namespace = self.gmail_reader.verify_identity()
             messages = self.gmail_reader.messages(query=query, label_ids=label_ids, limit=limit)
