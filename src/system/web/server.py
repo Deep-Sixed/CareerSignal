@@ -1284,6 +1284,12 @@ def serve(
         if inbound
         else "This launch takes nothing in; intake needs at least one --skill"
     )
+    # A credential that was supplied and could not be used is an error the operator made, not
+    # an absence they chose, so it is named here rather than left for a missing button to
+    # imply. The launch continues: nothing else depends on it.
+    unusable = inbound.available()["gmail"] if inbound else {}
+    if "error" in unusable:
+        announce(f"Error ({unusable['error']}): Gmail intake is off. {unusable['detail']}")
     announce(f"Open {surface.launch_url}")
     announce("This address is valid for this process only. Stop with Ctrl-C.")
     with surface:

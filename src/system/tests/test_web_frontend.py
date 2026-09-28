@@ -762,6 +762,23 @@ def test_an_unavailable_gmail_source_is_explained_rather_than_offered():
     assert "different grant" in absent
 
 
+def test_a_malformed_gmail_credential_is_shown_as_an_error_rather_than_as_absence():
+    """Configured wrongly is not the same fact as never configured, and the page says which."""
+    screens = code(STATIC / "screens.js")
+    copy = region(screens, "const INTAKE_COPY = {", "\n};")
+    malformed = region(copy, "gmailMalformed:", "profileLabel:")
+    assert "CAREERSIGNAL_GMAIL_TOKEN" in malformed and "restart" in malformed
+    off = region(screens, "function gmailOff(", "\nexport function intakeSection(")
+    assert "gmail.detail" in off and "gmailMalformed" in off
+    # The branch itself, not only the names in it: without this the page can ignore the
+    # error and show "not configured", and every string above is still present.
+    assert "if (!gmail.error)" in off
+    assert "gmailAbsent" in off
+    assert "innerHTML" not in off
+    section = region(screens, "export function intakeSection(", "\nfunction filtered(")
+    assert "gmailOff(state.sources.gmail)" in section
+
+
 @pytest.mark.parametrize("command", ["importEml", "importGmail"])
 def test_the_browser_re_reads_after_taking_material_in(command):
     """New evidence moves more than a decision does, so more is re-read.

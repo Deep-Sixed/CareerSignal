@@ -359,6 +359,14 @@ With no launch profile:
 {"eml": {"available": false}, "gmail": {"available": false}, "profile": null}
 ```
 
+With a read credential that was supplied but could not be constructed — a stray newline in `CAREERSIGNAL_GMAIL_TOKEN`, a blank `--mailbox` — the launch still starts, and says why Gmail is off:
+
+```json
+{"available": false, "error": "credential_malformed", "detail": "Access token must be visible ASCII with no spaces or control characters; check for a stray newline. The supplied value is not repeated here."}
+```
+
+That is the `gmail` member only; `eml` and `profile` are unaffected. `serve` prints the same code and reason as an `Error (credential_malformed)` line at startup, and the Inbox shows it where the Gmail control would be. `detail` is the credential class's own message, which never repeats the value it refused.
+
 `namespace` appears only where there is a reader to name one. No token, no token length, no fragment of a token and no credential scope detail appears here, and `gmail.available` means *configured for this launch* — not that Google has just been asked.
 
 ### `POST /api/v1/intake/eml`
@@ -446,7 +454,7 @@ New material can legitimately change what a later action sees: a further source 
 | malformed command, wrong field type, unknown field, bad `limit`, blank or missing namespace, unparseable MIME | `400` |
 | bad/missing launch token | `401` |
 | bad/missing `Origin` | `403` |
-| no launch profile, or Gmail requested without a read credential | `409` `intake_unavailable` |
+| no launch profile, or Gmail requested without a usable read credential | `409` `intake_unavailable` |
 | body larger than the ceiling | `413` |
 | the EML route sent anything but `message/rfc822` | `415` |
 | the mailbox could not be read | `502` `source_unreadable` |

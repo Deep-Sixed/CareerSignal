@@ -168,7 +168,17 @@ def _intake_service(repository, args, reader=None):
     """
     if not args.skill:
         return None
-    return IntakeActions(repository, _intake_profile(args), reader or _gmail_reader(args))
+    if reader is not None:
+        return IntakeActions(repository, _intake_profile(args), reader)
+    # A read credential that cannot even be constructed does not stop the launch: local intake
+    # and every decision are unaffected, so refusing to start would withhold the safe half of
+    # the workflow over the half that needs Gmail. The credential's reason travels with the
+    # service instead, and the operator is told at startup and by the Gmail command itself.
+    try:
+        reader = _gmail_reader(args)
+    except ValueError as refused:
+        return IntakeActions(repository, _intake_profile(args), gmail_unusable=str(refused))
+    return IntakeActions(repository, _intake_profile(args), reader)
 
 
 def _declared_identity(args, parser):

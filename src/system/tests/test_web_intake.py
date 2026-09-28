@@ -30,7 +30,7 @@ from communications.message import MAX_MESSAGE_BYTES, Message
 from data import store
 from data.repository import Repository
 from recruiting.models import Profile
-from system.intake import IntakeActions
+from system.intake import CREDENTIAL_MALFORMED, IntakeActions, IntakeUnavailable
 from system.web import server as web
 
 MAILBOX = "operator@example.com"
@@ -1217,6 +1217,141 @@ def test_serve_with_a_read_token_and_a_mailbox_has_gmail_intake(monkeypatch, cap
     # Drafting is a separate authority and this launch does not have it.
     assert served[0]["actions"] is not None  # the controlled provider is local
     capsys.readouterr()
+
+
+# --- a read credential that was supplied and cannot be used -------------------------------------
+
+# Each of these fails at construction, before anything is contacted. None may stop a launch.
+MALFORMED = [
+    pytest.param("synthetic read token", MAILBOX, id="space-in-token"),
+    pytest.param("synthetic-read-token\n", MAILBOX, id="trailing-newline"),
+    pytest.param("synthetic-read-token", "   ", id="blank-mailbox"),
+]
+
+
+def unusable(repository, reason="a synthetic reason") -> IntakeActions:
+    return IntakeActions(repository, Profile(SKILLS, ("remote",)), gmail_unusable=reason)
+
+
+def launched(monkeypatch, tmp_path, command, token, mailbox, *extra):
+    """Run one command the way an operator would, with this read credential in the environment."""
+    monkeypatch.setenv("CAREERSIGNAL_GMAIL_TOKEN", token)
+    monkeypatch.delenv(COMPOSE_TOKEN_VARIABLE, raising=False)
+    served = []
+    monkeypatch.setattr("system.cli.serve", lambda repository, **kwargs: served.append(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["careersignal", command, "--db", str(tmp_path / "db"), "--skill", "python"]
+        + ["--mailbox", mailbox, *extra],
+    )
+    from system import cli
+
+    cli.main()
+    return served
+
+
+@pytest.mark.parametrize(("token", "mailbox"), MALFORMED)
+def test_serve_starts_with_a_malformed_read_credential_and_says_why(
+    monkeypatch, capsys, tmp_path, token, mailbox
+):
+    """The operator's decision: start, and report the credential as an error once running.
+
+    Local intake and every decision are unaffected by a Gmail token, so refusing to start
+    would withhold all of them over the one source that needs it. What must not happen
+    instead is Gmail intake going quietly missing, which reads as "not configured" to an
+    operator who did configure it.
+    """
+    served = launched(monkeypatch, tmp_path, "serve", token, mailbox)
+    with pytest.raises(ValueError) as construction:
+        GmailCredentials(token, mailbox)
+    inbound = served[0]["inbound"]
+    assert inbound.available() == {
+        "eml": {"available": True},
+        "gmail": {
+            "available": False,
+            "error": CREDENTIAL_MALFORMED,
+            "detail": str(construction.value),
+        },
+        "profile": {"skills": ["python"], "locations": ["remote"]},
+    }
+    assert "synthetic" not in json.dumps(inbound.available()), "the token reached discovery"
+    with pytest.raises(IntakeUnavailable, match="malformed") as refused:
+        inbound.ingest_gmail()
+    assert "synthetic" not in str(refused.value)
+    # Drafting is a separate authority, and a bad read token takes nothing from it.
+    assert served[0]["actions"] is not None
+    capsys.readouterr()
+
+
+def test_a_local_message_is_taken_in_whatever_the_read_credential_says(
+    monkeypatch, capsys, tmp_path
+):
+    """`ingest` needs no Gmail grant, so a malformed one in the environment cannot stop it."""
+    path = tmp_path / "alert.eml"
+    path.write_bytes(eml())
+    launched(
+        monkeypatch,
+        tmp_path,
+        "ingest",
+        "synthetic read token",
+        MAILBOX,
+        "--message",
+        str(path),
+        "--namespace",
+        NAMESPACE,
+    )
+    assert json.loads(capsys.readouterr().out)["reviews"]
+
+
+def test_the_surface_reports_a_malformed_read_credential_and_keeps_everything_else(
+    launch, repository
+):
+    """Discovery carries the code and reason; the Gmail command refuses with them; EML works."""
+    client = launch(unusable(repository))
+    status, sources = client.read("/api/v1/intake/sources")
+    assert status == 200
+    assert sources["gmail"] == {
+        "available": False,
+        "error": CREDENTIAL_MALFORMED,
+        "detail": "a synthetic reason",
+    }
+    assert sources["eml"] == {"available": True}
+    before = stored(repository)
+    status, body = client.gmail()
+    assert status == 409, body
+    assert body["error"] == "intake_unavailable"
+    assert "malformed" in body["detail"] and "a synthetic reason" in body["detail"]
+    assert stored(repository) == before
+    assert client.eml(eml())[0] == 200
+
+
+def test_serve_names_a_malformed_read_credential_as_an_error_once_it_is_running(
+    repository, monkeypatch
+):
+    """Said at startup, as an error, and only when there is one to say."""
+    monkeypatch.setattr(
+        web.Surface, "serve_forever", lambda self: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    said = []
+    web.serve(repository, port=0, inbound=unusable(repository), announce=said.append)
+    assert [line for line in said if line.startswith("Error")] == [
+        f"Error ({CREDENTIAL_MALFORMED}): Gmail intake is off. a synthetic reason"
+    ]
+    assert [line for line in said if line.startswith("Open ")], "the launch did not start"
+    # Not configuring Gmail is a choice rather than a mistake, and is not reported as one.
+    said.clear()
+    web.serve(repository, port=0, inbound=service(repository), announce=said.append)
+    assert not [line for line in said if line.startswith("Error")]
+
+
+def test_a_service_cannot_hold_a_reader_and_report_it_unusable(repository):
+    with pytest.raises(ValueError, match="either"):
+        IntakeActions(
+            repository,
+            Profile(SKILLS, ("remote",)),
+            reading(Mailbox({})),
+            gmail_unusable="a synthetic reason",
+        )
 
 
 def test_a_compose_credential_alone_gives_no_intake_authority(monkeypatch, capsys, tmp_path):
